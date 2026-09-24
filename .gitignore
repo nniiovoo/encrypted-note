@@ -19,3 +19,6 @@ agentdb.rvf.lock
 
 # planning docs (PRD, task files) stay on this computer
 .scratch/
+
+# macOS metadata sidecars on exFAT/FAT drives (e.g. a portable disk)
+._*
