@@ -45,7 +45,7 @@ For experiments, debug builds read `ENOTE_DEV_DATA_DIR=/some/folder` so your rea
 ## Tested so far
 
 - **Automated:** 320 tests, including tamper tests over every byte of a Vault file and the RFC 9106 and XChaCha20-Poly1305 reference vectors.
-- **By hand on macOS 26:** the main flows, clipboard privacy markers, the Sharing Guard with real apps, and a Backup read back by the Emergency Reader.
+- **By hand on macOS 26:** the main flows, clipboard privacy markers, the Sharing Guard with real apps, and a Backup read back by the Emergency Reader. Screen-capture results so far: [docs/capture-test.md](docs/capture-test.md).
 - **Windows:** the adapters compile but have **not yet been run on a real Windows PC**.
 
 ## Credits

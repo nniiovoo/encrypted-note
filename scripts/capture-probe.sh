@@ -14,6 +14,17 @@ EOF
 # Must be on screen: screencapture also refuses windows on another Space, which would be a false pass.
 [ -n "$id" ] || { echo "encrypted-note isn't open on this screen. Bring its window to this desktop and retry."; exit 2; }
 
+# Control: without Screen Recording permission screencapture fails for EVERY window, which
+# would look like a pass. Prove we can capture the display at all first.
+control=$(mktemp -t enote-control).png
+if ! screencapture -x -m "$control" 2>/dev/null || [ ! -s "$control" ]; then
+  /bin/rm -f "$control"
+  echo "CAN'T TEST: this terminal has no Screen Recording permission."
+  echo "Allow it in System Settings > Privacy & Security > Screen & System Audio Recording, then retry."
+  exit 2
+fi
+/bin/rm -f "$control"
+
 out=$(mktemp -t enote-probe).png
 if ! screencapture -x -o -l "$id" "$out" 2>/dev/null || [ ! -s "$out" ]; then
   echo "PASS: macOS refused to capture window $id."
