@@ -1,0 +1,13 @@
+[package]
+name = "guard"
+version = "0.1.0"
+description = "Sharing Guard: which running apps are known screen-sharing/recording apps, and when the shield is up."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

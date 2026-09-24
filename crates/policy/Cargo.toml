@@ -1,0 +1,17 @@
+[package]
+name = "policy"
+version = "0.1.0"
+description = "Master Password policy: strength gate and 6-word passphrase suggestions (EFF long word list)."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+zxcvbn.workspace = true
+zeroize.workspace = true
+unicode-normalization.workspace = true
+getrandom.workspace = true
+
+[lints]
+workspace = true

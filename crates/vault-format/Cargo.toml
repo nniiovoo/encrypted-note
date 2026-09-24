@@ -1,0 +1,26 @@
+[package]
+name = "vault-format"
+version = "0.1.0"
+description = "Vault crypto and file format: key derivation, key slots, authenticated header, sealed body (ADR-0004, ADR-0005, FORMAT.md)."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+# Tiny Argon2 parameters for fast tests in *other* crates. Never enable in the app or the Emergency Reader.
+insecure-test-params = []
+
+[dependencies]
+argon2.workspace = true
+# `zeroize`: wipe the cipher's copy of each key (and the ChaCha20 state) on drop.
+chacha20poly1305 = { workspace = true, features = ["zeroize"] }
+zeroize.workspace = true
+secrecy.workspace = true
+getrandom.workspace = true
+unicode-normalization.workspace = true
+# `zeroize`: wipe the hasher that sees the Recovery Key bytes (checksum) on drop.
+sha2 = { workspace = true, features = ["zeroize"] }
+
+[lints]
+workspace = true

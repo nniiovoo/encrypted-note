@@ -1,0 +1,17 @@
+[package]
+name = "store"
+version = "0.1.0"
+description = "Vault store: data folder, crash-safe saves, Safety Copies, single-instance lock, Backups, settings file, cloud-folder detection."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+getrandom.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

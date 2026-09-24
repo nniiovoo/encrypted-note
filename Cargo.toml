@@ -1,0 +1,67 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/vault-format",
+    "crates/notes",
+    "crates/session",
+    "crates/policy",
+    "crates/guard",
+    "crates/store",
+    "crates/reader",
+    "src-tauri",
+]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.89"
+license = "MIT"
+publish = false
+
+# Every dependency is pinned to an exact version (AGENTS.md, ADR-0003).
+[workspace.dependencies]
+argon2 = { version = "=0.6.0", features = ["zeroize", "parallel"] }
+chacha20poly1305 = "=0.11.0"
+zeroize = "=1.9.0"
+secrecy = "=0.10.3"
+getrandom = "=0.4.3"
+unicode-normalization = "=0.1.25"
+sha2 = "=0.11.0"
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+bip39 = { version = "=3.0.0", default-features = false, features = ["std"] }
+zxcvbn = { version = "=3.1.1", default-features = false }
+rpassword = "=7.5.4"
+tempfile = "=3.27.0"
+
+vault-format = { path = "crates/vault-format" }
+notes = { path = "crates/notes" }
+session = { path = "crates/session" }
+policy = { path = "crates/policy" }
+guard = { path = "crates/guard" }
+store = { path = "crates/store" }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+dbg_macro = "deny"
+print_stdout = "deny"
+todo = "warn"
+
+# Debug builds: keep Argon2 fast (unlock and tests would otherwise take many seconds at
+# 512 MiB) and keep debug info small (the disk is tight).
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
+[profile.dev.package.argon2]
+opt-level = 3
+
+# Argon2's generic code is compiled inside the crate that calls it.
+[profile.dev.package.vault-format]
+opt-level = 3
+
+[profile.dev.package.blake2]
+opt-level = 3

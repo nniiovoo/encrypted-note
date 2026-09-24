@@ -1,0 +1,61 @@
+# Famous phrases attackers try early, even though zxcvbn rates them "very unguessable".
+# One per line; matched case-insensitively ignoring spaces and punctuation. Never add a real secret.
+correct horse battery staple
+the quick brown fox jumps over the lazy dog
+the quick brown fox jumped over the lazy dog
+a quick brown fox jumps over the lazy dog
+to be or not to be that is the question
+to be or not to be
+all work and no play makes jack a dull boy
+may the force be with you
+i am your father
+luke i am your father
+one ring to rule them all
+winter is coming
+you shall not pass
+open sesame
+lorem ipsum dolor sit amet
+hello world
+it was the best of times it was the worst of times
+four score and seven years ago
+i think therefore i am
+cogito ergo sum
+veni vidi vici
+carpe diem
+hakuna matata
+supercalifragilisticexpialidocious
+there is no place like home
+theres no place like home
+theres no place like 127.0.0.1
+live long and prosper
+i love you forever
+in god we trust
+god is good
+jesus loves me
+jesus christ
+our father who art in heaven
+the lord is my shepherd
+let it be
+imagine all the people
+never gonna give you up
+hasta la vista baby
+ill be back
+houston we have a problem
+elementary my dear watson
+the truth is out there
+trust no one
+keep calm and carry on
+just do it
+think different
+i have a dream
+one small step for man
+one small step for man one giant leap for mankind
+the answer is 42
+the meaning of life
+the cake is a lie
+all your base are belong to us
+game over
+password is password
+this is my password
+my password is password
+i forgot my password

@@ -1,0 +1,18 @@
+[package]
+name = "notes"
+version = "0.1.0"
+description = "The Vault document: Notes, Kinds, Hidden Fields, Favorites, Trash, search, Seed Phrase and Private Key checks."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+zeroize = { workspace = true, features = ["serde"] }
+getrandom.workspace = true
+bip39.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,107 @@
+[package]
+name = "encrypted-note-app"
+version = "0.1.0"
+description = "encrypted-note desktop app: Tauri shell, app bridge (commands) and OS adapters."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+name = "encrypted_note_app"
+crate-type = ["rlib"]
+
+[[bin]]
+name = "encrypted-note"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "=2.6.3", features = ["isolation"] }
+
+[dependencies]
+tauri = { version = "=2.11.6", features = ["isolation"] }
+serde.workspace = true
+serde_json.workspace = true
+secrecy.workspace = true
+# `serde`: Hidden Field values and passwords arrive straight into wiping types.
+zeroize = { workspace = true, features = ["serde"] }
+vault-format.workspace = true
+notes.workspace = true
+session.workspace = true
+policy.workspace = true
+guard.workspace = true
+store.workspace = true
+# Native open/save panels for Backups, called only from Rust. This is the backend
+# tauri-plugin-dialog wraps; the plugin itself depends on tauri-plugin-fs, which deny.toml bans,
+# and would add IPC commands the webview doesn't need.
+rfd = { version = "=0.16.0", default-features = false, features = ["common-controls-v6"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "=0.2.189"
+
+# macOS adapters (platform.rs): Capture Hiding self-check, running apps for the Sharing Guard,
+# private clipboard, lock and app-switch notifications. The CoreGraphics/CoreFoundation crates
+# (already in the tree through tao) read the window server's kCGWindowSharingState (ADR-0002).
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "=0.6.4"
+block2 = "=0.6.2"
+objc2-foundation = { version = "=0.3.2", default-features = false, features = [
+    "std",
+    "block2",
+    "NSArray",
+    "NSData",
+    "NSDistributedNotificationCenter",
+    "NSNotification",
+    "NSOperation",
+    "NSString",
+] }
+objc2-core-foundation = { version = "=0.3.2", default-features = false, features = [
+    "std",
+    "CFArray",
+    "CFDictionary",
+    "CFNumber",
+    "CFString",
+] }
+objc2-core-graphics = { version = "=0.3.2", default-features = false, features = [
+    "std",
+    "CGWindow",
+] }
+objc2-app-kit = { version = "=0.3.2", default-features = false, features = [
+    "std",
+    "NSApplication",
+    "NSPasteboard",
+    "NSResponder",
+    "NSRunningApplication",
+    "NSWindow",
+    "NSWorkspace",
+] }
+
+# Windows adapters (platform.rs): Capture Hiding self-check and re-apply, running processes for
+# the Sharing Guard, private clipboard, and session-lock/sleep notifications. tao already brings
+# the `windows` crate (an older minor); this is the current one, with only these API families.
+[target.'cfg(windows)'.dependencies]
+windows = { version = "=0.62.2", default-features = false, features = [
+    "Win32_Foundation",
+    "Win32_System_DataExchange",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_Memory",
+    "Win32_System_Power",
+    "Win32_System_RemoteDesktop",
+    "Win32_System_SystemServices",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[dev-dependencies]
+vault-format = { workspace = true, features = ["insecure-test-params"] }
+tempfile.workspace = true
+
+# Workspace lints, except that `unsafe_code` is `deny` rather than `forbid` so that exactly two
+# modules (platform.rs, hardening.rs) can opt in with `#[allow(unsafe_code)]`.
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+dbg_macro = "deny"
+print_stdout = "deny"
+todo = "warn"

@@ -1,0 +1,293 @@
+// The Unlocked Vault: sidebar, search, list, detail pane, Trash, status line.
+
+import { useEffect, useRef, useState } from "react";
+import {
+  deleteForever,
+  emptyTrash,
+  KINDS,
+  listNotes,
+  lock,
+  restoreNote,
+  type AppStatus,
+  type Filter,
+  type Kind,
+  type NoteSummary,
+  type NoteView,
+} from "./api";
+import { Confirm, ErrorLine, formatDate, minSec, noAssist, seconds, useAction } from "./components";
+import { Detail, Editor } from "./Note";
+import { Settings } from "./Settings";
+import { strings as s } from "./strings";
+
+type Nav = Filter | { type: "settings" };
+const ALL: Nav = { type: "all" };
+const SETTINGS: Nav = { type: "settings" };
+const NAV: Nav[] = [ALL, { type: "favorites" }, ...KINDS.map((kind): Nav => ({ type: "kind", kind })), { type: "trash" }, SETTINGS];
+const navLabel = (n: Nav) => (n.type === "kind" ? s.kindPlurals[n.kind] : s.nav[n.type]);
+
+type Pane =
+  | { type: "pick" }
+  | { type: "note"; id: string }
+  | { type: "edit"; note: NoteView }
+  | { type: "new"; kind: Kind }
+  | { type: "trashed" }
+  | null;
+
+export function Home({ status, onKit }: { status: AppStatus; onKit: (recoveryKey: string) => void }) {
+  const [nav, setNav] = useState(ALL);
+  const [query, setQuery] = useState("");
+  // Undefined until this nav's list arrives, so nothing (not "empty") shows while loading.
+  const [list, setList] = useState<{ nav: Nav; notes: NoteSummary[] }>();
+  const notes = list?.nav === nav ? list.notes : undefined;
+  const [pane, setPane] = useState<Pane>(null);
+  const [version, setVersion] = useState(0);
+  // An Editor with unsaved changes asks before it's replaced.
+  const dirty = useRef(false);
+  const [leaving, setLeaving] = useState<(() => void) | null>(null);
+  const search = useRef<HTMLInputElement>(null);
+  const changed = () => setVersion((v) => v + 1);
+  const open = (next: Pane) => {
+    dirty.current = false;
+    setPane(next);
+  };
+  const onDirty = () => {
+    dirty.current = true;
+  };
+  const guard = (fn: () => void) => (dirty.current ? setLeaving(() => fn) : fn());
+  const go = (n: Nav, next: Pane = null) =>
+    guard(() => {
+      setNav(n);
+      setQuery("");
+      open(next);
+    });
+
+  useEffect(() => {
+    if (nav.type === "settings") return;
+    let live = true;
+    listNotes(nav, query).then((n) => live && setList({ nav, notes: n }), () => {});
+    return () => {
+      live = false;
+    };
+  }, [nav, query, version]);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.metaKey || e.ctrlKey)) return;
+      const key = e.key.toLowerCase();
+      if (key === "n") {
+        e.preventDefault();
+        go(ALL, { type: "pick" });
+      } else if (key === "f") {
+        e.preventDefault();
+        setNav((n) => (n.type === "settings" || n.type === "trash" ? ALL : n));
+        setTimeout(() => search.current?.focus());
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+  const saved = (id: string) => {
+    open({ type: "note", id });
+    changed();
+  };
+
+  let detail;
+  if (pane?.type === "note")
+    detail = (
+      <Detail
+        key={pane.id}
+        id={pane.id}
+        status={status}
+        onEdit={(note) => open({ type: "edit", note })}
+        onChanged={changed}
+        onTrashed={() => {
+          open({ type: "trashed" });
+          changed();
+        }}
+      />
+    );
+  else if (pane?.type === "edit")
+    detail = (
+      <Editor
+        kind={pane.note.kind}
+        note={pane.note}
+        status={status}
+        onSaved={saved}
+        onCancel={() => open({ type: "note", id: pane.note.id })}
+        onDirty={onDirty}
+      />
+    );
+  else if (pane?.type === "new")
+    detail = <Editor key={pane.kind} kind={pane.kind} status={status} onSaved={saved} onCancel={() => open(null)} onDirty={onDirty} />;
+  else if (pane?.type === "trashed")
+    detail = (
+      <p className="hint" role="status">
+        {s.movedToTrash}
+      </p>
+    );
+  else if (pane?.type === "pick" || (nav === ALL && !query && notes?.length === 0))
+    detail = (
+      <div className="stack">
+        <h1>{pane ? s.pickKind : s.firstNote}</h1>
+        <div className="tiles">
+          {KINDS.map((kind) => (
+            <button key={kind} className="tile" onClick={() => open({ type: "new", kind })}>
+              <strong>{s.kindNames[kind]}</strong>
+              <span>{s.kindBlurbs[kind]}</span>
+            </button>
+          ))}
+        </div>
+      </div>
+    );
+  else if (notes?.length) detail = <p className="hint">{s.pickNote}</p>;
+
+  const capture = status.capture_hiding_active;
+  return (
+    <div className="home">
+      <nav className="sidebar">
+        <p className="brand">{s.appName}</p>
+        {NAV.map((n) => (
+          <button key={navLabel(n)} className={n === nav ? "nav on" : "nav"} aria-current={n === nav} onClick={() => go(n)}>
+            {navLabel(n)}
+          </button>
+        ))}
+        <button className="lock" onClick={() => lock().catch(() => {})}>
+          {s.lock}
+        </button>
+      </nav>
+      <div className="main">
+        {status.backup.reminder_due && nav.type !== "settings" && (
+          <div className="banner">
+            {s.backupReminder}
+            <button onClick={() => go(SETTINGS)}>{s.goToBackups}</button>
+          </div>
+        )}
+        {nav.type === "settings" ? (
+          <Settings status={status} onKit={onKit} />
+        ) : nav.type === "trash" ? (
+          <Trash notes={notes} onChanged={changed} />
+        ) : (
+          <div className="columns">
+            <section className="list-pane">
+              <input
+                ref={search}
+                className="search"
+                placeholder={s.search}
+                aria-label={s.search}
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                {...noAssist}
+              />
+              <button className="primary" onClick={() => guard(() => open({ type: "pick" }))}>
+                {s.newNote}
+              </button>
+              <ul className="list">
+                {notes?.map((n) => (
+                  <li key={n.id}>
+                    <button
+                      className={pane?.type === "note" && pane.id === n.id ? "row on" : "row"}
+                      onClick={() => guard(() => open({ type: "note", id: n.id }))}
+                    >
+                      <span className="row-title">
+                        {n.favorite && "★ "}
+                        {n.title}
+                      </span>
+                      <span className="hint">
+                        {s.kindNames[n.kind]}
+                        {n.subtitle && ` · ${n.subtitle}`}
+                      </span>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+              {notes?.length === 0 && (query || nav !== ALL) && <p className="hint">{query ? s.noMatches : s.nothingHere}</p>}
+            </section>
+            <section className="detail-pane">{detail}</section>
+          </div>
+        )}
+        <footer className="status-line">
+          <span>
+            {s.statusLine}
+            {status.lock_in_ms !== null && ` · ${s.locksIn(minSec(status.lock_in_ms))}`}
+            {" · "}
+            {status.backup.last_backup_at ? s.lastBackup(formatDate(status.backup.last_backup_at)) : s.neverBackedUp}
+          </span>
+          <span className={capture ? "badge" : "badge warn"}>
+            {capture ? s.captureOn(status.platform === "mac") : capture === false ? s.captureOff : s.captureUnknown}
+          </span>
+        </footer>
+      </div>
+      {/* Announced once; the ticking toast itself stays out of the screen reader's way. */}
+      <p className="sr-only" role="status">
+        {status.clipboard_clear_in_ms !== null && s.copiedAnnounce}
+      </p>
+      {status.clipboard_clear_in_ms !== null && (
+        <div className="toast" aria-hidden="true">
+          {s.copied(seconds(status.clipboard_clear_in_ms))}
+        </div>
+      )}
+      {leaving && (
+        <Confirm
+          title={s.discardTitle}
+          text={s.discardText}
+          confirmLabel={s.discard}
+          onConfirm={() => {
+            setLeaving(null);
+            leaving();
+          }}
+          onClose={() => setLeaving(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+function Trash({ notes, onChanged }: { notes: NoteSummary[] | undefined; onChanged: () => void }) {
+  // id = Delete forever for one Note; "" = Empty Trash.
+  const [confirm, setConfirm] = useState<string | null>(null);
+  const { error, run } = useAction();
+  const act = (fn: () => Promise<unknown>) => run(fn).then(onChanged);
+  return (
+    <section className="page stack">
+      <h1>{s.nav.trash}</h1>
+      <p className="hint">{s.trashText}</p>
+      <ErrorLine error={error} />
+      <ul className="list">
+        {notes?.map((n) => (
+          <li key={n.id} className="trash-row">
+            <span>
+              <span className="row-title">{n.title}</span>
+              <span className="hint">
+                {s.kindNames[n.kind]}
+                {n.deleted_at && ` · ${s.deletedOn(formatDate(n.deleted_at))}`}
+              </span>
+            </span>
+            <button onClick={() => act(() => restoreNote(n.id))}>{s.restore}</button>
+            <button className="danger" onClick={() => setConfirm(n.id)}>
+              {s.deleteForever}
+            </button>
+          </li>
+        ))}
+      </ul>
+      {notes?.length === 0 && <p className="hint">{s.nothingHere}</p>}
+      {!!notes?.length && (
+        <button className="danger" onClick={() => setConfirm("")}>
+          {s.emptyTrash}
+        </button>
+      )}
+      {confirm !== null && (
+        <Confirm
+          title={confirm ? s.deleteForever : s.emptyTrash}
+          text={confirm ? s.deleteForeverText : s.emptyTrashText}
+          confirmLabel={confirm ? s.deleteForever : s.emptyTrash}
+          onConfirm={() => {
+            setConfirm(null);
+            act(() => (confirm ? deleteForever(confirm) : emptyTrash()));
+          }}
+          onClose={() => setConfirm(null)}
+        />
+      )}
+    </section>
+  );
+}

@@ -1,0 +1,18 @@
+[package]
+name = "enote-reader"
+version = "0.1.0"
+description = "Emergency Reader: print a Vault or Backup's Notes to the terminal when the app no longer works."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+vault-format.workspace = true
+notes.workspace = true
+secrecy.workspace = true
+zeroize.workspace = true
+rpassword.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,75 @@
+# cargo-deny policy (ADR-0001, ADR-0003): known-vulnerable crates fail the check, and anything
+# that can talk to the network is banned outright. The app must never connect to the internet.
+
+[graph]
+all-features = false
+# Only the desktop targets we ship; tauri lists HTTP crates for iOS/Android only.
+targets = ["aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-pc-windows-msvc"]
+
+[advisories]
+version = 2
+yanked = "deny"
+# Unmaintained rust-unic crates pulled in by tauri-utils (urlpattern). No upgrade exists and
+# none is a vulnerability; re-check when upgrading Tauri.
+ignore = [
+    { id = "RUSTSEC-2025-0075", reason = "unmaintained rust-unic crate inside tauri-utils" },
+    { id = "RUSTSEC-2025-0080", reason = "unmaintained rust-unic crate inside tauri-utils" },
+    { id = "RUSTSEC-2025-0081", reason = "unmaintained rust-unic crate inside tauri-utils" },
+    { id = "RUSTSEC-2025-0098", reason = "unmaintained rust-unic crate inside tauri-utils" },
+    { id = "RUSTSEC-2025-0100", reason = "unmaintained rust-unic crate inside tauri-utils" },
+]
+
+[bans]
+multiple-versions = "allow"
+wildcards = "deny"
+# Our own crates are path dependencies (publish = false), not wildcards.
+allow-wildcard-paths = true
+deny = [
+    # HTTP clients and servers
+    { crate = "reqwest" },
+    { crate = "ureq" },
+    { crate = "hyper" },
+    { crate = "hyper-util" },
+    { crate = "isahc" },
+    { crate = "surf" },
+    { crate = "attohttpc" },
+    { crate = "curl" },
+    { crate = "curl-sys" },
+    { crate = "axum" },
+    { crate = "actix-web" },
+    { crate = "warp" },
+    { crate = "tiny_http" },
+    # TLS / sockets stacks that only make sense for networking
+    { crate = "rustls" },
+    { crate = "native-tls" },
+    { crate = "openssl" },
+    { crate = "tokio-tungstenite" },
+    { crate = "tungstenite" },
+    # Tauri plugins that reach outside the app
+    { crate = "tauri-plugin-http" },
+    { crate = "tauri-plugin-updater" },
+    { crate = "tauri-plugin-shell" },
+    { crate = "tauri-plugin-opener" },
+    { crate = "tauri-plugin-fs" },
+    { crate = "tauri-plugin-websocket" },
+    { crate = "tauri-plugin-upload" },
+    # never use: falls back to the Mac login password (ADR-0003)
+    { crate = "tauri-plugin-biometry" },
+]
+
+[licenses]
+version = 2
+confidence-threshold = 0.8
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-3-Clause",
+    "Unicode-3.0",
+    "Zlib",
+    "CC0-1.0",
+    "MPL-2.0",
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
