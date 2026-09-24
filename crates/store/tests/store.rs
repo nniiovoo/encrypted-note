@@ -739,3 +739,27 @@ fn parent_folder_steps_are_resolved_before_matching() {
         Some(CloudProvider::MacDesktopOrDocuments)
     );
 }
+
+/// App Sandbox case: only the picked file is writable, not its folder, so no temp file can be
+/// created beside it. The Backup is then written in place, still flushed and verified.
+#[cfg(unix)]
+#[test]
+fn backup_falls_back_to_writing_the_picked_file_when_its_folder_is_read_only() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("picked.enote");
+    fs::write(&dest, b"old backup").unwrap();
+    fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o500)).unwrap();
+
+    let result = write_backup(&dest, b"new backup bytes", &|b| b == b"new backup bytes");
+    let rejected = write_backup(&dest, b"other bytes", &|_| false);
+    fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
+
+    result.unwrap();
+    assert!(matches!(rejected, Err(StoreError::VerifyFailed)));
+    assert_eq!(
+        fs::read_dir(dir.path()).unwrap().count(),
+        1,
+        "no temp files left behind"
+    );
+}

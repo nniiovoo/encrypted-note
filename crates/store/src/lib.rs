@@ -304,7 +304,28 @@ pub fn write_backup(
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
-    TempFile::write_verified(parent, bytes, verify)?.commit(dest)
+    match TempFile::write_verified(parent, bytes, verify) {
+        Ok(temp) => temp.commit(dest),
+        // App Sandbox: a save panel grants the picked file, not its folder, so no temp file can be
+        // made beside it. Write the picked file itself (flushed, read back and verified); the
+        // Vault is untouched either way.
+        Err(StoreError::Io(e)) if e.kind() == io::ErrorKind::PermissionDenied => {
+            let mut file = private_options()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(dest)?;
+            file.write_all(bytes)?;
+            file.sync_all()?;
+            drop(file);
+            let read_back = fs::read(dest)?;
+            if read_back != bytes || !verify(&read_back) {
+                return Err(StoreError::VerifyFailed);
+            }
+            Ok(())
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// A written-and-verified temp file; removed on drop unless committed.
