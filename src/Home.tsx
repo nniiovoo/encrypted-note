@@ -14,7 +14,8 @@ import {
   type NoteSummary,
   type NoteView,
 } from "./api";
-import { Confirm, ErrorLine, formatDate, minSec, noAssist, seconds, useAction } from "./components";
+import { Confirm, dragRegion, ErrorLine, formatDate, mac, minSec, noAssist, seconds, TitlebarDrag, useAction } from "./components";
+import { Icon, KIND_ICONS, KindBadge, type IconName } from "./icons";
 import { Detail, Editor } from "./Note";
 import { Settings } from "./Settings";
 import { strings as s } from "./strings";
@@ -22,8 +23,11 @@ import { strings as s } from "./strings";
 type Nav = Filter | { type: "settings" };
 const ALL: Nav = { type: "all" };
 const SETTINGS: Nav = { type: "settings" };
-const NAV: Nav[] = [ALL, { type: "favorites" }, ...KINDS.map((kind): Nav => ({ type: "kind", kind })), { type: "trash" }, SETTINGS];
+const TRASH: Nav = { type: "trash" };
+const BY_KIND = KINDS.map((kind): Nav => ({ type: "kind", kind }));
 const navLabel = (n: Nav) => (n.type === "kind" ? s.kindPlurals[n.kind] : s.nav[n.type]);
+const NAV_ICONS: Record<Exclude<Nav["type"], "kind">, IconName> = { all: "all", favorites: "star", trash: "trash", settings: "settings" };
+const navIcon = (n: Nav) => (n.type === "kind" ? KIND_ICONS[n.kind] : NAV_ICONS[n.type]);
 
 type Pane =
   | { type: "pick" }
@@ -122,7 +126,7 @@ export function Home({ status, onKit }: { status: AppStatus; onKit: (recoveryKey
     detail = <Editor key={pane.kind} kind={pane.kind} status={status} onSaved={saved} onCancel={() => open(null)} onDirty={onDirty} />;
   else if (pane?.type === "trashed")
     detail = (
-      <p className="hint" role="status">
+      <p className="empty-state" role="status">
         {s.movedToTrash}
       </p>
     );
@@ -133,6 +137,7 @@ export function Home({ status, onKit }: { status: AppStatus; onKit: (recoveryKey
         <div className="tiles">
           {KINDS.map((kind) => (
             <button key={kind} className="tile" onClick={() => open({ type: "new", kind })}>
+              <KindBadge kind={kind} />
               <strong>{s.kindNames[kind]}</strong>
               <span>{s.kindBlurbs[kind]}</span>
             </button>
@@ -140,25 +145,63 @@ export function Home({ status, onKit }: { status: AppStatus; onKit: (recoveryKey
         </div>
       </div>
     );
-  else if (notes?.length) detail = <p className="hint">{s.pickNote}</p>;
+  else if (notes?.length) detail = <p className="empty-state">{s.pickNote}</p>;
 
   const capture = status.capture_hiding_active;
+  const listed = nav.type !== "settings" && nav.type !== "trash";
+  const navButton = (n: Nav) => (
+    <button key={navLabel(n)} className={n === nav ? "nav on" : "nav"} aria-current={n === nav} onClick={() => go(n)}>
+      <Icon name={navIcon(n)} />
+      {navLabel(n)}
+    </button>
+  );
   return (
     <div className="home">
       <nav className="sidebar">
-        <p className="brand">{s.appName}</p>
-        {NAV.map((n) => (
-          <button key={navLabel(n)} className={n === nav ? "nav on" : "nav"} aria-current={n === nav} onClick={() => go(n)}>
-            {navLabel(n)}
-          </button>
-        ))}
-        <button className="lock" onClick={() => lock().catch(() => {})}>
+        <TitlebarDrag />
+        {navButton(ALL)}
+        {navButton({ type: "favorites" })}
+        <p className="sidebar-heading">{s.navKinds}</p>
+        {BY_KIND.map(navButton)}
+        <div className="sidebar-gap" />
+        {navButton(TRASH)}
+        <div className="bottom" />
+        {navButton(SETTINGS)}
+        <button className="nav" onClick={() => lock().catch(() => {})}>
+          <Icon name="lock" />
           {s.lock}
+          <kbd>{s.lockShortcut(mac)}</kbd>
         </button>
       </nav>
       <div className="main">
+        <header className="toolbar" {...dragRegion}>
+          <div className="toolbar-title">
+            <h1>{navLabel(nav)}</h1>
+            {nav.type !== "settings" && notes && <span>{s.noteCount(notes.length)}</span>}
+          </div>
+          {listed && (
+            <>
+              <label className="search">
+                <Icon name="search" />
+                <input
+                  ref={search}
+                  placeholder={s.search}
+                  aria-label={s.searchLabel}
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  {...noAssist}
+                />
+              </label>
+              <button className="primary" onClick={() => guard(() => open({ type: "pick" }))}>
+                <Icon name="plus" />
+                {s.newNote}
+              </button>
+            </>
+          )}
+        </header>
         {status.backup.reminder_due && nav.type !== "settings" && (
           <div className="banner">
+            <Icon name="warning" />
             {s.backupReminder}
             <button onClick={() => go(SETTINGS)}>{s.goToBackups}</button>
           </div>
@@ -170,18 +213,6 @@ export function Home({ status, onKit }: { status: AppStatus; onKit: (recoveryKey
         ) : (
           <div className="columns">
             <section className="list-pane">
-              <input
-                ref={search}
-                className="search"
-                placeholder={s.search}
-                aria-label={s.search}
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-                {...noAssist}
-              />
-              <button className="primary" onClick={() => guard(() => open({ type: "pick" }))}>
-                {s.newNote}
-              </button>
               <ul className="list">
                 {notes?.map((n) => (
                   <li key={n.id}>
@@ -189,9 +220,10 @@ export function Home({ status, onKit }: { status: AppStatus; onKit: (recoveryKey
                       className={pane?.type === "note" && pane.id === n.id ? "row on" : "row"}
                       onClick={() => guard(() => open({ type: "note", id: n.id }))}
                     >
+                      <KindBadge kind={n.kind} />
                       <span className="row-title">
-                        {n.favorite && "★ "}
-                        {n.title}
+                        <span>{n.title}</span>
+                        {n.favorite && <Icon name="star" className="icon fav" />}
                       </span>
                       <span className="hint">
                         {s.kindNames[n.kind]}
@@ -250,31 +282,35 @@ function Trash({ notes, onChanged }: { notes: NoteSummary[] | undefined; onChang
   const act = (fn: () => Promise<unknown>) => run(fn).then(onChanged);
   return (
     <section className="page stack">
-      <h1>{s.nav.trash}</h1>
       <p className="hint">{s.trashText}</p>
       <ErrorLine error={error} />
-      <ul className="list">
-        {notes?.map((n) => (
-          <li key={n.id} className="trash-row">
-            <span>
-              <span className="row-title">{n.title}</span>
-              <span className="hint">
-                {s.kindNames[n.kind]}
-                {n.deleted_at && ` · ${s.deletedOn(formatDate(n.deleted_at))}`}
+      {!!notes?.length && (
+        <ul className="card rows">
+          {notes.map((n) => (
+            <li key={n.id} className="trash-row">
+              <KindBadge kind={n.kind} />
+              <span>
+                <span className="row-title">{n.title}</span>
+                <span className="hint">
+                  {s.kindNames[n.kind]}
+                  {n.deleted_at && ` · ${s.deletedOn(formatDate(n.deleted_at))}`}
+                </span>
               </span>
-            </span>
-            <button onClick={() => act(() => restoreNote(n.id))}>{s.restore}</button>
-            <button className="danger" onClick={() => setConfirm(n.id)}>
-              {s.deleteForever}
-            </button>
-          </li>
-        ))}
-      </ul>
+              <button onClick={() => act(() => restoreNote(n.id))}>{s.restore}</button>
+              <button className="danger" onClick={() => setConfirm(n.id)}>
+                {s.deleteForever}
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
       {notes?.length === 0 && <p className="hint">{s.nothingHere}</p>}
       {!!notes?.length && (
-        <button className="danger" onClick={() => setConfirm("")}>
-          {s.emptyTrash}
-        </button>
+        <div className="actions end">
+          <button className="danger" onClick={() => setConfirm("")}>
+            {s.emptyTrash}
+          </button>
+        </div>
       )}
       {confirm !== null && (
         <Confirm

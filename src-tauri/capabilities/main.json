@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "main",
-  "description": "The only window. Exactly the app commands in build.rs, plus listening for events. No filesystem, dialog, shell, HTTP or opener plugins (ADR-0001, ADR-0003).",
+  "description": "The only window. Exactly the app commands in build.rs, plus listening for events and moving/zooming the window from the Mac title bar strip (data-tauri-drag-region). No filesystem, dialog, shell, HTTP or opener plugins (ADR-0001, ADR-0003).",
   "windows": [
     "main"
   ],
@@ -9,6 +9,8 @@
   "permissions": [
     "core:event:allow-listen",
     "core:event:allow-unlisten",
+    "core:window:allow-start-dragging",
+    "core:window:allow-internal-toggle-maximize",
     "allow-app-status",
     "allow-activity",
     "allow-suggest-passphrase",

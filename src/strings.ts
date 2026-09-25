@@ -102,6 +102,9 @@ export const strings = {
 
   // Home
   nav: { all: "All", favorites: "Favorites", trash: "Trash", settings: "Settings" },
+  navKinds: "Kinds",
+  noteCount: (n: number) => plural(n, "Note", "Notes"),
+  lockShortcut: (mac: boolean) => (mac ? "⌘L" : "Ctrl+L"),
   kindNames: { seed_phrase: "Seed Phrase", private_key: "Private Key", login: "Login", api_key: "API Key", text: "Text" } satisfies Record<Kind, string>,
   kindPlurals: { seed_phrase: "Seed Phrases", private_key: "Private Keys", login: "Logins", api_key: "API Keys", text: "Text" } satisfies Record<Kind, string>,
   kindBlurbs: {
@@ -112,7 +115,8 @@ export const strings = {
     text: "Anything else",
   } satisfies Record<Kind, string>,
   lock: "Lock",
-  search: "Search titles, websites, names, addresses…",
+  search: "Search",
+  searchLabel: "Search titles, websites, names, addresses",
   newNote: "New Note",
   pickKind: "What would you like to add?",
   firstNote: "Add your first Note",

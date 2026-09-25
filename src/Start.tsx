@@ -3,11 +3,15 @@
 
 import { useState, type FormEvent } from "react";
 import { confirmRecoveryKit, createVault, lock, setNewPassword, unlock, type AppStatus } from "./api";
-import { ErrorLine, Field, NewPassword, SecretInput, seconds, useAction } from "./components";
+import { AppIcon, ErrorLine, Field, NewPassword, SecretInput, seconds, useAction } from "./components";
+import { Icon, type IconName } from "./icons";
 import { ReplaceVault } from "./Settings";
 import { strings as s } from "./strings";
 
 export type Kit = { key: string; rotation: boolean };
+
+// One per s.welcomeCards entry, in order.
+const WELCOME_ICONS: IconName[] = ["computer", "key", "eyeSlash", "shield"];
 
 const LockLink = ({ label = s.lock }: { label?: string }) => (
   <button className="link" onClick={() => lock().catch(() => {})}>
@@ -34,12 +38,16 @@ export function NoVault({ onKit }: { onKit: (recoveryKey: string) => void }) {
       </div>
     );
   return (
-    <div className="center">
-      <h1 className="brand">{s.appName}</h1>
-      <p className="lead">{s.welcomeLead}</p>
-      <div className="cards">
-        {s.welcomeCards.map(([title, text]) => (
-          <section className="card" key={title}>
+    <div className="center narrow">
+      <header className="hero">
+        <AppIcon large />
+        <h1>{s.appName}</h1>
+        <p className="lead">{s.welcomeLead}</p>
+      </header>
+      <div className="features">
+        {s.welcomeCards.map(([title, text], i) => (
+          <section className="feature" key={title}>
+            <Icon name={WELCOME_ICONS[i]!} />
             <h2>{title}</h2>
             <p>{text}</p>
           </section>
@@ -48,7 +56,7 @@ export function NoVault({ onKit }: { onKit: (recoveryKey: string) => void }) {
       <button className="primary big" onClick={() => setStep("create")}>
         {s.createMyVault}
       </button>
-      <button className="link" onClick={() => setStep("open")}>
+      <button className="link centered" onClick={() => setStep("open")}>
         {s.haveVault}
       </button>
       {step === "open" && <ReplaceVault onClose={() => setStep("welcome")} />}
@@ -119,8 +127,9 @@ export function Locked({ status }: { status: AppStatus }) {
     run(() => unlock(useKey ? { recovery_key: v } : { master_password: v }));
   }
   return (
-    <div className="center narrow">
-      <h1 className="brand">{s.appName}</h1>
+    <div className="center tight">
+      <AppIcon large />
+      <h1>{s.appName}</h1>
       <form onSubmit={submit} className="stack">
         <Field label={useKey ? s.recoveryKey : s.masterPassword} hint={useKey ? s.recoveryKeyHint : undefined}>
           <SecretInput key={String(useKey)} value={secret} onChange={(e) => setSecret(e.target.value)} autoFocus />
