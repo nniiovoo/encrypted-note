@@ -1,8 +1,19 @@
 // Small shared pieces for every screen. In-page only: no native popups while Unlocked (ADR-0002).
 
 import { useEffect, useId, useRef, useState, type ComponentProps, type FormEvent, type KeyboardEvent as KeyEvent, type ReactNode } from "react";
+import appIcon from "../src-tauri/icons/128x128@2x.png";
 import { assessPassword, isApiError, suggestPassphrase, type Assessment } from "./api";
 import { strings as s } from "./strings";
+
+/** The Mac window draws its title bar over the page (tauri.conf.json), so the page provides the
+ *  strip that moves the window. Elsewhere the OS title bar does that. */
+export const mac = navigator.userAgent.includes("Mac");
+export const dragRegion = mac ? { "data-tauri-drag-region": "deep" } : {};
+export const TitlebarDrag = () => (mac ? <div className="titlebar-drag" {...dragRegion} /> : null);
+
+export const AppIcon = ({ large }: { large?: boolean }) => (
+  <img className={large ? "app-icon large" : "app-icon"} src={appIcon} alt="" />
+);
 
 /** For every text input: no autofill, autocorrect, spellcheck or writing suggestions (their
  *  popups are separate OS windows, and they must never learn a secret). */
@@ -69,7 +80,8 @@ export const SecretInput = ({ show, ...props }: ComponentProps<"input"> & { show
   <input {...props} {...noAssist} type={show ? "text" : "password"} />
 );
 
-/** A radio group drawn as pills (native radios are in-page, unlike <select>). */
+/** A radio group drawn as a segmented control (native radios are in-page, unlike <select>).
+ *  Not a fieldset: WebKit laid out a fieldset with a legend taller than it drew it. */
 export function Choice<T extends string | number>(props: {
   label: string;
   options: readonly (readonly [T, string])[];
@@ -78,19 +90,25 @@ export function Choice<T extends string | number>(props: {
 }) {
   const name = useId();
   return (
-    <fieldset className="choice">
-      <legend className="label">{props.label}</legend>
-      {props.options.map(([value, text]) => (
-        <label key={value}>
-          <input type="radio" name={name} checked={value === props.value} onChange={() => props.onChange(value)} />
-          {text}
-        </label>
-      ))}
-    </fieldset>
+    <div className="choice" role="radiogroup" aria-labelledby={`${name}-label`}>
+      <span className="label" id={`${name}-label`}>
+        {props.label}
+      </span>
+      <div className="segmented">
+        {props.options.map(([value, text]) => (
+          <label key={value}>
+            <input type="radio" name={name} checked={value === props.value} onChange={() => props.onChange(value)} />
+            {text}
+          </label>
+        ))}
+      </div>
+    </div>
   );
 }
 
-export function Modal({ title, onClose, children }: { title: string; onClose: () => void; children: ReactNode }) {
+/** A sheet; `alert` draws a short question centered under the app icon, like a Mac alert. */
+export function Modal(props: { title: string; onClose: () => void; alert?: boolean; children: ReactNode }) {
+  const { title, onClose, children } = props;
   const dialog = useRef<HTMLDivElement>(null);
   // Read during the first render, before any autoFocus inside the dialog moves focus.
   const [trigger] = useState(() => document.activeElement as HTMLElement | null);
@@ -112,7 +130,9 @@ export function Modal({ title, onClose, children }: { title: string; onClose: ()
   }, []);
   return (
     <div className="overlay">
-      <div ref={dialog} tabIndex={-1} className="modal" role="dialog" aria-modal="true" aria-label={title}>
+      <TitlebarDrag />
+      <div ref={dialog} tabIndex={-1} className={props.alert ? "modal alert" : "modal"} role="dialog" aria-modal="true" aria-label={title}>
+        {props.alert && <AppIcon />}
         <h2>{title}</h2>
         {children}
       </div>
@@ -121,7 +141,7 @@ export function Modal({ title, onClose, children }: { title: string; onClose: ()
 }
 
 export const Confirm = (props: { title: string; text: string; confirmLabel: string; onConfirm: () => void; onClose: () => void }) => (
-  <Modal title={props.title} onClose={props.onClose}>
+  <Modal title={props.title} onClose={props.onClose} alert>
     <p>{props.text}</p>
     <div className="actions">
       <button onClick={props.onClose}>{s.cancel}</button>

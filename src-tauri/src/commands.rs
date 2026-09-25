@@ -7,7 +7,7 @@
 //! and do that work on the blocking pool.
 //!
 //! The webview may call exactly these commands: `build.rs` lists them in the app manifest and
-//! `capabilities/main.json` grants each one (plus listening to events).
+//! `capabilities/main.json` grants each one (plus listening to events and dragging the window).
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};

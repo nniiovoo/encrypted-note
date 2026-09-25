@@ -22,6 +22,7 @@ import {
   type NoteView,
 } from "./api";
 import { Choice, Confirm, ErrorLine, Field, formatDate, Modal, noAssist, PasswordModal, SecretInput, seconds, useAction } from "./components";
+import { Icon, KindBadge } from "./icons";
 import { strings as s } from "./strings";
 
 // Field names as in notes::field, in form order.
@@ -113,15 +114,22 @@ export function Detail(props: {
   return (
     <article className="stack">
       <header className="detail-head">
-        <h1>{note.title}</h1>
-        <button className="star" aria-pressed={note.favorite} aria-label={s.favorite} onClick={toggleFavorite}>
-          {note.favorite ? "★" : "☆"}
+        <KindBadge kind={note.kind} size="large" />
+        <div>
+          <h1>{note.title}</h1>
+          <p className="hint">
+            {s.kindNames[note.kind]} · {s.updated(formatDate(note.updated_at))}
+          </p>
+        </div>
+        <button className="plain star" aria-pressed={note.favorite} aria-label={s.favorite} onClick={toggleFavorite}>
+          <Icon name="star" />
+        </button>
+        <button onClick={() => props.onEdit(note)}>
+          <Icon name="pencil" />
+          {s.edit}
         </button>
       </header>
-      <p className="hint">
-        {s.kindNames[note.kind]} · {s.updated(formatDate(note.updated_at))}
-      </p>
-      <dl className="fields">
+      <dl className="card fields rows">
         {FORM[note.kind]
           .filter((f) => !HIDDEN.includes(f) && note.visible[f])
           .map((f) => (
@@ -133,16 +141,29 @@ export function Detail(props: {
         {note.hidden.map(([f, has]) => (
           <div key={f}>
             <dt>{label(note.kind, f)}</dt>
-            <dd>
+            <dd className={has ? "secret" : undefined}>
               {!has ? (
                 <span className="hint">{s.empty}</span>
               ) : (
                 <>
                   {shown?.field === f ? <Value field={f} value={shown.value} /> : <span className="dots">••••••••••••</span>}
                   <div className="actions">
-                    {shown?.field === f ? <button onClick={hide}>{s.hide}</button> : <button onClick={() => show(f)}>{s.show}</button>}
-                    <button onClick={() => copy(f)}>{s.copy}</button>
                     {shown?.field === f && expires != null && <span className="hint">{s.hidesIn(seconds(expires))}</span>}
+                    {shown?.field === f ? (
+                      <button className="small" onClick={hide}>
+                        <Icon name="eyeSlash" />
+                        {s.hide}
+                      </button>
+                    ) : (
+                      <button className="small" onClick={() => show(f)}>
+                        <Icon name="eye" />
+                        {s.show}
+                      </button>
+                    )}
+                    <button className="small" onClick={() => copy(f)}>
+                      <Icon name="copy" />
+                      {s.copy}
+                    </button>
                   </div>
                 </>
               )}
@@ -152,8 +173,8 @@ export function Detail(props: {
       </dl>
       <ErrorLine error={error} />
       <div className="actions">
-        <button onClick={() => props.onEdit(note)}>{s.edit}</button>
         <button className="danger" onClick={() => run(async () => { await trashNote(id); props.onTrashed(); })}>
+          <Icon name="trash" />
           {s.moveToTrash}
         </button>
       </div>
@@ -341,50 +362,57 @@ export function Editor(props: {
   return (
     <>
       <form onSubmit={submit} onChange={props.onDirty} className="stack">
-        <h1>{note ? s.editTitle(s.kindNames[kind]) : s.newTitle(s.kindNames[kind])}</h1>
-        <Field label={s.title}>
-          <input value={title} onChange={(e) => setTitle(e.target.value)} autoFocus {...noAssist} />
-        </Field>
-        {FORM[kind].map((f) => {
-          const name = OPTIONAL.includes(f) ? `${label(kind, f)} ${s.optional}` : label(kind, f);
-          if (f === "word_count")
-            return (
-              <Choice
-                key={f}
-                label={name}
-                options={[[12, s.words(12)], [24, s.words(24)]]}
-                value={words.length}
-                onChange={(n) => setWords((ws) => Array.from({ length: n }, (_, i) => ws[i] ?? ""))}
-              />
-            );
-          if (f === "words") return <SeedGrid key={f} words={words} setWords={setWords} editing={!!note} />;
-          if (f === "chain")
-            return <Choice key={f} label={name} options={CHAINS} value={chain} onChange={(c) => setVisible({ ...visible, chain: c })} />;
-          if (!HIDDEN.includes(f))
-            return (
-              <Field key={f} label={name}>
-                <input
-                  value={visible[f] ?? ""}
-                  onChange={(e) => setVisible({ ...visible, [f]: e.target.value })}
-                  {...noAssist}
+        <header className="detail-head">
+          <KindBadge kind={kind} size="large" />
+          <div>
+            <h1>{note ? s.editTitle(s.kindNames[kind]) : s.newTitle(s.kindNames[kind])}</h1>
+          </div>
+        </header>
+        <div className="card stack">
+          <Field label={s.title}>
+            <input value={title} onChange={(e) => setTitle(e.target.value)} autoFocus {...noAssist} />
+          </Field>
+          {FORM[kind].map((f) => {
+            const name = OPTIONAL.includes(f) ? `${label(kind, f)} ${s.optional}` : label(kind, f);
+            if (f === "word_count")
+              return (
+                <Choice
+                  key={f}
+                  label={name}
+                  options={[[12, s.words(12)], [24, s.words(24)]]}
+                  value={words.length}
+                  onChange={(n) => setWords((ws) => Array.from({ length: n }, (_, i) => ws[i] ?? ""))}
                 />
+              );
+            if (f === "words") return <SeedGrid key={f} words={words} setWords={setWords} editing={!!note} />;
+            if (f === "chain")
+              return <Choice key={f} label={name} options={CHAINS} value={chain} onChange={(c) => setVisible({ ...visible, chain: c })} />;
+            if (!HIDDEN.includes(f))
+              return (
+                <Field key={f} label={name}>
+                  <input
+                    value={visible[f] ?? ""}
+                    onChange={(e) => setVisible({ ...visible, [f]: e.target.value })}
+                    {...noAssist}
+                  />
+                </Field>
+              );
+            const inputProps = {
+              value: hidden[f] ?? "",
+              placeholder: note ? s.leaveBlankToKeep : "",
+              onChange: (e: { target: { value: string } }) => setHidden({ ...hidden, [f]: e.target.value }),
+            };
+            return (
+              <Field key={f} label={name} hint={f === "passphrase" ? s.passphraseTip : undefined}>
+                {f === "body" ? <textarea {...inputProps} {...noAssist} rows={10} /> : <SecretInput {...inputProps} />}
               </Field>
             );
-          const inputProps = {
-            value: hidden[f] ?? "",
-            placeholder: note ? s.leaveBlankToKeep : "",
-            onChange: (e: { target: { value: string } }) => setHidden({ ...hidden, [f]: e.target.value }),
-          };
-          return (
-            <Field key={f} label={name} hint={f === "passphrase" ? s.passphraseTip : undefined}>
-              {f === "body" ? <textarea {...inputProps} {...noAssist} rows={10} /> : <SecretInput {...inputProps} />}
-            </Field>
-          );
-        })}
+          })}
+        </div>
         {warning && <p className="warn">{warning}</p>}
         <ErrorLine error={error} />
         {missing && <p className="hint">{missing}</p>}
-        <div className="actions">
+        <div className="actions end">
           <button type="button" onClick={props.onCancel}>
             {s.cancel}
           </button>
@@ -449,8 +477,11 @@ function SeedGrid(props: { words: string[]; setWords: (update: (words: string[])
   };
 
   return (
-    <fieldset className="seed">
-      <legend className="label">{label("seed_phrase", "words")}</legend>
+    // A group, not a fieldset: see Choice.
+    <div className="seed" role="group" aria-labelledby={`${listId}-label`}>
+      <span className="label" id={`${listId}-label`}>
+        {label("seed_phrase", "words")}
+      </span>
       {props.editing && <p className="hint">{s.leaveBlankToKeepWords}</p>}
       <ol className="words">
         {props.words.map((word, i) => (
@@ -507,6 +538,6 @@ function SeedGrid(props: { words: string[]; setWords: (update: (words: string[])
           ))}
         </div>
       )}
-    </fieldset>
+    </div>
   );
 }

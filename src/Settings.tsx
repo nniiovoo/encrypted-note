@@ -46,48 +46,61 @@ export function Settings({ status, onKit }: { status: AppStatus; onKit: (recover
 
   return (
     <section className="page stack">
-      <h1>{s.nav.settings}</h1>
-
-      <section className="card stack">
+      <section className="section">
         <h2>{s.autoLockTitle}</h2>
-        <Choice label={s.autoLockAfter} options={MINUTES} value={lockRule.idle_minutes} onChange={(m) => change({ idle_minutes: m })} />
-        <label className="check">
-          <input
-            type="checkbox"
-            checked={lockRule.lock_on_app_switch}
-            onChange={(e) => change({ lock_on_app_switch: e.target.checked })}
-          />
-          {s.lockOnSwitch}
-        </label>
-        <p className="hint">{s.alwaysLocks}</p>
-        <ErrorLine error={error} />
+        <div className="card stack">
+          <Choice label={s.autoLockAfter} options={MINUTES} value={lockRule.idle_minutes} onChange={(m) => change({ idle_minutes: m })} />
+          <label className="switch-row">
+            {s.lockOnSwitch}
+            {/* `switch`: WebKit draws a Mac switch; elsewhere it stays a checkbox. */}
+            <input
+              type="checkbox"
+              {...{ switch: "" }}
+              checked={lockRule.lock_on_app_switch}
+              onChange={(e) => change({ lock_on_app_switch: e.target.checked })}
+            />
+          </label>
+          <p className="hint">{s.alwaysLocks}</p>
+          <ErrorLine error={error} />
+        </div>
       </section>
 
       <BackUp status={status} />
 
-      <section className="card stack">
+      <section className="section">
         <h2>{s.openBackupTitle}</h2>
-        <p>{s.openBackupText}</p>
-        <button onClick={() => setFlow("open")}>{s.openBackup}</button>
-        <h3>{s.safetyCopiesTitle}</h3>
-        <p className="hint">{s.safetyCopiesText}</p>
-        <ul className="list">
-          {copies.map((c) => (
-            <li key={c.id} className="trash-row">
-              <span>
-                {formatDate(c.created_at)} · {s.safetyKinds[c.kind]}
-              </span>
-              <button onClick={() => setFlow(c)}>{s.restore}</button>
-            </li>
-          ))}
-        </ul>
-        {copies.length === 0 && <p className="hint">{s.noSafetyCopies}</p>}
+        <div className="card stack">
+          <p>{s.openBackupText}</p>
+          <button onClick={() => setFlow("open")}>{s.openBackup}</button>
+        </div>
       </section>
 
-      <section className="card stack">
+      <section className="section">
+        <h2>{s.safetyCopiesTitle}</h2>
+        <div className="card stack">
+          <p className="hint">{s.safetyCopiesText}</p>
+          {copies.length > 0 && (
+            <ul className="rows">
+              {copies.map((c) => (
+                <li key={c.id} className="trash-row">
+                  <span>
+                    {formatDate(c.created_at)} · {s.safetyKinds[c.kind]}
+                  </span>
+                  <button onClick={() => setFlow(c)}>{s.restore}</button>
+                </li>
+              ))}
+            </ul>
+          )}
+          {copies.length === 0 && <p className="hint">{s.noSafetyCopies}</p>}
+        </div>
+      </section>
+
+      <section className="section">
         <h2>{s.changePasswordTitle}</h2>
-        <p>{s.changePasswordText}</p>
-        <button onClick={() => setFlow("password")}>{s.changePasswordTitle}</button>
+        <div className="card stack">
+          <p>{s.changePasswordText}</p>
+          <button onClick={() => setFlow("password")}>{s.changePasswordTitle}</button>
+        </div>
       </section>
 
       <details className="card">
@@ -135,19 +148,21 @@ function BackUp({ status }: { status: AppStatus }) {
   };
   const last = status.backup.last_backup_at;
   return (
-    <section className="card stack">
+    <section className="section">
       <h2>{s.backupsTitle}</h2>
-      <p>{last ? s.lastBackup(formatDate(last)) : s.neverBackedUp}</p>
-      <button className="primary" disabled={busy} onClick={start}>
-        {busy ? s.backingUp : s.backUpNow}
-      </button>
-      {written && (
-        <p className="ok">
-          {s.backupDone(written.note_count)} <span className="hint">{written.display_path}</span>
-        </p>
-      )}
-      <ErrorLine error={error} />
-      <p className="hint">{s.exfatTip}</p>
+      <div className="card stack">
+        <p>{last ? s.lastBackup(formatDate(last)) : s.neverBackedUp}</p>
+        <button className="primary" disabled={busy} onClick={start}>
+          {busy ? s.backingUp : s.backUpNow}
+        </button>
+        {written && (
+          <p className="ok">
+            {s.backupDone(written.note_count)} <span className="hint">{written.display_path}</span>
+          </p>
+        )}
+        <ErrorLine error={error} />
+        <p className="hint">{s.exfatTip}</p>
+      </div>
       {cloud && (
         <Modal title={s.cloudTitle(cloud)} onClose={() => setCloud(null)}>
           <p>{s.cloudWarning(cloud)}</p>

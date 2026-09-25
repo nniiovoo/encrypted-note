@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import { activity, appStatus, dismissSharingGuard, lock, onStatusChanged, type AppStatus } from "./api";
-import { ErrorLine, useAction } from "./components";
+import { ErrorLine, TitlebarDrag, useAction } from "./components";
 import { Home } from "./Home";
+import { Icon } from "./icons";
 import { KitLost, Locked, NewPasswordScreen, NoVault, RecoveryKit, type Kit } from "./Start";
 import { strings as s } from "./strings";
 
@@ -56,7 +57,13 @@ export function App() {
     return () => window.removeEventListener("keydown", onKey);
   }, [phase]);
 
-  return <main className="app">{status && <Screen status={status} kit={kit} setKit={setKit} />}</main>;
+  // Home draws its own drag areas over this strip.
+  return (
+    <main className="app">
+      <TitlebarDrag />
+      {status && <Screen status={status} kit={kit} setKit={setKit} />}
+    </main>
+  );
 }
 
 function Screen({ status, kit, setKit }: { status: AppStatus; kit: Kit | null; setKit: (kit: Kit) => void }) {
@@ -82,7 +89,8 @@ function Screen({ status, kit, setKit }: { status: AppStatus; kit: Kit | null; s
 function Shield({ apps }: { apps: string[] }) {
   const { error, run } = useAction();
   return (
-    <div className="center narrow">
+    <div className="center tight">
+      <Icon name="shield" className="shield-icon" />
       <h1>{s.shieldTitle}</h1>
       <p>{s.shieldApps(apps.join(", "))}</p>
       <p>{s.shieldText}</p>
