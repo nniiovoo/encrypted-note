@@ -44,8 +44,8 @@ pub trait Clock: Send {
 pub trait Clipboard: Send {
     /// Put `text` on the clipboard privately; return the clipboard's change count after the write.
     fn write(&mut self, text: &str) -> Result<u64, ApiError>;
-    /// Clear the clipboard, but only if its change count still equals `change_count`.
-    fn clear_if(&mut self, change_count: u64);
+    /// Clear it if unchanged. Returns false only when clearing should be retried.
+    fn clear_if(&mut self, change_count: u64) -> bool;
 }
 
 pub struct Config {
@@ -109,6 +109,8 @@ pub struct SettingsInput {
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct AppStatus {
+    /// Increases for every snapshot or event sent to the WebView, so older async results can be ignored.
+    pub revision: u64,
     pub phase: &'static str,
     pub platform: &'static str,
     pub capture_hiding_active: Option<bool>,
@@ -120,6 +122,7 @@ pub struct AppStatus {
     pub retry_in_ms: Option<u64>,
     pub show_recovery_hint: bool,
     pub backup: BackupView,
+    pub purge_trash_failed: bool,
     pub settings: SettingsView,
 }
 
@@ -321,8 +324,7 @@ pub struct AppCore {
     backup_destination: Option<PathBuf>,
     backup_to_open: Option<PathBuf>,
     inspected: Option<Inspected>,
-    /// An unlock found the Vault file damaged: allow restoring a Safety Copy or Backup while Locked.
-    vault_damaged: bool,
+    purge_trash_failed: bool,
 }
 
 impl AppCore {
@@ -360,7 +362,7 @@ impl AppCore {
             backup_destination: None,
             backup_to_open: None,
             inspected: None,
-            vault_damaged: false,
+            purge_trash_failed: false,
         })
     }
 
@@ -371,6 +373,7 @@ impl AppCore {
         let shield = self.guard.shield_apps();
         let lock = self.session.settings();
         AppStatus {
+            revision: 0,
             phase: match self.phase {
                 Phase::NoVault => "no_vault",
                 Phase::ConfirmRecoveryKit { .. } => "confirm_recovery_kit",
@@ -408,6 +411,7 @@ impl AppCore {
                 ),
                 unbacked_changes: self.settings.oldest_unbacked_change_at.is_some(),
             },
+            purge_trash_failed: self.purge_trash_failed,
             settings: SettingsView {
                 idle_minutes: lock.idle_minutes,
                 lock_on_app_switch: lock.lock_on_app_switch,
@@ -563,7 +567,7 @@ impl AppCore {
             let doc = Document::from_json(&body).map_err(notes_error)?;
             Ok(Box::new(Open { vault, doc }))
         });
-        let open = opened.inspect_err(|e| self.vault_damaged |= e.code == "damaged")?;
+        let open = opened?;
         self.start_session();
         self.set_phase(match cred {
             Cred::Password(_) => Phase::Unlocked(open),
@@ -587,9 +591,18 @@ impl AppCore {
             &self.limits,
         )
         .map_err(|e| format_error(e, CredKind::RecoveryKey))?;
+        let before = open.doc.to_json();
+        open.doc.touch(self.clock.unix_secs());
         // If this save fails, only memory has the new slot; the owner stays here and can retry,
         // and locking throws it away.
-        self.save()?;
+        if let Err(e) = self.save() {
+            if let (Phase::NeedsNewPassword { open, .. }, Ok(doc)) =
+                (&mut self.phase, Document::from_json(&before))
+            {
+                open.doc = doc;
+            }
+            return Err(e);
+        }
         self.note_change();
         if let Phase::NeedsNewPassword { open, .. } =
             std::mem::replace(&mut self.phase, Phase::Locked)
@@ -928,6 +941,8 @@ impl AppCore {
                 vault_format::change_password(&mut open.vault, current.credential(), &new, &limits)
             })?;
             self.session.unlocked(now); // this Vault's password: reset the wrong-password count
+            let before = open.doc.to_json();
+            open.doc.touch(self.clock.unix_secs());
             if let Err(e) = self.save() {
                 // Put the old password back in memory too, so a later save can't switch it silently.
                 if let (Phase::Unlocked(open), Cred::Password(old)) = (&mut self.phase, &current) {
@@ -937,6 +952,9 @@ impl AppCore {
                         old,
                         &limits,
                     );
+                    if let Ok(doc) = Document::from_json(&before) {
+                        open.doc = doc;
+                    }
                 }
                 return Err(e);
             }
@@ -1007,7 +1025,12 @@ impl AppCore {
                 Effect::Lock => self.forget_open_vaults(),
                 // The screens drop the shown value when status.reveal goes away.
                 Effect::HideReveal => {}
-                Effect::ClearClipboardIfUnchanged(count) => self.clipboard.clear_if(count),
+                Effect::ClearClipboardIfUnchanged(count) => {
+                    if !self.clipboard.clear_if(count) {
+                        self.session
+                            .retry_clipboard_clear(count, self.clock.now_ms());
+                    }
+                }
             }
         }
     }
@@ -1067,13 +1090,11 @@ impl AppCore {
         }
     }
 
-    /// While Locked only once an unlock found the Vault file damaged ("Restore a Safety Copy or
-    /// Backup"). Opening one still takes its credential, under the wrong-credential delays.
+    /// Backups are available in NoVault, Locked and Unlocked states. Every copy still takes its
+    /// credential under the wrong-credential delays.
     fn backups_allowed(&self) -> Result<(), ApiError> {
         match self.phase {
-            Phase::NoVault | Phase::Unlocked(_) => Ok(()),
-            Phase::Locked if self.vault_damaged => Ok(()),
-            Phase::Locked => Err(locked()),
+            Phase::NoVault | Phase::Locked | Phase::Unlocked(_) => Ok(()),
             _ => Err(not_now()),
         }
     }
@@ -1146,11 +1167,26 @@ impl AppCore {
     /// Remove Notes that have been in Trash for 30 days (after an unlock).
     fn purge_trash(&mut self) {
         let now = self.clock.unix_secs();
-        if let Phase::Unlocked(open) | Phase::NeedsNewPassword { open, .. } = &mut self.phase
-            && open.doc.purge_expired(now) > 0
-            && self.save().is_ok()
-        {
-            self.note_change();
+        let before = match &self.phase {
+            Phase::Unlocked(open) | Phase::NeedsNewPassword { open, .. } => open.doc.to_json(),
+            _ => return,
+        };
+        let changed = match &mut self.phase {
+            Phase::Unlocked(open) | Phase::NeedsNewPassword { open, .. } => {
+                open.doc.purge_expired(now) > 0
+            }
+            _ => false,
+        };
+        if changed {
+            if self.save().is_ok() {
+                self.purge_trash_failed = false;
+                self.note_change();
+            } else if let (Phase::Unlocked(open) | Phase::NeedsNewPassword { open, .. }, Ok(doc)) =
+                (&mut self.phase, Document::from_json(&before))
+            {
+                open.doc = doc;
+                self.purge_trash_failed = true;
+            }
         }
     }
 
@@ -1236,7 +1272,6 @@ impl AppCore {
         }
         let effects = self.session.end_reveal();
         self.apply(effects);
-        self.vault_damaged = false;
         self.start_session();
         let Inspected {
             open, recovery_key, ..
@@ -1390,6 +1425,7 @@ const MSG_NO_VAULT: &str = "There's no Vault on this computer yet.";
 const MSG_SAFETY_COPY_GONE: &str = "That Safety Copy isn't there any more.";
 const MSG_VERIFY_FAILED: &str =
     "The file was written but didn't read back correctly, so it wasn't used. Nothing was changed.";
+const MSG_BACKUP_OVERWRITE_NOT_ATOMIC: &str = "This Backup already exists, and encrypted-note can't safely replace it with the access the file picker granted. Choose a new file name. Nothing was changed.";
 const MSG_INTERNAL: &str = "Something went wrong inside encrypted-note. Nothing was changed.";
 
 fn err(code: &'static str, message: &str) -> ApiError {
@@ -1457,6 +1493,7 @@ fn store_error(e: StoreError) -> ApiError {
         StoreError::NoVault => err("not_found", MSG_NO_VAULT),
         StoreError::NotFound => err("not_found", MSG_SAFETY_COPY_GONE),
         StoreError::VerifyFailed => err("io", MSG_VERIFY_FAILED),
+        StoreError::BackupOverwriteNotAtomic => err("io", MSG_BACKUP_OVERWRITE_NOT_ATOMIC),
         StoreError::Io(e) => ApiError {
             code: "io",
             message: format!(

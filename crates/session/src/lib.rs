@@ -317,6 +317,21 @@ impl Session {
             due_at: now.saturating_add(CLIPBOARD_CLEAR_MS),
         });
     }
+
+    /// Keep a failed clear retryable after its original timer or lock event has fired.
+    pub fn retry_clipboard_clear(&mut self, change_count: u64, now: Millis) {
+        if self
+            .clipboard
+            .as_ref()
+            .is_none_or(|pending| pending.change_count == change_count)
+        {
+            self.clipboard = Some(PendingClear {
+                change_count,
+                due_at: now.saturating_add(250),
+            });
+        }
+    }
+
     /// When the pending clipboard clear is due (for the countdown). `None` if nothing pending.
     pub fn clipboard_clear_at(&self) -> Option<Millis> {
         self.clipboard.as_ref().map(|pending| pending.due_at)

@@ -114,11 +114,12 @@ mod mac {
             Ok(change_count(&pasteboard))
         }
 
-        fn clear_if(&mut self, count: u64) {
+        fn clear_if(&mut self, count: u64) -> bool {
             let pasteboard = NSPasteboard::generalPasteboard();
             if change_count(&pasteboard) == count {
                 pasteboard.clearContents();
             }
+            true
         }
     }
 
@@ -237,16 +238,19 @@ mod win {
     use windows::Win32::System::RemoteDesktop::{
         NOTIFY_FOR_THIS_SESSION, WTSRegisterSessionNotification, WTSUnRegisterSessionNotification,
     };
-    use windows::Win32::System::SystemServices::GUID_CONSOLE_DISPLAY_STATE;
+    use windows::Win32::System::SystemServices::{
+        GUID_CONSOLE_DISPLAY_STATE, GUID_LIDSWITCH_STATE_CHANGE,
+    };
     use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
     use windows::Win32::UI::WindowsAndMessaging::{
-        DEVICE_NOTIFY_WINDOW_HANDLE, GWL_EXSTYLE, GetWindowDisplayAffinity, GetWindowLongW,
-        KillTimer, LWA_ALPHA, PBT_APMSUSPEND, PBT_POWERSETTINGCHANGE, SIZE_MAXIMIZED,
-        SIZE_MINIMIZED, SIZE_RESTORED, STYLESTRUCT, SWP_SHOWWINDOW, SetLayeredWindowAttributes,
-        SetTimer, SetWindowDisplayAffinity, SetWindowLongW, WDA_EXCLUDEFROMCAPTURE, WINDOWPOS,
-        WM_DESTROY, WM_NCDESTROY, WM_POWERBROADCAST, WM_SIZE, WM_STYLECHANGING, WM_TIMER,
-        WM_WINDOWPOSCHANGED, WM_WTSSESSION_CHANGE, WS_EX_LAYERED, WTS_CONSOLE_DISCONNECT,
-        WTS_REMOTE_DISCONNECT, WTS_SESSION_LOCK, WTS_SESSION_LOGOFF,
+        DEVICE_NOTIFY_WINDOW_HANDLE, GWL_EXSTYLE, GetForegroundWindow, GetWindowDisplayAffinity,
+        GetWindowLongW, GetWindowThreadProcessId, KillTimer, LWA_ALPHA, PBT_APMSUSPEND,
+        PBT_POWERSETTINGCHANGE, SIZE_MAXIMIZED, SIZE_MINIMIZED, SIZE_RESTORED, STYLESTRUCT,
+        SWP_SHOWWINDOW, SetLayeredWindowAttributes, SetTimer, SetWindowDisplayAffinity,
+        SetWindowLongW, WDA_EXCLUDEFROMCAPTURE, WINDOWPOS, WM_DESTROY, WM_NCDESTROY,
+        WM_POWERBROADCAST, WM_SIZE, WM_STYLECHANGING, WM_TIMER, WM_WINDOWPOSCHANGED,
+        WM_WTSSESSION_CHANGE, WS_EX_LAYERED, WTS_CONSOLE_DISCONNECT, WTS_REMOTE_DISCONNECT,
+        WTS_SESSION_LOCK, WTS_SESSION_LOGOFF,
     };
     use windows::core::{PCWSTR, w};
 
@@ -384,16 +388,18 @@ mod win {
             })
         }
 
-        fn clear_if(&mut self, count: u64) {
+        fn clear_if(&mut self, count: u64) -> bool {
             // No owner window: this may run at exit, after the main window is gone.
             let Some(_open) = OpenedClipboard::open(None) else {
-                return;
+                return false;
             };
             // Compared while we hold the clipboard, so nobody can write in between.
             // SAFETY: plain calls; the clipboard is open (`_open`).
             unsafe {
-                if u64::from(GetClipboardSequenceNumber()) == count {
-                    let _ = EmptyClipboard();
+                if u64::from(GetClipboardSequenceNumber()) != count {
+                    true
+                } else {
+                    EmptyClipboard().is_ok()
                 }
             }
         }
@@ -452,19 +458,23 @@ mod win {
     }
 
     static ON_EVENT: OnceLock<Box<dyn Fn(OsEvent) + Send + Sync>> = OnceLock::new();
+    /// Stops the foreground-process watcher when the main window is destroyed.
+    static FOREGROUND_RUNNING: AtomicBool = AtomicBool::new(false);
     /// Set while the main window is minimized, so restoring it re-applies Capture Hiding once.
     static MINIMIZED: AtomicBool = AtomicBool::new(false);
     /// Set once Capture Hiding is applied, so `WS_EX_LAYERED` survives tao's style rewrites.
     static CAPTURE_HIDING: AtomicBool = AtomicBool::new(false);
     /// The display-state registration's `HPOWERNOTIFY` (0 if none), undone in WM_DESTROY.
     static POWER_NOTIFY: AtomicIsize = AtomicIsize::new(0);
+    /// The lid-state registration's `HPOWERNOTIFY` (0 if none), undone in WM_DESTROY.
+    static LID_NOTIFY: AtomicIsize = AtomicIsize::new(0);
     const SUBCLASS_ID: usize = 1;
     /// Our WM_TIMER id for retrying the session registration; distinct from tao's timer ids.
     const SESSION_RETRY_TIMER: u32 = 0x454E_4F54;
     const SESSION_RETRY_MS: u32 = 2000;
 
-    /// Call `on_event` for screen lock, display off (lid close), sleep, user switch, disconnect
-    /// and log off, from the main window's messages; app switches arrive as window focus events.
+    /// Call `on_event` for screen lock, display off, lid close, sleep, user switch, disconnect
+    /// and log off. A foreground-process watcher also catches app switches during a file picker.
     /// Also applies Capture Hiding (see [`apply_capture_hiding`]) and makes the main window the
     /// owner of our clipboard writes. Must be called on the main thread, which owns the window;
     /// lasts until it closes. A registration that fails is logged to stderr; the session one is
@@ -492,6 +502,22 @@ mod win {
             return;
         }
         let _ = ON_EVENT.set(Box::new(on_event));
+        if !FOREGROUND_RUNNING.swap(true, Ordering::SeqCst) {
+            let process = std::process::id();
+            std::thread::spawn(move || {
+                let mut active = foreground_process_is(process);
+                while FOREGROUND_RUNNING.load(Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_millis(200));
+                    let next = foreground_process_is(process);
+                    if active && !next {
+                        notify(OsEvent::FocusLost);
+                    } else if !active && next {
+                        notify(OsEvent::FocusGained);
+                    }
+                    active = next;
+                }
+            });
+        }
         if !register_session_notification(hwnd) {
             eprintln!(
                 "encrypted-note: session notifications unavailable (screen lock, user switch, \
@@ -525,6 +551,18 @@ mod win {
                  locks the app only if the machine sleeps"
             ),
         }
+        match unsafe {
+            RegisterPowerSettingNotification(
+                HANDLE(hwnd.0),
+                &GUID_LIDSWITCH_STATE_CHANGE,
+                DEVICE_NOTIFY_WINDOW_HANDLE,
+            )
+        } {
+            Ok(handle) => LID_NOTIFY.store(handle.0, Ordering::SeqCst),
+            Err(error) => eprintln!(
+                "encrypted-note: lid-close notifications unavailable ({error}); closing the lid locks the app only if the machine sleeps"
+            ),
+        }
     }
 
     /// Screen lock, user switch, disconnect and log off, delivered to `hwnd`.
@@ -537,6 +575,19 @@ mod win {
     fn notify(event: OsEvent) {
         if let Some(on_event) = ON_EVENT.get() {
             on_event(event);
+        }
+    }
+
+    fn foreground_process_is(process: u32) -> bool {
+        // SAFETY: these calls only read the foreground window and its owning process id.
+        unsafe {
+            let window = GetForegroundWindow();
+            if window.0.is_null() {
+                return false;
+            }
+            let mut foreground = 0;
+            GetWindowThreadProcessId(window, Some(&mut foreground));
+            foreground == process
         }
     }
 
@@ -589,13 +640,17 @@ mod win {
                 // SAFETY: for PBT_POWERSETTINGCHANGE, lParam points to a POWERBROADCAST_SETTING
                 // valid for this call; `Data[0]` is inside the struct. For the display state it
                 // is the low byte of a DWORD: 0 off, 1 on, 2 dimmed.
-                let off = !setting.is_null()
+                let lock = !setting.is_null()
                     && unsafe {
-                        (*setting).PowerSetting == GUID_CONSOLE_DISPLAY_STATE
-                            && (*setting).DataLength >= 1
-                            && (*setting).Data[0] == 0
+                        let setting = &*setting;
+                        (setting.PowerSetting == GUID_CONSOLE_DISPLAY_STATE
+                            && setting.DataLength >= 1
+                            && setting.Data[0] == 0)
+                            || (setting.PowerSetting == GUID_LIDSWITCH_STATE_CHANGE
+                                && setting.DataLength >= 4
+                                && setting.Data[0] == 0)
                     };
-                if off {
+                if lock {
                     notify(OsEvent::ScreenLocked);
                 }
             }
@@ -632,6 +687,8 @@ mod win {
             }
             (WM_DESTROY, _) => {
                 let power = POWER_NOTIFY.swap(0, Ordering::SeqCst);
+                let lid = LID_NOTIFY.swap(0, Ordering::SeqCst);
+                FOREGROUND_RUNNING.store(false, Ordering::SeqCst);
                 // SAFETY: the window still exists during WM_DESTROY, as unregistering requires;
                 // `power` is the handle RegisterPowerSettingNotification returned, freed once.
                 unsafe {
@@ -639,6 +696,9 @@ mod win {
                     let _ = WTSUnRegisterSessionNotification(hwnd);
                     if power != 0 {
                         let _ = UnregisterPowerSettingNotification(HPOWERNOTIFY(power));
+                    }
+                    if lid != 0 {
+                        let _ = UnregisterPowerSettingNotification(HPOWERNOTIFY(lid));
                     }
                 }
             }
@@ -685,7 +745,9 @@ mod other {
             })
         }
 
-        fn clear_if(&mut self, _count: u64) {}
+        fn clear_if(&mut self, _count: u64) -> bool {
+            true
+        }
     }
 
     pub fn observe_lock_events(

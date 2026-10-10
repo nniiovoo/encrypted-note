@@ -16,14 +16,11 @@ export function App() {
   useEffect(() => {
     // Rust pushes every change; polling each second also keeps the countdowns ticking. A poll
     // answered after a newer event is stale (it could bring titles back behind the Shield).
-    let received = 0;
     const unlisten = onStatusChanged((next) => {
-      received++;
-      setStatus(next);
+      setStatus((current) => !current || next.revision > current.revision ? next : current);
     });
     const poll = () => {
-      const seen = received;
-      appStatus().then((next) => seen === received && setStatus(next), () => {});
+      appStatus().then((next) => setStatus((current) => !current || next.revision > current.revision ? next : current), () => {});
     };
     poll();
     const timer = setInterval(poll, 1000);
@@ -67,9 +64,8 @@ export function App() {
 }
 
 function Screen({ status, kit, setKit }: { status: AppStatus; kit: Kit | null; setKit: (kit: Kit) => void }) {
-  // Only where something sensitive is on screen: the welcome and lock screens show nothing secret,
-  // and Rust forgets any dismissal when a session starts, so dismissing there would be wasted.
-  const sensitive = status.phase !== "no_vault" && status.phase !== "locked";
+  // The first-run screen can show a suggested Master Password in plain text.
+  const sensitive = status.phase !== "locked";
   if (status.sharing_guard.up && sensitive) return <Shield apps={status.sharing_guard.apps} />;
   switch (status.phase) {
     case "no_vault":

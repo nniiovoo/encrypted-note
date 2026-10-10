@@ -181,18 +181,15 @@ fn background(app: &AppHandle) {
         } else {
             None
         };
-        let status = {
-            let mut core = commands::core(app);
-            if let Some((apps, capture_hiding_active)) = probe {
-                core.guard_update(&apps);
-                core.set_capture_hiding_active(capture_hiding_active);
-            }
-            core.tick();
-            core.app_status()
-        };
-        let key = without_countdowns(status.clone());
+        let mut core = commands::core(app);
+        if let Some((apps, capture_hiding_active)) = probe {
+            core.guard_update(&apps);
+            core.set_capture_hiding_active(capture_hiding_active);
+        }
+        core.tick();
+        let key = without_countdowns(core.app_status());
         if last.as_ref() != Some(&key) {
-            let _ = app.emit(STATUS_EVENT, status);
+            let _ = app.emit(STATUS_EVENT, commands::status(&core));
             last = Some(key);
         }
     }

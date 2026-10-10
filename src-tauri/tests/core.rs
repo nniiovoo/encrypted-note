@@ -22,13 +22,25 @@ const DAY_MS: u64 = 24 * 60 * 60 * 1000;
 
 // ---------- fakes ----------
 
-struct FakeClock(Arc<AtomicU64>);
+struct FakeClock {
+    ms: Arc<AtomicU64>,
+    break_vault_on_next_wall_clock_read: Arc<Mutex<Option<PathBuf>>>,
+}
 
 impl Clock for FakeClock {
     fn now_ms(&self) -> u64 {
-        self.0.load(Ordering::SeqCst)
+        self.ms.load(Ordering::SeqCst)
     }
     fn unix_secs(&self) -> i64 {
+        if let Some(vault) = self
+            .break_vault_on_next_wall_clock_read
+            .lock()
+            .unwrap()
+            .take()
+        {
+            std::fs::rename(&vault, vault.with_extension("saved")).unwrap();
+            std::fs::create_dir(&vault).unwrap();
+        }
         START_UNIX + i64::try_from(self.now_ms() / 1000).unwrap()
     }
 }
@@ -37,6 +49,7 @@ impl Clock for FakeClock {
 struct Board {
     text: Option<String>,
     change_count: u64,
+    clear_failures: u32,
 }
 
 struct FakeClipboard(Arc<Mutex<Board>>);
@@ -48,12 +61,17 @@ impl Clipboard for FakeClipboard {
         board.text = Some(text.to_owned());
         Ok(board.change_count)
     }
-    fn clear_if(&mut self, change_count: u64) {
+    fn clear_if(&mut self, change_count: u64) -> bool {
         let mut board = self.0.lock().unwrap();
+        if board.clear_failures > 0 {
+            board.clear_failures -= 1;
+            return false;
+        }
         if board.change_count == change_count {
             board.change_count += 1;
             board.text = None;
         }
+        true
     }
 }
 
@@ -61,6 +79,7 @@ struct App {
     core: AppCore,
     ms: Arc<AtomicU64>,
     board: Arc<Mutex<Board>>,
+    break_vault_on_next_wall_clock_read: Arc<Mutex<Option<PathBuf>>>,
     temp: tempfile::TempDir,
 }
 
@@ -71,11 +90,18 @@ impl App {
             Arc::new(AtomicU64::new(1_000)),
             Arc::new(Mutex::new(Board::default())),
         );
-        let core = start(temp.path(), &ms, &board);
+        let break_vault_on_next_wall_clock_read = Arc::new(Mutex::new(None));
+        let core = start(
+            temp.path(),
+            &ms,
+            &board,
+            &break_vault_on_next_wall_clock_read,
+        );
         App {
             core,
             ms,
             board,
+            break_vault_on_next_wall_clock_read,
             temp,
         }
     }
@@ -86,14 +112,21 @@ impl App {
             core,
             ms,
             board,
+            break_vault_on_next_wall_clock_read,
             temp,
         } = self;
         drop(core);
-        let core = start(temp.path(), &ms, &board);
+        let core = start(
+            temp.path(),
+            &ms,
+            &board,
+            &break_vault_on_next_wall_clock_read,
+        );
         App {
             core,
             ms,
             board,
+            break_vault_on_next_wall_clock_read,
             temp,
         }
     }
@@ -104,6 +137,11 @@ impl App {
 
     fn data_dir(&self) -> PathBuf {
         self.temp.path().join("Vault.noindex")
+    }
+
+    fn break_vault_on_next_wall_clock_read(&self) {
+        *self.break_vault_on_next_wall_clock_read.lock().unwrap() =
+            Some(self.data_dir().join("vault.enote"));
     }
 
     fn phase(&self) -> &'static str {
@@ -122,12 +160,20 @@ impl App {
     }
 }
 
-fn start(root: &Path, ms: &Arc<AtomicU64>, board: &Arc<Mutex<Board>>) -> AppCore {
+fn start(
+    root: &Path,
+    ms: &Arc<AtomicU64>,
+    board: &Arc<Mutex<Board>>,
+    break_vault_on_next_wall_clock_read: &Arc<Mutex<Option<PathBuf>>>,
+) -> AppCore {
     AppCore::new(Config {
         data_dir: root.join("Vault.noindex"),
         home_dir: root.join("home"),
         limits: Limits::TESTING,
-        clock: Box::new(FakeClock(ms.clone())),
+        clock: Box::new(FakeClock {
+            ms: ms.clone(),
+            break_vault_on_next_wall_clock_read: break_vault_on_next_wall_clock_read.clone(),
+        }),
         clipboard: Box::new(FakeClipboard(board.clone())),
     })
     .unwrap()
@@ -1023,6 +1069,28 @@ fn a_copy_is_cleared_after_30_s_only_if_still_ours() {
 }
 
 #[test]
+fn a_failed_clipboard_clear_is_retried_after_lock() {
+    let mut app = App::new();
+    unlocked(&mut app);
+    let id = app
+        .core
+        .create_note(
+            input("api_key", "Fake", json!({}), json!({"key": "fake-key-2"})),
+            None,
+        )
+        .unwrap();
+    app.core.copy_field(&id, "key", None).unwrap();
+    app.board.lock().unwrap().clear_failures = 1;
+
+    app.core.lock();
+    assert_eq!(app.clipboard().as_deref(), Some("fake-key-2"));
+    assert_eq!(app.core.app_status().clipboard_clear_in_ms, Some(250));
+    app.advance(250);
+    app.core.tick();
+    assert_eq!(app.clipboard(), None);
+}
+
+#[test]
 fn auto_lock_after_the_chosen_idle_time_and_on_os_events() {
     let mut app = App::new();
     unlocked(&mut app);
@@ -1091,6 +1159,46 @@ fn trash_older_than_30_days_is_purged_at_unlock() {
             .list_notes(filter(json!({"type": "trash"})), "")
             .unwrap(),
         vec![]
+    );
+}
+
+#[test]
+fn failed_trash_purge_keeps_the_note_until_the_vault_can_be_saved() {
+    let mut app = App::new();
+    unlocked(&mut app);
+    let id = app
+        .core
+        .create_note(
+            input("text", "Fake", json!({}), json!({"body": "keep me"})),
+            None,
+        )
+        .unwrap();
+    app.core.trash_note(&id).unwrap();
+    app.core.lock();
+    app.advance(30 * DAY_MS);
+    let vault = app.data_dir().join("vault.enote");
+    app.break_vault_on_next_wall_clock_read();
+
+    app.core.unlock(password(PASSWORD)).unwrap();
+    assert!(app.core.app_status().purge_trash_failed);
+    assert_eq!(
+        app.core
+            .list_notes(filter(json!({"type": "trash"})), "")
+            .unwrap()
+            .len(),
+        1
+    );
+
+    std::fs::remove_dir(&vault).unwrap();
+    std::fs::rename(vault.with_extension("saved"), &vault).unwrap();
+    app.core.lock();
+    let mut app = app.restart();
+    app.core.unlock(password(PASSWORD)).unwrap();
+    assert!(
+        app.core
+            .list_notes(filter(json!({"type": "trash"})), "")
+            .unwrap()
+            .is_empty()
     );
 }
 
@@ -1235,9 +1343,42 @@ fn backups_need_an_unlocked_vault_or_no_vault() {
     unlocked(&mut app);
     app.core.lock();
     assert_eq!(code(app.core.backup_destination_allowed()), "locked");
-    assert_eq!(code(app.core.backup_to_open_allowed()), "locked");
-    assert_eq!(code(app.core.list_safety_copies()), "locked");
+    app.core.backup_to_open_allowed().unwrap();
+    assert!(app.core.list_safety_copies().is_ok());
     assert_eq!(code(app.core.write_backup()), "locked");
+}
+
+#[test]
+fn a_locked_vault_can_be_replaced_after_a_backup_is_authenticated() {
+    let mut app = App::new();
+    unlocked(&mut app);
+    app.core
+        .create_note(
+            input(
+                "text",
+                "Fake",
+                json!({}),
+                json!({"body": "fake restore content"}),
+            ),
+            None,
+        )
+        .unwrap();
+    let backup = app.temp.path().join("fake-restore.enote");
+    app.core.set_backup_destination(backup.clone()).unwrap();
+    app.core.write_backup().unwrap();
+    app.core.lock();
+
+    app.core.set_backup_to_open(backup).unwrap();
+    assert_eq!(
+        app.core
+            .inspect_backup(password(PASSWORD))
+            .unwrap()
+            .note_count,
+        1
+    );
+    app.core.replace_with_backup().unwrap();
+    assert_eq!(app.phase(), "unlocked");
+    assert_eq!(app.core.list_notes(all(), "").unwrap().len(), 1);
 }
 
 // ---------- account care ----------
@@ -1246,6 +1387,9 @@ fn backups_need_an_unlocked_vault_or_no_vault() {
 fn changing_the_master_password_keeps_the_recovery_key() {
     let mut app = App::new();
     let key = unlocked(&mut app);
+    let backup = app.temp.path().join("fake-old-password.enote");
+    app.core.set_backup_destination(backup.clone()).unwrap();
+    app.core.write_backup().unwrap();
     assert_eq!(
         code(app.core.change_password(pw(PASSWORD), pw("short"), false)),
         "weak_password"
@@ -1265,6 +1409,14 @@ fn changing_the_master_password_keeps_the_recovery_key() {
         None
     );
     assert_eq!(app.phase(), "unlocked");
+    app.core.set_backup_to_open(backup).unwrap();
+    assert_eq!(
+        app.core
+            .inspect_backup(password(PASSWORD))
+            .unwrap()
+            .older_than_current,
+        Some(true)
+    );
 
     let mut app = app.restart();
     assert_eq!(
@@ -1365,6 +1517,7 @@ fn status_has_the_shape_api_ts_expects() {
         .map(String::as_str)
         .collect();
     let mut expected = vec![
+        "revision",
         "phase",
         "platform",
         "capture_hiding_active",
@@ -1376,6 +1529,7 @@ fn status_has_the_shape_api_ts_expects() {
         "retry_in_ms",
         "show_recovery_hint",
         "backup",
+        "purge_trash_failed",
         "settings",
     ];
     expected.sort_unstable();
@@ -1391,6 +1545,8 @@ fn status_has_the_shape_api_ts_expects() {
         json!({"last_backup_at": null, "reminder_due": false, "unbacked_changes": false})
     );
     assert_eq!(status["sharing_guard"], json!({"up": false, "apps": []}));
+    assert_eq!(status["revision"], 0);
+    assert_eq!(status["purge_trash_failed"], false);
 }
 
 #[test]
@@ -1510,7 +1666,7 @@ fn a_damaged_vault_can_be_restored_from_a_safety_copy_while_locked() {
 
     let mut app = app.restart();
     assert_eq!(app.phase(), "locked");
-    assert_eq!(code(app.core.list_safety_copies()), "locked");
+    assert!(app.core.list_safety_copies().is_ok());
     let e = app.core.unlock(password(PASSWORD)).unwrap_err();
     assert_eq!(
         (e.code, e.message.as_str()),
@@ -1519,7 +1675,7 @@ fn a_damaged_vault_can_be_restored_from_a_safety_copy_while_locked() {
             "This Vault file is damaged. Restore a Safety Copy or Backup."
         )
     );
-    // Now the Safety Copies (and Backups) are offered.
+    // A damaged Vault can be replaced from a separately authenticated Safety Copy or Backup.
     app.core.backup_to_open_allowed().unwrap();
     let copies = app.core.list_safety_copies().unwrap();
     assert_eq!(

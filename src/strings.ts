@@ -91,6 +91,8 @@ export const strings = {
   tryAgainIn: (s: number) => `You can try again in ${s} s.`,
   forgotUseKit: "Forgot it? Use your Recovery Kit",
   useMasterPassword: "Use my Master Password instead",
+  restoreVault: "Restore a Backup or Safety Copy",
+  restoreVaultText: "Choose a saved copy, then open it with its Master Password or Recovery Key. This computer's current Vault will become a Safety Copy.",
   recoveryKeyHint: "Type the Recovery Key from your Recovery Kit. Dashes and spaces don't matter.",
 
   // Sharing Guard
@@ -102,6 +104,7 @@ export const strings = {
 
   // Home
   nav: { all: "All", favorites: "Favorites", trash: "Trash", settings: "Settings" },
+  trashPurgeFailed: "Some Trash could not be removed because the Vault couldn't be saved. The Notes are still in Trash; try again after checking that the Vault folder is writable.",
   navKinds: "Kinds",
   noteCount: (n: number) => plural(n, "Note", "Notes"),
   lockShortcut: (mac: boolean) => (mac ? "⌘L" : "Ctrl+L"),
@@ -236,6 +239,7 @@ export const strings = {
   safetyCopiesText: "Earlier versions of your Vault the app keeps automatically, in case something goes wrong.",
   safetyKinds: { automatic: "Automatic", replaced: "Before opening a Backup" } satisfies Record<"automatic" | "replaced", string>,
   noSafetyCopies: "No Safety Copies yet.",
+  seedPasteTooMany: "That paste contains more than 24 words. Clear the field and paste a 12- or 24-word phrase.",
   changePasswordTitle: "Change Master Password",
   changePasswordText: "Your Recovery Kit keeps working unless you choose that someone may know your old password.",
   whyChange: "Why are you changing it?",

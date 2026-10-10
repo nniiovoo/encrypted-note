@@ -2,8 +2,8 @@
 // and setting a new Master Password after a Recovery Key unlock.
 
 import { useState, type FormEvent } from "react";
-import { confirmRecoveryKit, createVault, lock, setNewPassword, unlock, type AppStatus } from "./api";
-import { AppIcon, ErrorLine, Field, NewPassword, SecretInput, seconds, useAction } from "./components";
+import { confirmRecoveryKit, createVault, listSafetyCopies, lock, setNewPassword, unlock, type AppStatus, type SafetyCopy } from "./api";
+import { AppIcon, ErrorLine, Field, formatDate, Modal, NewPassword, SecretInput, seconds, useAction } from "./components";
 import { Icon, type IconName } from "./icons";
 import { ReplaceVault } from "./Settings";
 import { strings as s } from "./strings";
@@ -118,6 +118,9 @@ export const KitLost = () => (
 export function Locked({ status }: { status: AppStatus }) {
   const [useKey, setUseKey] = useState(false);
   const [secret, setSecret] = useState("");
+  const [restore, setRestore] = useState<"choose" | "backup" | null>(null);
+  const [copies, setCopies] = useState<SafetyCopy[]>([]);
+  const [copy, setCopy] = useState<SafetyCopy | null>(null);
   const { busy, error, run } = useAction();
   const wait = status.retry_in_ms ? seconds(status.retry_in_ms) : 0;
   function submit(e: FormEvent) {
@@ -149,6 +152,35 @@ export function Locked({ status }: { status: AppStatus }) {
       >
         {useKey ? s.useMasterPassword : s.forgotUseKit}
       </button>
+      <button
+        className="link"
+        onClick={() => {
+          setRestore("choose");
+          run(async () => setCopies(await listSafetyCopies()));
+        }}
+      >
+        {s.restoreVault}
+      </button>
+      {restore === "choose" && (
+        <Modal title={s.restoreVault} onClose={() => setRestore(null)}>
+          <p>{s.restoreVaultText}</p>
+          <button className="primary" onClick={() => setRestore("backup")}>{s.openBackup}</button>
+          {copies.length > 0 && (
+            <ul className="rows">
+              {copies.map((item) => (
+                <li key={item.id} className="trash-row">
+                  <span>{formatDate(item.created_at)}</span>
+                  <button onClick={() => { setRestore(null); setCopy(item); }}>{s.restore}</button>
+                </li>
+              ))}
+            </ul>
+          )}
+          {copies.length === 0 && <p className="hint">{s.noSafetyCopies}</p>}
+          <ErrorLine error={error} />
+        </Modal>
+      )}
+      {restore === "backup" && <ReplaceVault onClose={() => setRestore(null)} />}
+      {copy && <ReplaceVault copy={copy} onClose={() => setCopy(null)} />}
     </div>
   );
 }
