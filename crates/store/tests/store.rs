@@ -740,11 +740,10 @@ fn parent_folder_steps_are_resolved_before_matching() {
     );
 }
 
-/// App Sandbox case: only the picked file is writable, not its folder, so no temp file can be
-/// created beside it. The Backup is then written in place, still flushed and verified.
+/// App Sandbox case: if a sibling temp file can't be created, an existing picked Backup stays intact.
 #[cfg(unix)]
 #[test]
-fn backup_falls_back_to_writing_the_picked_file_when_its_folder_is_read_only() {
+fn backup_does_not_truncate_a_picked_file_when_its_folder_is_read_only() {
     use std::os::unix::fs::PermissionsExt;
     let dir = tempfile::tempdir().unwrap();
     let dest = dir.path().join("picked.enote");
@@ -753,10 +752,15 @@ fn backup_falls_back_to_writing_the_picked_file_when_its_folder_is_read_only() {
 
     let result = write_backup(&dest, b"new backup bytes", &|b| b == b"new backup bytes");
     let rejected = write_backup(&dest, b"other bytes", &|_| false);
+    let on_disk = fs::read(&dest).unwrap();
     fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
 
-    result.unwrap();
-    assert!(matches!(rejected, Err(StoreError::VerifyFailed)));
+    if result.is_ok() {
+        assert_eq!(on_disk, b"new backup bytes");
+    } else {
+        assert_eq!(on_disk, b"old backup");
+    }
+    assert!(rejected.is_err());
     assert_eq!(
         fs::read_dir(dir.path()).unwrap().count(),
         1,

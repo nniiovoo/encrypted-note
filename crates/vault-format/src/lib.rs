@@ -469,8 +469,10 @@ pub fn calibrate(limits: &Limits, mut measure: impl FnMut(KdfParams) -> Duration
 /// Time one real Argon2id derivation with `params` (helper for [`calibrate`] in the app).
 pub fn measure_kdf(params: KdfParams) -> Duration {
     let started = Instant::now();
-    let _ = derive_kek(b"calibration-input", &[0u8; 16], params);
-    started.elapsed()
+    match derive_kek(b"calibration-input", &[0u8; 16], params) {
+        Ok(_) => started.elapsed(),
+        Err(_) => Duration::MAX,
+    }
 }
 
 /// Fill `buf` (a plain array, or a `Zeroizing` one for keys) from the OS random generator.

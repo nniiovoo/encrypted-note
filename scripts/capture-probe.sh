@@ -26,16 +26,26 @@ fi
 /bin/rm -f "$control"
 
 out=$(mktemp -t enote-probe).png
-if ! screencapture -x -o -l "$id" "$out" 2>/dev/null || [ ! -s "$out" ]; then
+if ! screencapture -x -o -l "$id" "$out" 2>/dev/null; then
+  /bin/rm -f "$out"
   echo "PASS: macOS refused to capture window $id."
   exit 0
 fi
-# A captured-but-blank window is also a pass: a blank PNG compresses to a few KB.
-size=$(stat -f %z "$out")
+if [ ! -s "$out" ]; then
+  /bin/rm -f "$out"
+  echo "CAN'T TEST: window capture produced no image."
+  exit 2
+fi
+# File size says nothing reliable about whether an image contains visible content.
+classification=$(swift "$(dirname "$0")/capture-image-classifier.swift" "$out") || {
+  /bin/rm -f "$out"
+  echo "CAN'T TEST: the captured image couldn't be inspected."
+  exit 2
+}
 /bin/rm -f "$out"
-if [ "$size" -lt 20000 ]; then
-  echo "PASS: window $id captured as a blank image ($size bytes)."
+if [ "$classification" = "blank" ]; then
+  echo "PASS: window $id captured as a uniform blank image."
 else
-  echo "FAIL: window $id was captured with visible content ($size bytes). Check Capture Hiding (ADR-0002)."
-  exit 1
+  echo "REVIEW: window $id produced a nonblank image. Inspect it for app content; file size cannot determine whether it shows the app or what is behind it."
+  exit 2
 fi

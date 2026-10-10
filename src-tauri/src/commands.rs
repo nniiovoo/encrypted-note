@@ -10,7 +10,7 @@
 //! `capabilities/main.json` grants each one (plus listening to events and dragging the window).
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use notes::keys::Chain;
@@ -33,6 +33,15 @@ pub struct CoreState(pub Mutex<AppCore>);
 /// True while a Backup file dialog is open. The dialog takes focus from our window, which must
 /// not count as switching to another app (that could lock the Vault mid-backup).
 pub static DIALOG_OPEN: AtomicBool = AtomicBool::new(false);
+static STATUS_REVISION: AtomicU64 = AtomicU64::new(0);
+
+pub fn status(core: &AppCore) -> AppStatus {
+    let mut status = core.app_status();
+    status.revision = STATUS_REVISION
+        .fetch_add(1, Ordering::Relaxed)
+        .saturating_add(1);
+    status
+}
 
 pub fn core<R: Runtime>(app: &AppHandle<R>) -> MutexGuard<'_, AppCore> {
     app.state::<CoreState>()
@@ -46,7 +55,7 @@ pub fn core<R: Runtime>(app: &AppHandle<R>) -> MutexGuard<'_, AppCore> {
 pub fn with_core<R: Runtime, T>(app: &AppHandle<R>, f: impl FnOnce(&mut AppCore) -> T) -> T {
     let mut core = core(app);
     let out = f(&mut core);
-    let _ = app.emit(STATUS_EVENT, core.app_status());
+    let _ = app.emit(STATUS_EVENT, status(&core));
     out
 }
 
@@ -75,7 +84,7 @@ pub fn os_event<R: Runtime>(app: &AppHandle<R>, event: OsEvent) {
 
 #[tauri::command(async)]
 pub fn app_status(app: AppHandle) -> AppStatus {
-    core(&app).app_status()
+    status(&core(&app))
 }
 
 #[tauri::command(async)]

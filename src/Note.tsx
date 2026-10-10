@@ -41,14 +41,18 @@ const label = (kind: Kind, field: string) => s.fields[kind][field] ?? field;
 /** A shown Hidden Field value. It is dropped on any status whose reveal doesn't name this Note
  *  and field (expiry, lock, Sharing Guard, another Note), on window blur and on unmount. */
 function useShown(noteId: string, status: AppStatus) {
-  const [shown, setShown] = useState<{ field: string; value: string; at: number } | null>(null);
+  const [shown, setShown] = useState<{ field: string; value: string } | null>(null);
+  const generation = useRef(0);
   useEffect(() => {
     const r = status.reveal;
-    // A status fetched just before the value arrived can't name it yet: allow 1.5 s for that.
-    setShown((v) => (v && (Date.now() - v.at < 1500 || (r?.note_id === noteId && r.field === v.field)) ? v : null));
-  }, [status, noteId]);
+    setShown((v) => (v && r?.note_id === noteId && r.field === v.field ? v : null));
+  }, [status.revision, status.reveal, noteId]);
   useEffect(() => {
-    const drop = () => setShown(null);
+    const drop = () => {
+      generation.current++;
+      setShown(null);
+      hideField().catch(() => {});
+    };
     window.addEventListener("blur", drop);
     return () => {
       window.removeEventListener("blur", drop);
@@ -58,8 +62,15 @@ function useShown(noteId: string, status: AppStatus) {
   return {
     shown,
     // A value that arrives after the window lost focus is never shown.
-    keep: (field: string, value: string) =>
-      document.hasFocus() ? setShown({ field, value, at: Date.now() }) : hideField().catch(() => {}),
+    version: () => generation.current,
+    keep: (field: string, value: string, version = generation.current) => {
+      if (version === generation.current && document.hasFocus()) {
+        setShown({ field, value });
+        return true;
+      }
+      hideField().catch(() => {});
+      return false;
+    },
     hide: () => {
       setShown(null);
       hideField().catch(() => {});
@@ -90,7 +101,7 @@ export function Detail(props: {
 }) {
   const { id, status } = props;
   const [note, setNote] = useState<NoteView | null>(null);
-  const { shown, keep, hide } = useShown(id, status);
+  const { shown, keep, hide, version } = useShown(id, status);
   const [modal, setModal] = useState<{ field: string; step: "show" | "confirm-copy" | "copy" } | null>(null);
   const { error, run } = useAction();
   useEffect(() => void run(async () => setNote(await getNote(id))), [id]);
@@ -99,7 +110,10 @@ export function Detail(props: {
   const wallet = isWalletKind(note.kind);
   const expires = status.reveal?.expires_in_ms;
   const show = (field: string) =>
-    wallet ? setModal({ field, step: "show" }) : run(async () => keep(field, await showField(id, field)));
+    wallet ? setModal({ field, step: "show" }) : run(async () => {
+      const requestedAt = version();
+      keep(field, await showField(id, field), requestedAt);
+    });
   const copy = (field: string) =>
     wallet
       ? setModal({ field, step: field === "words" ? "confirm-copy" : "copy" })
@@ -207,17 +221,18 @@ export function Detail(props: {
 function WalletShow(props: { id: string; field: string; name: string; status: AppStatus; onClose: () => void }) {
   const { id, field } = props;
   const [password, setPassword] = useState("");
-  const { shown, keep, hide } = useShown(id, props.status);
+  const { shown, keep, hide, version } = useShown(id, props.status);
   const holding = useRef(false);
   const { busy, error, run } = useAction();
   const expires = props.status.reveal?.expires_in_ms;
 
   const show = (mode: "held" | "accessible") => {
     const p = password;
+    const requestedAt = version();
     setPassword("");
     run(async () => {
       const value = await showWalletField(id, field, p, mode);
-      if (mode === "accessible" || holding.current) keep(field, value);
+      if (mode === "accessible" || holding.current) keep(field, value, requestedAt);
       else await hideField(); // let go before the password check finished
     }).then((ok) => {
       if (!ok) holding.current = false; // the button may be disabled before it's let go
@@ -301,6 +316,7 @@ export function Editor(props: {
   const [hidden, setHidden] = useState<Record<string, string>>({});
   const [words, setWords] = useState<string[]>(() => Array(Number(note?.visible.word_count ?? 12)).fill(""));
   const [warning, setWarning] = useState<string | null>(null);
+  const [pasteOverflow, setPasteOverflow] = useState(false);
   const [step, setStep] = useState<"explainer" | "password" | null>(null);
   const { busy, error, run } = useAction();
 
@@ -384,7 +400,7 @@ export function Editor(props: {
                   onChange={(n) => setWords((ws) => Array.from({ length: n }, (_, i) => ws[i] ?? ""))}
                 />
               );
-            if (f === "words") return <SeedGrid key={f} words={words} setWords={setWords} editing={!!note} />;
+            if (f === "words") return <SeedGrid key={f} words={words} setWords={setWords} editing={!!note} onOverflow={() => setPasteOverflow(true)} onAccepted={() => setPasteOverflow(false)} />;
             if (f === "chain")
               return <Choice key={f} label={name} options={CHAINS} value={chain} onChange={(c) => setVisible({ ...visible, chain: c })} />;
             if (!HIDDEN.includes(f))
@@ -410,13 +426,14 @@ export function Editor(props: {
           })}
         </div>
         {warning && <p className="warn">{warning}</p>}
+        {pasteOverflow && <p className="warn">{s.seedPasteTooMany}</p>}
         <ErrorLine error={error} />
         {missing && <p className="hint">{missing}</p>}
         <div className="actions end">
           <button type="button" onClick={props.onCancel}>
             {s.cancel}
           </button>
-          <button className="primary" disabled={busy || !!missing}>
+          <button className="primary" disabled={busy || !!missing || pasteOverflow}>
             {busy ? s.saving : s.save}
           </button>
         </div>
@@ -446,7 +463,13 @@ export function Editor(props: {
 }
 
 /** One password-type box per word (OS secure input), with in-page BIP39 suggestions. */
-function SeedGrid(props: { words: string[]; setWords: (update: (words: string[]) => string[]) => void; editing: boolean }) {
+function SeedGrid(props: {
+  words: string[];
+  setWords: (update: (words: string[]) => string[]) => void;
+  editing: boolean;
+  onOverflow: () => void;
+  onAccepted: () => void;
+}) {
   const [list, setList] = useState<string[]>([]);
   const [focus, setFocus] = useState<number | null>(null);
   const [active, setActive] = useState(0);
@@ -464,6 +487,11 @@ function SeedGrid(props: { words: string[]; setWords: (update: (words: string[])
   const set = (i: number, value: string) => {
     const parts = value.trim().split(/\s+/);
     const end = i + parts.length;
+    if (end > 24) {
+      props.onOverflow();
+      return;
+    }
+    props.onAccepted();
     setActive(0);
     props.setWords((ws) =>
       Array.from({ length: end > ws.length ? 24 : ws.length }, (_, j) => (j >= i && j < end ? (parts[j - i] ?? "") : (ws[j] ?? ""))),

@@ -64,6 +64,8 @@ export interface Settings {
 }
 
 export interface AppStatus {
+  /** Monotonic server sequence; late polls and events cannot roll the screen back. */
+  revision: number;
   phase: Phase;
   platform: "mac" | "windows" | "other";
   /** Result of the Capture Hiding self-check (ADR-0002). null = can't tell on this platform. */
@@ -80,6 +82,7 @@ export interface AppStatus {
   retry_in_ms: number | null;
   show_recovery_hint: boolean;
   backup: { last_backup_at: number | null; reminder_due: boolean; unbacked_changes: boolean };
+  purge_trash_failed: boolean;
   settings: Settings;
 }
 

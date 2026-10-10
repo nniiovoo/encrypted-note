@@ -77,6 +77,7 @@ export function Home({ status, onKit }: { status: AppStatus; onKit: (recoveryKey
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (!(e.metaKey || e.ctrlKey)) return;
+      if (document.querySelector("[role=dialog]")) return;
       const key = e.key.toLowerCase();
       if (key === "n") {
         e.preventDefault();
@@ -206,6 +207,7 @@ export function Home({ status, onKit }: { status: AppStatus; onKit: (recoveryKey
             <button onClick={() => go(SETTINGS)}>{s.goToBackups}</button>
           </div>
         )}
+        {status.purge_trash_failed && <div className="banner" role="alert">{s.trashPurgeFailed}</div>}
         {nav.type === "settings" ? (
           <Settings status={status} onKit={onKit} />
         ) : nav.type === "trash" ? (

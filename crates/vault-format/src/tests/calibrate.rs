@@ -173,3 +173,24 @@ fn a_memory_starved_machine_measures_cheap_settings_first() {
         vec![at(64 * MIB, 3), at(128 * MIB, 3), at(64 * MIB, 4)]
     );
 }
+
+#[test]
+fn a_failed_memory_measurement_is_not_treated_as_fast() {
+    let chosen = calibrate(&Limits::PRODUCTION, |params| {
+        if params.m_kib > 128 * MIB {
+            Duration::MAX
+        } else if params.m_kib == 128 * MIB {
+            Duration::from_millis(700)
+        } else {
+            Duration::from_millis(300)
+        }
+    });
+    assert_eq!(
+        chosen,
+        KdfParams {
+            m_kib: 128 * MIB,
+            t: 3,
+            p: 4
+        }
+    );
+}

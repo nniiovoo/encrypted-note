@@ -465,7 +465,8 @@ impl Document {
         Ok(())
     }
 
-    fn touch(&mut self, now: Timestamp) {
+    /// Mark a Vault-level change that does not alter an individual Note, such as a credential change.
+    pub fn touch(&mut self, now: Timestamp) {
         self.body.changed_at = now;
         self.body.change_counter = self.body.change_counter.saturating_add(1);
     }

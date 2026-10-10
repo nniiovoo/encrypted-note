@@ -113,19 +113,21 @@ export function Modal(props: { title: string; onClose: () => void; alert?: boole
   // Read during the first render, before any autoFocus inside the dialog moves focus.
   const [trigger] = useState(() => document.activeElement as HTMLElement | null);
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && topDialog() === dialog.current && onClose();
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
   // Keyboard focus stays inside the dialog, and goes back to what opened it afterwards.
   useEffect(() => {
     const el = dialog.current!;
-    const keep = () => el.contains(document.activeElement) || el.focus();
+    const keep = () => topDialog() !== el || el.contains(document.activeElement) || el.focus();
     keep();
     document.addEventListener("focusin", keep);
     return () => {
       document.removeEventListener("focusin", keep);
-      if (!el.isConnected && !document.querySelector("[role=dialog]")) trigger?.focus();
+      const top = topDialog();
+      if (top) top.focus();
+      else if (!el.isConnected) trigger?.focus();
     };
   }, []);
   return (
@@ -139,6 +141,8 @@ export function Modal(props: { title: string; onClose: () => void; alert?: boole
     </div>
   );
 }
+
+const topDialog = () => document.querySelectorAll<HTMLDivElement>("[role=dialog]").item(document.querySelectorAll("[role=dialog]").length - 1);
 
 export const Confirm = (props: { title: string; text: string; confirmLabel: string; onConfirm: () => void; onClose: () => void }) => (
   <Modal title={props.title} onClose={props.onClose} alert>

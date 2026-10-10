@@ -513,6 +513,23 @@ fn clipboard_clear_is_due_30_seconds_after_copy() {
 }
 
 #[test]
+fn failed_clipboard_clear_remains_scheduled_after_lock() {
+    let mut s = default_unlocked();
+    s.copied(100, T0);
+    assert_eq!(
+        s.lock(),
+        vec![Effect::ClearClipboardIfUnchanged(100), Effect::Lock]
+    );
+    s.retry_clipboard_clear(100, T0 + SEC);
+    assert_eq!(s.clipboard_clear_at(), Some(T0 + SEC + 250));
+    assert_eq!(s.tick(T0 + SEC + 249), vec![]);
+    assert_eq!(
+        s.tick(T0 + SEC + 250),
+        vec![Effect::ClearClipboardIfUnchanged(100)]
+    );
+}
+
+#[test]
 fn a_newer_copy_replaces_the_pending_clear() {
     let mut s = default_unlocked();
     s.copied(100, T0);

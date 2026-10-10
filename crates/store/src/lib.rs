@@ -48,6 +48,8 @@ pub enum StoreError {
     NotFound,
     /// The `verify` callback rejected what was written; nothing was replaced.
     VerifyFailed,
+    /// A sandboxed file picker granted only the existing file, so a sibling temp file cannot be made.
+    BackupOverwriteNotAtomic,
     Io(std::io::Error),
 }
 
@@ -306,26 +308,40 @@ pub fn write_backup(
         .unwrap_or(Path::new("."));
     match TempFile::write_verified(parent, bytes, verify) {
         Ok(temp) => temp.commit(dest),
-        // App Sandbox: a save panel grants the picked file, not its folder, so no temp file can be
-        // made beside it. Write the picked file itself (flushed, read back and verified); the
-        // Vault is untouched either way.
+        // App Sandbox: a save panel grants the picked file, not its folder, so no temp file can
+        // be made beside it. A new file is safe to write; overwriting in place could destroy it.
         Err(StoreError::Io(e)) if e.kind() == io::ErrorKind::PermissionDenied => {
-            let mut file = private_options()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .open(dest)?;
-            file.write_all(bytes)?;
-            file.sync_all()?;
-            drop(file);
-            let read_back = fs::read(dest)?;
-            if read_back != bytes || !verify(&read_back) {
-                return Err(StoreError::VerifyFailed);
-            }
-            Ok(())
+            write_new_backup_without_folder_access(dest, bytes, verify)
         }
         Err(e) => Err(e),
     }
+}
+
+fn write_new_backup_without_folder_access(
+    dest: &Path,
+    bytes: &[u8],
+    verify: &dyn Fn(&[u8]) -> bool,
+) -> Result<(), StoreError> {
+    let mut file = match private_options().write(true).create_new(true).open(dest) {
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+            return Err(StoreError::BackupOverwriteNotAtomic);
+        }
+        result => result?,
+    };
+    let result = (|| {
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        drop(file);
+        let read_back = fs::read(dest)?;
+        if read_back != bytes || !verify(&read_back) {
+            return Err(StoreError::VerifyFailed);
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(dest);
+    }
+    result
 }
 
 /// A written-and-verified temp file; removed on drop unless committed.
@@ -377,6 +393,30 @@ impl TempFile {
         #[cfg(unix)]
         let _ = dir.sync_all();
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{StoreError, write_new_backup_without_folder_access};
+
+    #[test]
+    fn sandbox_fallback_preserves_an_existing_backup_and_removes_failed_new_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let existing = dir.path().join("existing.enote");
+        std::fs::write(&existing, b"fake old backup").unwrap();
+        assert!(matches!(
+            write_new_backup_without_folder_access(&existing, b"fake new backup", &|_| true),
+            Err(StoreError::BackupOverwriteNotAtomic)
+        ));
+        assert_eq!(std::fs::read(&existing).unwrap(), b"fake old backup");
+
+        let new = dir.path().join("new.enote");
+        assert!(matches!(
+            write_new_backup_without_folder_access(&new, b"fake new backup", &|_| false),
+            Err(StoreError::VerifyFailed)
+        ));
+        assert!(!new.exists());
     }
 }
 
