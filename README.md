@@ -1,11 +1,16 @@
 # encrypted-note
 
-A calm, local-only desktop vault for **Seed Phrases, Private Keys, Logins, API Keys and private Text**, for Mac and Windows.
+![encrypted-note: Your secrets. On your computer. An ivory note and emerald padlock illustrate local encrypted storage.](docs/assets/readme-banner.png)
 
-- **Stays on your computer.** One encrypted file. The app has no network code at all: no sync, no account, no updater, no telemetry.
-- **Beginner-friendly.** A suggested 6-word Master Password, a Recovery Kit you write on paper, plain-English messages.
-- **Hidden until you choose.** Secret parts stay as dots until you click Show and hide again after 30 s. Seed Phrases and Private Keys need your Master Password again and show only while you hold the button.
-- **Screen-share aware.** The window asks the OS to keep it out of screenshots and screen shares, and a *Sharing Guard* covers the whole window while apps like Zoom, Teams, Discord, OBS or QuickTime are running.
+encrypted-note is a local-only desktop app for storing Seed Phrases, Private Keys, Logins, API Keys, and private text notes in one encrypted Vault on macOS and Windows.
+
+- **Local by design.** Your Vault stays on your computer. The app has no network code, accounts, syncing, updater, telemetry, or analytics.
+- **Recovery you control.** Choose your Master Password or use the app's six-word suggestion. Write down the Recovery Key shown once during setup and keep it in a paper Recovery Kit.
+- **Private by default.** Hidden Fields stay concealed until you choose Show and hide again when you open another Note. Logins, API Keys, and Text use a 30-second reveal. Seed Phrases and Private Keys require the Master Password for viewing or editing and offer hold-to-show or a 20-second timed reveal.
+- **Screen-sharing safeguards.** Capture Hiding is best-effort and asks the OS to exclude the app window. The Sharing Guard covers the window when known screen-sharing or recording apps are detected.
+- **Portable backups.** The Vault is one encrypted file. Create a Backup to open it on another computer; transfers are manual and encrypted-note does not sync data.
+
+Vault keys and decrypted Notes remain in the Rust core. The WebView receives only the Hidden Field you choose to reveal.
 
 > **Status: v1, personal project, not independently audited.** Keep an offline paper or metal backup of any Seed Phrase that holds real funds. This app is a convenient extra copy, not your only one.
 
