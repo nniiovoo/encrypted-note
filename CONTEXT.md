@@ -88,7 +88,7 @@ _Avoid_: using "passphrase" for the **Master Password**
 A **Kind** of **Note** holding one wallet/account private key, with the chain it belongs to and its public address.
 
 **Wallet Kinds**:
-**Seed Phrase** and **Private Key**, the **Kinds** that can move funds directly. Their **Hidden Fields** stay encrypted even while the app is **Unlocked**. Showing, adding or editing them needs the **Master Password** again, and shown values stay visible only while the Show button is held.
+**Seed Phrase** and **Private Key**, the **Kinds** that can move funds directly. Their **Hidden Fields** stay encrypted even while the app is **Unlocked**. Showing, adding or editing them needs the **Master Password** again. Shown values stay visible while the Show button or Space key is held, or for 20 seconds when the timed reveal option is chosen.
 _Avoid_: sensitive kinds, crypto notes
 
 **Login**:
