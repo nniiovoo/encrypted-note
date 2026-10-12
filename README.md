@@ -14,6 +14,14 @@ Vault keys and decrypted Notes remain in the Rust core. The WebView receives onl
 
 > **Status: v1, personal project, not independently audited.** Keep an offline paper or metal backup of any Seed Phrase that holds real funds. This app is a convenient extra copy, not your only one.
 
+## Product demo
+
+[![Recorded macOS walkthrough: find a Note, reveal a fictional password, and hide it again.](docs/assets/product-demo.gif)](docs/assets/product-demo.mp4)
+
+[Watch or download the full demo](docs/assets/product-demo.mp4) · 36 seconds · English captions
+
+Recorded on macOS with fictional sample data. Capture Hiding was disabled for this development recording. [Transcript and recording notes](docs/assets/product-demo.md).
+
 ## What it protects against, and what it can't
 
 | Protects | Doesn't protect |
