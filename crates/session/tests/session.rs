@@ -389,11 +389,66 @@ fn held_reveal_lasts_until_end_reveal() {
     s.start_reveal("note-1", "words", RevealMode::Held, T0)
         .unwrap();
     assert_eq!(s.current_reveal().unwrap().expires_at, None);
-    s.activity(T0 + 4 * MIN);
-    assert_eq!(s.tick(T0 + 4 * MIN + 30 * SEC), vec![]);
+    assert_eq!(s.tick(T0 + HELD_REVEAL_MAX_MS - 1), vec![]);
     assert!(s.current_reveal().is_some());
     assert_eq!(s.end_reveal(), vec![Effect::HideReveal]);
     assert_eq!(s.current_reveal(), None);
+}
+
+#[test]
+fn held_reveal_is_hidden_after_two_minutes_if_the_release_never_arrives() {
+    let mut s = default_unlocked();
+    s.start_reveal("note-1", "words", RevealMode::Held, T0)
+        .unwrap();
+    // Key auto-repeat keeps reporting activity; that must not keep the value on screen.
+    s.activity(T0 + MIN);
+    assert_eq!(s.tick(T0 + HELD_REVEAL_MAX_MS), vec![Effect::HideReveal]);
+    assert_eq!(s.current_reveal(), None);
+    assert!(s.is_unlocked());
+
+    // The backstop belongs to that reveal only: a later timed reveal keeps its own 30 s.
+    s.start_reveal("note-1", "password", RevealMode::Timed, T0 + 3 * MIN)
+        .unwrap();
+    assert_eq!(s.tick(T0 + 3 * MIN + TIMED_REVEAL_MS - 1), vec![]);
+    assert_eq!(
+        s.tick(T0 + 3 * MIN + TIMED_REVEAL_MS),
+        vec![Effect::HideReveal]
+    );
+}
+
+#[test]
+fn a_ninth_different_field_within_a_minute_is_refused() {
+    let mut s = default_unlocked();
+    for i in 0..MAX_FIELDS_PER_WINDOW {
+        let at = T0 + i as Millis * SEC;
+        s.start_reveal(&format!("note-{i}"), "password", RevealMode::Timed, at)
+            .unwrap();
+    }
+    let now = T0 + 10 * SEC;
+    assert_eq!(
+        s.start_reveal("note-x", "password", RevealMode::Timed, now),
+        Err(RevealRefused::TooMany(REVEAL_WINDOW_MS - 10 * SEC))
+    );
+    // The refused field is not shown, and the one shown before stays as it was.
+    assert_eq!(s.current_reveal().unwrap().note_id, "note-7");
+    // Showing a field again that was already shown costs nothing.
+    s.start_reveal("note-0", "password", RevealMode::Timed, now)
+        .unwrap();
+    // Locking and unlocking does not start a fresh allowance.
+    s.lock();
+    s.unlocked(now);
+    assert!(matches!(
+        s.start_reveal("note-x", "password", RevealMode::Timed, now),
+        Err(RevealRefused::TooMany(_))
+    ));
+    // A minute after the first one, there is room again.
+    s.start_reveal(
+        "note-x",
+        "password",
+        RevealMode::Timed,
+        T0 + REVEAL_WINDOW_MS,
+    )
+    .unwrap();
 }
 
 #[test]
@@ -441,6 +496,49 @@ fn focus_lost_with_lock_on_app_switch_hides_then_locks() {
         vec![Effect::HideReveal, Effect::Lock]
     );
     assert!(!s.is_unlocked());
+}
+
+#[test]
+fn locking_on_app_switch_leaves_a_copy_on_its_30_second_timer() {
+    let mut s = unlocked_session(LockSettings {
+        idle_minutes: 5,
+        lock_on_app_switch: true,
+    });
+    s.copied(9, T0);
+    // Switching to the other app to paste locks, but must not wipe the copy at once.
+    assert_eq!(s.os_event(OsEvent::FocusLost, T0 + SEC), vec![Effect::Lock]);
+    assert!(!s.is_unlocked());
+    assert_eq!(s.clipboard_clear_at(), Some(T0 + CLIPBOARD_CLEAR_MS));
+    assert_eq!(s.tick(T0 + CLIPBOARD_CLEAR_MS - 1), vec![]);
+    assert_eq!(
+        s.tick(T0 + CLIPBOARD_CLEAR_MS),
+        vec![Effect::ClearClipboardIfUnchanged(9)]
+    );
+    // Sleep, screen lock, user switch and quit still clear it at once.
+    for event in [OsEvent::Sleep, OsEvent::ScreenLocked, OsEvent::Quit] {
+        let mut s = Session::new(LockSettings::default());
+        s.copied(9, T0);
+        assert_eq!(
+            s.os_event(event, T0 + SEC),
+            vec![Effect::ClearClipboardIfUnchanged(9)],
+            "{event:?}"
+        );
+    }
+}
+
+#[test]
+fn restored_failures_keep_their_delay_after_a_restart() {
+    let mut s = Session::new(LockSettings::default());
+    s.restore_failures(5, T0);
+    assert_eq!(s.failed_attempts(), 5);
+    assert!(s.show_recovery_hint());
+    // Five failures earn the 5 s delay, counted from the restart.
+    assert_eq!(s.attempt_allowed(T0), Err(5 * SEC));
+    assert_eq!(s.attempt_allowed(T0 + 5 * SEC), Ok(()));
+    // The first three attempts never wait.
+    let mut s = Session::new(LockSettings::default());
+    s.restore_failures(2, T0);
+    assert_eq!(s.attempt_allowed(T0), Ok(()));
 }
 
 #[test]

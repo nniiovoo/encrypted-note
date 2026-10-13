@@ -5,7 +5,11 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
-use crate::{Kind, NoteId, NoteSummary, NoteView, NotesError, Timestamp, WalletCipher, field};
+use crate::keys::Chain;
+use crate::{
+    BASE_SCHEMA_VERSION, Kind, NoteId, NoteSummary, NoteView, NotesError, SCHEMA_VERSION,
+    Timestamp, WalletCipher, field, rules,
+};
 
 /// Visible fields that may be used as a list row's subtitle, in preference order.
 const SUBTITLE_FIELDS: [&str; 5] = [
@@ -16,13 +20,54 @@ const SUBTITLE_FIELDS: [&str; 5] = [
     field::SERVICE,
 ];
 
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+/// The body as it is held in memory. It has no schema version of its own: the version is
+/// checked when a body is read ([`ParsedBody`]) and worked out from the Notes whenever one is
+/// written ([`Body::schema_version`]), so it can never be out of step with them.
 pub(crate) struct Body {
+    pub changed_at: Timestamp,
+    pub change_counter: u64,
+    pub notes: Vec<StoredNote>,
+}
+
+/// The body as it is read.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ParsedBody {
     pub schema_version: u32,
     pub changed_at: Timestamp,
     pub change_counter: u64,
     pub notes: Vec<StoredNote>,
+}
+
+/// The body as it is written: the keys of [`ParsedBody`], in the same order, borrowing the
+/// Notes so that nothing is copied.
+#[derive(Serialize)]
+pub(crate) struct WrittenBody<'a> {
+    schema_version: u32,
+    changed_at: Timestamp,
+    change_counter: u64,
+    notes: &'a [StoredNote],
+}
+
+impl Body {
+    /// The oldest schema that can hold these Notes, which is the one written: 2 if any Note
+    /// has a value in a field schema 2 added, otherwise 1.
+    pub fn schema_version(&self) -> u32 {
+        if self.notes.iter().any(StoredNote::uses_schema_2) {
+            SCHEMA_VERSION
+        } else {
+            BASE_SCHEMA_VERSION
+        }
+    }
+
+    pub fn as_written(&self) -> WrittenBody<'_> {
+        WrittenBody {
+            schema_version: self.schema_version(),
+            changed_at: self.changed_at,
+            change_counter: self.change_counter,
+            notes: &self.notes,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -73,6 +118,36 @@ impl StoredNote {
         self.deleted_at.is_some()
     }
 
+    /// In Trash for [`crate::TRASH_RETENTION_SECS`] or longer at `now`.
+    pub fn expired(&self, now: Timestamp) -> bool {
+        self.deleted_at
+            .is_some_and(|d| d.saturating_add(crate::TRASH_RETENTION_SECS) <= now)
+    }
+
+    /// True if this Note has a value in a field that document schema 2 added.
+    pub fn uses_schema_2(&self) -> bool {
+        let added = self.kind.schema_2_fields();
+        self.visible
+            .keys()
+            .chain(self.plain.keys())
+            .chain(self.sealed.keys())
+            .any(|name| added.contains(&name.as_str()))
+    }
+
+    /// True if this Note has a value in the Hidden Field `name`.
+    fn has_value(&self, name: &str) -> bool {
+        self.plain.contains_key(name) || self.sealed.contains_key(name)
+    }
+
+    /// True if setting this title and these checked visible values would change nothing. (An
+    /// empty value asks for its field to be removed, so it matches a field that isn't there.)
+    pub fn already_has(&self, title: Option<&str>, visible: &[(String, String)]) -> bool {
+        title.is_none_or(|title| title == self.title)
+            && visible.iter().all(|(name, value)| {
+                self.visible.get(name).map_or("", String::as_str) == value.as_str()
+            })
+    }
+
     /// Applies checked changes. An empty visible value removes the field.
     pub fn apply(
         &mut self,
@@ -115,15 +190,51 @@ impl StoredNote {
         cipher.open(&self.id, name, &sealed)
     }
 
-    /// Title and visible values a search may match. Never Hidden Fields; `word_count` is a number,
-    /// not a description, so it is left out.
+    /// Title and visible values a search may match, plus the chain's name in words for a
+    /// Private Key. Never Hidden Fields; `word_count` is a number, not a description, so it is
+    /// left out.
     pub fn searchable_parts(&self) -> impl Iterator<Item = &str> {
-        std::iter::once(self.title.as_str()).chain(
-            self.visible
-                .iter()
-                .filter(|(k, _)| k.as_str() != field::WORD_COUNT)
-                .map(|(_, v)| v.as_str()),
-        )
+        std::iter::once(self.title.as_str())
+            .chain(
+                self.visible
+                    .iter()
+                    .filter(|(k, _)| k.as_str() != field::WORD_COUNT)
+                    .map(|(_, v)| v.as_str()),
+            )
+            .chain(self.chain_words().iter().copied())
+    }
+
+    /// For a Private Key on a chain the app knows, that chain's name in words: the stored
+    /// value is the short form (`evm`), and someone looking for the key types "ethereum".
+    fn chain_words(&self) -> &'static [&'static str] {
+        if self.kind != Kind::PrivateKey {
+            return &[];
+        }
+        self.visible
+            .get(field::CHAIN)
+            .and_then(|chain| Chain::parse(chain))
+            .map_or(&[], Chain::search_words)
+    }
+
+    /// True if every term (already lowercase) is found in some searchable part. The terms may
+    /// be in different parts. No terms at all matches every Note.
+    pub fn matches(&self, terms: &[&str]) -> bool {
+        if terms.is_empty() {
+            return true;
+        }
+        let parts: Vec<String> = self.searchable_parts().map(str::to_lowercase).collect();
+        terms
+            .iter()
+            .all(|term| parts.iter().any(|part| part.contains(term)))
+    }
+
+    /// The first non-empty subtitle field. A Seed Phrase row shows its wallet name or nothing:
+    /// an address there would read as the wallet's name.
+    fn subtitle(&self) -> Option<String> {
+        SUBTITLE_FIELDS
+            .iter()
+            .filter(|f| !(self.kind == Kind::SeedPhrase && **f == field::ADDRESS))
+            .find_map(|f| self.visible.get(*f).filter(|v| !v.is_empty()).cloned())
     }
 
     pub fn summary(&self) -> NoteSummary {
@@ -131,12 +242,20 @@ impl StoredNote {
             id: self.id.clone(),
             kind: self.kind,
             title: self.title.clone(),
-            subtitle: SUBTITLE_FIELDS
-                .iter()
-                .find_map(|f| self.visible.get(*f).filter(|v| !v.is_empty()).cloned()),
+            subtitle: self.subtitle(),
             favorite: self.favorite,
             updated_at: self.updated_at,
             deleted_at: self.deleted_at,
+            expires: self
+                .visible
+                .get(field::EXPIRES)
+                .filter(|_| self.kind == Kind::ApiKey)
+                .cloned(),
+            has_hidden: self
+                .kind
+                .hidden_fields()
+                .first()
+                .is_some_and(|name| self.has_value(name)),
         }
     }
 
@@ -150,12 +269,7 @@ impl StoredNote {
                 .kind
                 .hidden_fields()
                 .iter()
-                .map(|f| {
-                    (
-                        f.to_string(),
-                        self.plain.contains_key(*f) || self.sealed.contains_key(*f),
-                    )
-                })
+                .map(|f| (f.to_string(), self.has_value(f)))
                 .collect(),
             favorite: self.favorite,
             created_at: self.created_at,
@@ -181,6 +295,9 @@ impl StoredNote {
             }
             if value.is_empty() {
                 return bad(&format!("an empty visible field {name}"));
+            }
+            if !rules::allows(kind, name, value) {
+                return bad(&format!("a {name} that breaks the rule for that field"));
             }
         }
         let wallet = kind.is_wallet();

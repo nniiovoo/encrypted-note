@@ -32,6 +32,8 @@ const COMMANDS: &[&str] = &[
     "pick_backup_to_open",
     "inspect_backup",
     "replace_with_backup",
+    "discard_inspection",
+    "forget_backup_destination",
     "list_safety_copies",
     "inspect_safety_copy",
     "restore_safety_copy",

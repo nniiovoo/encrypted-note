@@ -1,7 +1,12 @@
 // Tauri isolation pattern (ADR-0003): every IPC message from the screens passes through this
 // sandboxed iframe before it reaches the Rust core. Only our own app commands, the event plugin
-// and the two window-drag commands are allowed through; anything else (e.g. injected by a
-// compromised npm package trying a plugin command) is dropped.
+// and the two window-drag commands are allowed through; a plugin command outside that list is
+// dropped.
+//
+// This is a second check, not the boundary. Only the payload is encrypted here; the command
+// name travels beside it, so script in the page could have one command approved and send
+// another. The boundary is the capability file (src-tauri/capabilities/main.json), which Rust
+// enforces: never grant a plugin permission there on the strength of this hook.
 const ALLOWED_PREFIXES = ["plugin:event|"];
 // Tauri's drag-region script: moving the window, and double-click to zoom, from the Mac title bar
 // strip (the title bar is drawn over the page).

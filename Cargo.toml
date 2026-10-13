@@ -48,6 +48,10 @@ dbg_macro = "deny"
 print_stdout = "deny"
 todo = "warn"
 
+[patch.crates-io]
+# Keep serde_json's parser scratch zeroizing for decrypted Note bodies.
+serde_json = { path = "vendor/serde_json" }
+
 # Debug builds: keep Argon2 fast (unlock and tests would otherwise take many seconds at
 # 512 MiB) and keep debug info small (the disk is tight).
 [profile.dev]
@@ -64,4 +68,9 @@ opt-level = 3
 opt-level = 3
 
 [profile.dev.package.blake2]
+opt-level = 3
+
+# zxcvbn scores a new Master Password on every keystroke; unoptimised it takes seconds on a
+# long one.
+[profile.dev.package.zxcvbn]
 opt-level = 3

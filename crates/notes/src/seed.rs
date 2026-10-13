@@ -128,7 +128,29 @@ fn sha256_first_byte(message: &[u8]) -> u8 {
     H0[0].wrapping_add(v[0]).to_be_bytes()[0]
 }
 
-/// Words (lowercased, trimmed) from a phrase, for storage as a single space-separated string.
+/// The phrase as it is stored: words separated by single spaces. A phrase made only of BIP39
+/// English words is lowercased (that is how every wallet writes them). Any other phrase keeps
+/// its letters exactly as typed, because for an unusual phrase the capitals may matter.
+pub fn for_storage(phrase: &str) -> String {
+    let lowered = Zeroizing::new(normalize(phrase));
+    let list = wordlist();
+    if lowered
+        .split_whitespace()
+        .all(|w| list.binary_search(&w).is_ok())
+    {
+        return (*lowered).clone();
+    }
+    let mut out = String::with_capacity(phrase.len());
+    for word in phrase.split_whitespace() {
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(word);
+    }
+    out
+}
+
+/// Words (lowercased, trimmed) from a phrase, as a single space-separated string.
 pub fn normalize(phrase: &str) -> String {
     // Built in one pre-sized buffer so no stray partial copies of the words are left behind.
     let mut out = String::with_capacity(phrase.len() * 2);

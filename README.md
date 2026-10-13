@@ -1,7 +1,5 @@
 # encrypted-note
 
-![encrypted-note: Your secrets. On your computer. An ivory note and emerald padlock illustrate local encrypted storage.](docs/assets/readme-banner.png)
-
 encrypted-note is a local-only desktop app for storing Seed Phrases, Private Keys, Logins, API Keys, and private text notes in one encrypted Vault on macOS and Windows.
 
 - **Local by design.** Your Vault stays on your computer. The app has no network code, accounts, syncing, updater, telemetry, or analytics.
@@ -57,7 +55,7 @@ For experiments, debug builds read `ENOTE_DEV_DATA_DIR=/some/folder` so your rea
 
 ## Tested so far
 
-- **Automated:** 320 tests, including tamper tests over every byte of a Vault file and the RFC 9106 and XChaCha20-Poly1305 reference vectors.
+- **Automated:** 439 tests, including tamper tests over every byte of a Vault file and the RFC 9106 and XChaCha20-Poly1305 reference vectors.
 - **By hand on macOS 26:** the main flows, clipboard privacy markers, the Sharing Guard with real apps, and a Backup read back by the Emergency Reader. Screen-capture results so far: [docs/capture-test.md](docs/capture-test.md).
 - **Windows:** the adapters compile but have **not yet been run on a real Windows PC**.
 

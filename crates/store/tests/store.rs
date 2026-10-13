@@ -4,8 +4,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use store::{
-    AUTO_SAFETY_KEEP, CloudProvider, REPLACED_SAFETY_KEEP_SECS, SAFETY_DIR, SETTINGS_FILE,
-    SafetyKind, StoreError, VAULT_FILE, VaultDir, cloud_location, write_backup,
+    AUTO_SAFETY_KEEP, CloudProvider, DAILY_SAFETY_KEEP_SECS, MAX_FILE_BYTES,
+    REPLACED_SAFETY_KEEP_SECS, SAFETY_DIR, SETTINGS_FILE, SafetyKind, StoreError, VAULT_FILE,
+    VaultDir, cloud_location, read_file, write_backup,
 };
 
 const DAY: i64 = 24 * 60 * 60;
@@ -190,7 +191,7 @@ fn each_save_keeps_the_previous_version_as_an_automatic_safety_copy() {
 }
 
 #[test]
-fn only_the_newest_automatic_safety_copies_are_kept() {
+fn the_newest_automatic_safety_copies_and_the_first_of_the_day_are_kept() {
     let (_tmp, root) = data_dir();
     let dir = VaultDir::open(&root).unwrap();
     let saves = AUTO_SAFETY_KEEP as i64 + 5;
@@ -199,15 +200,137 @@ fn only_the_newest_automatic_safety_copies_are_kept() {
             .unwrap();
     }
     let copies = dir.safety_copies().unwrap();
-    assert_eq!(copies.len(), AUTO_SAFETY_KEEP);
+    assert_eq!(copies.len(), AUTO_SAFETY_KEEP + 1);
     assert_eq!(copies[0].created_at, T0 + saves);
     assert_eq!(
         dir.read_safety_copy(&copies[0].id).unwrap(),
         format!("fake-vault-v{}", saves - 1).as_bytes()
     );
-    let oldest = copies.last().unwrap();
-    assert_eq!(oldest.created_at, T0 + saves - AUTO_SAFETY_KEEP as i64 + 1);
-    assert_eq!(entries(&root.join(SAFETY_DIR)).len(), AUTO_SAFETY_KEEP);
+    let tenth = &copies[AUTO_SAFETY_KEEP - 1];
+    assert_eq!(tenth.created_at, T0 + saves - AUTO_SAFETY_KEEP as i64 + 1);
+    // However many saves follow in one day, the Vault from before the first of them stays.
+    let first_of_day = copies.last().unwrap();
+    assert_eq!(
+        dir.read_safety_copy(&first_of_day.id).unwrap(),
+        b"fake-vault-v0"
+    );
+    assert_eq!(entries(&root.join(SAFETY_DIR)).len(), AUTO_SAFETY_KEEP + 1);
+}
+
+#[test]
+fn the_first_safety_copy_of_each_day_is_kept_for_30_days() {
+    let (_tmp, root) = data_dir();
+    let dir = VaultDir::open(&root).unwrap();
+    dir.save_vault(b"fake-day0-start", &accept, T0).unwrap();
+    // Three days, each with more saves than the count rule alone would remember.
+    for day in 0..3 {
+        for i in 1..=(AUTO_SAFETY_KEEP as i64 + 2) {
+            let bytes = format!("fake-day{day}-save{i}");
+            dir.save_vault(bytes.as_bytes(), &accept, T0 + day * DAY + i)
+                .unwrap();
+        }
+    }
+    let firsts = |dir: &VaultDir| -> Vec<Vec<u8>> {
+        let copies = dir.safety_copies().unwrap();
+        copies[AUTO_SAFETY_KEEP..]
+            .iter()
+            .map(|c| dir.read_safety_copy(&c.id).unwrap())
+            .collect()
+    };
+    // Beyond the 10 newest (all from day 2): the first copy of day 1 and of day 0, and the
+    // first of day 2 (the Vault as day 1 left it).
+    assert_eq!(
+        firsts(&dir),
+        vec![
+            b"fake-day1-save12".to_vec(),
+            b"fake-day0-save12".to_vec(),
+            b"fake-day0-start".to_vec(),
+        ]
+    );
+
+    // 30 days after day 0's first copy it is still there; a day later it is gone.
+    let later = T0 + 1 + DAILY_SAFETY_KEEP_SECS;
+    dir.save_vault(b"fake-later", &accept, later).unwrap();
+    assert!(firsts(&dir).contains(&b"fake-day0-start".to_vec()));
+    dir.save_vault(b"fake-later-still", &accept, later + DAY)
+        .unwrap();
+    let kept = firsts(&dir);
+    assert!(!kept.contains(&b"fake-day0-start".to_vec()), "{kept:?}");
+    assert!(kept.contains(&b"fake-day0-save12".to_vec()), "{kept:?}");
+}
+
+#[test]
+fn a_retried_save_does_not_take_a_second_copy_of_the_same_vault() {
+    let (_tmp, root) = data_dir();
+    let dir = VaultDir::open(&root).unwrap();
+    dir.save_vault(b"fake-vault-v1", &accept, T0).unwrap();
+    dir.save_vault(b"fake-vault-v2", &accept, T0 + 1).unwrap();
+    assert_eq!(dir.safety_copies().unwrap().len(), 1);
+    // As after a save that took its Safety Copy and then failed: the Vault is still the
+    // version the newest copy holds.
+    fs::write(root.join(VAULT_FILE), b"fake-vault-v1").unwrap();
+    dir.save_vault(b"fake-vault-v3", &accept, T0 + 2).unwrap();
+    let copies = dir.safety_copies().unwrap();
+    assert_eq!(copies.len(), 1, "{copies:?}");
+    assert_eq!(
+        dir.read_safety_copy(&copies[0].id).unwrap(),
+        b"fake-vault-v1"
+    );
+}
+
+#[test]
+fn a_safety_copy_never_replaces_a_file_already_there() {
+    let (_tmp, root) = data_dir();
+    let dir = VaultDir::open(&root).unwrap();
+    dir.save_vault(b"fake-vault-v1", &accept, T0).unwrap();
+    // A file with the largest name this crate would ever generate, put there by someone else.
+    let safety = root.join(SAFETY_DIR);
+    fs::create_dir_all(&safety).unwrap();
+    let planted = format!("auto-{}-{}.enote", i64::MAX, u64::MAX);
+    fs::write(safety.join(&planted), b"fake-planted").unwrap();
+
+    dir.save_vault(b"fake-vault-v2", &accept, T0 + 1).unwrap();
+    dir.save_vault(b"fake-vault-v3", &accept, T0 + 2).unwrap();
+    assert_eq!(dir.read_safety_copy(&planted).unwrap(), b"fake-planted");
+    let held: Vec<Vec<u8>> = dir
+        .safety_copies()
+        .unwrap()
+        .iter()
+        .map(|c| dir.read_safety_copy(&c.id).unwrap())
+        .collect();
+    assert!(held.contains(&b"fake-vault-v1".to_vec()), "{held:?}");
+    assert!(held.contains(&b"fake-vault-v2".to_vec()), "{held:?}");
+}
+
+#[test]
+fn files_over_the_size_limit_are_neither_read_nor_written() {
+    let (_tmp, root) = data_dir();
+    let dir = VaultDir::open(&root).unwrap();
+    // A sparse file: large, without writing 64 MiB.
+    let huge = root.join("huge.enote");
+    fs::File::create(&huge)
+        .unwrap()
+        .set_len(MAX_FILE_BYTES + 1)
+        .unwrap();
+    assert!(matches!(read_file(&huge), Err(StoreError::TooLarge)));
+    fs::rename(&huge, root.join(VAULT_FILE)).unwrap();
+    assert!(matches!(dir.read_vault(), Err(StoreError::TooLarge)));
+    fs::remove_file(root.join(VAULT_FILE)).unwrap();
+
+    let too_big = vec![0u8; usize::try_from(MAX_FILE_BYTES).unwrap() + 1];
+    assert!(matches!(
+        dir.save_vault(&too_big, &accept, T0),
+        Err(StoreError::TooLarge)
+    ));
+    assert!(!dir.has_vault());
+    let dest = root.join("backup.enote");
+    assert!(matches!(
+        write_backup(&dest, &too_big, &accept),
+        Err(StoreError::TooLarge)
+    ));
+    assert!(!dest.exists());
+    // A folder is not a file to read.
+    assert!(matches!(read_file(&root), Err(StoreError::Io(_))));
 }
 
 #[test]
@@ -282,24 +405,30 @@ fn replaced_safety_copies_survive_many_saves_within_30_days() {
         .iter()
         .filter(|c| c.kind == SafetyKind::Automatic)
         .count();
-    assert_eq!(autos, AUTO_SAFETY_KEEP);
+    // The 10 newest and the first of day 0.
+    assert_eq!(autos, AUTO_SAFETY_KEEP + 1);
 }
 
 #[test]
-fn replaced_safety_copies_older_than_30_days_are_deleted() {
+fn replaced_safety_copies_older_than_30_days_are_deleted_except_the_newest() {
     let (_tmp, root) = data_dir();
     let dir = VaultDir::open(&root).unwrap();
     dir.save_vault(b"fake-vault-mine", &accept, T0).unwrap();
     dir.replace_vault(b"fake-vault-backup", &accept, T0)
         .unwrap();
+    dir.replace_vault(b"fake-vault-backup-2", &accept, T0 + DAY)
+        .unwrap();
+    let replaced = |dir: &VaultDir| -> Vec<i64> {
+        let copies = dir.safety_copies().unwrap();
+        let replaced = copies.iter().filter(|c| c.kind == SafetyKind::Replaced);
+        replaced.map(|c| c.created_at).collect()
+    };
 
     dir.save_vault(b"fake-vault-v2", &accept, T0 + REPLACED_SAFETY_KEEP_SECS)
         .unwrap();
-    assert!(
-        dir.safety_copies()
-            .unwrap()
-            .iter()
-            .any(|c| c.kind == SafetyKind::Replaced),
+    assert_eq!(
+        replaced(&dir),
+        vec![T0 + DAY, T0],
         "exactly 30 days old is still kept"
     );
 
@@ -309,12 +438,13 @@ fn replaced_safety_copies_older_than_30_days_are_deleted() {
         T0 + REPLACED_SAFETY_KEEP_SECS + DAY,
     )
     .unwrap();
-    assert!(
-        !dir.safety_copies()
-            .unwrap()
-            .iter()
-            .any(|c| c.kind == SafetyKind::Replaced)
-    );
+    assert_eq!(replaced(&dir), vec![T0 + DAY]);
+
+    // The newest one stays however far the clock says we are: one wrong date must not be able
+    // to remove the Vault the owner was told had been kept.
+    dir.save_vault(b"fake-vault-v4", &accept, T0 + 400 * DAY)
+        .unwrap();
+    assert_eq!(replaced(&dir), vec![T0 + DAY]);
 }
 
 #[test]
@@ -452,7 +582,7 @@ fn a_failed_backup_leaves_the_old_backup_untouched_even_when_the_folder_cannot_b
 
     let on_disk = fs::read(&dest).unwrap();
     match result {
-        Ok(()) => assert_eq!(on_disk, b"fake-new-backup"),
+        Ok(_) => assert_eq!(on_disk, b"fake-new-backup"),
         Err(_) => assert_eq!(
             on_disk, b"fake-old-backup",
             "failure reported but old Backup was replaced"
@@ -504,12 +634,13 @@ fn a_clock_going_back_never_loses_the_version_just_replaced() {
         previous,
         "{copies:?}"
     );
+    // The 10 newest and the first of the day.
     assert_eq!(
         copies
             .iter()
             .filter(|c| c.kind == SafetyKind::Automatic)
             .count(),
-        AUTO_SAFETY_KEEP
+        AUTO_SAFETY_KEEP + 1
     );
 
     // And the next save after that still keeps the one just before it.
@@ -644,6 +775,42 @@ fn mac_desktop_and_documents_may_be_synced() {
         cloud_location(&at(&["Documents"]), &home(), true),
         Some(CloudProvider::MacDesktopOrDocuments)
     );
+}
+
+#[test]
+fn the_app_sandbox_container_as_home_does_not_hide_synced_folders() {
+    // Inside the Mac App Sandbox `$HOME` is the container, while file panels give real paths.
+    let container = at(&["Library", "Containers", "com.example.fake", "Data"]);
+    for folder in ["Desktop", "Documents"] {
+        assert_eq!(
+            cloud_location(&at(&[folder, "b.enote"]), &container, true),
+            Some(CloudProvider::MacDesktopOrDocuments),
+            "{folder}"
+        );
+        assert_eq!(
+            cloud_location(&at(&[folder, "b.enote"]), &container, false),
+            None
+        );
+    }
+    assert_eq!(
+        cloud_location(
+            &at(&["Library", "CloudStorage", "OneDrive-Personal", "b.enote"]),
+            &container,
+            true
+        ),
+        Some(CloudProvider::OneDrive)
+    );
+    assert_eq!(
+        cloud_location(
+            &at(&["Library", "CloudStorage", "Box-Box", "b.enote"]),
+            &container,
+            true
+        ),
+        Some(CloudProvider::ICloudDrive)
+    );
+    // An external drive is still local.
+    let usb = PathBuf::from("/Volumes/USB STICK/Documents/b.enote");
+    assert_eq!(cloud_location(&usb, &container, true), None);
 }
 
 #[test]

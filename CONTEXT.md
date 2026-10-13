@@ -15,7 +15,7 @@ A complete copy of the **Vault** file the owner saved outside the app (e.g. on a
 _Avoid_: export, snapshot, sync
 
 **Safety Copy**:
-An earlier version of this computer's **Vault** that the app keeps automatically (recent saves, and whenever opening a **Backup** replaced it), so a damaged or mistakenly replaced **Vault** can be restored.
+An earlier version of this computer's **Vault** that the app keeps automatically (the 10 most recent saves, the first save of each day for 30 days, and whenever opening a **Backup** replaced it), so a damaged or mistakenly replaced **Vault** can be restored.
 _Avoid_: old vault, previous version, auto-backup, snapshot
 
 **Emergency Reader**:
@@ -77,7 +77,7 @@ A part of a **Note** shown as dots or blur until the owner clicks Show; it hides
 _Avoid_: secret field, masked field, protected field
 
 **Seed Phrase**:
-A **Kind** of **Note** holding a 12- or 24-word wallet recovery phrase, shown as a numbered word grid.
+A **Kind** of **Note** holding a 12- or 24-word wallet recovery phrase, shown as a numbered word grid. It can also carry the wallet's name, one of its public addresses and the derivation path that address is found at, which all stay visible.
 _Avoid_: mnemonic, recovery phrase, secret phrase
 
 **Passphrase**:
@@ -92,11 +92,11 @@ A **Kind** of **Note** holding one wallet/account private key, with the chain it
 _Avoid_: sensitive kinds, crypto notes
 
 **Login**:
-A **Kind** of **Note** holding a website, a username and a password.
+A **Kind** of **Note** holding a website, a username and a password, and optionally a line saying what it is for (its purpose).
 _Avoid_: account, credential, password entry
 
 **API Key**:
-A **Kind** of **Note** holding a service name and its key or token string.
+A **Kind** of **Note** holding a service name and its key or token string. It can also carry the rest of what a service hands out with a key: the key ID (the half that isn't hidden), the secret (a second **Hidden Field**, for services that issue two), its purpose, where it is managed, the day it expires and the variable name the owner uses for it.
 _Avoid_: token, credential
 
 **Text**:
@@ -104,7 +104,7 @@ The free-form **Kind** of **Note** for anything that doesn't fit the others.
 _Avoid_: plain note, memo (never call this Kind just "Note")
 
 **Trash**:
-Where a deleted **Note** waits for 30 days, restorable, before it is removed from the **Vault** for good.
+Where a deleted **Note** waits for 30 days, restorable, before it is removed from the **Vault** for good. It goes at an unlock after the 30 days, and only once two unlocks at least a day apart have both found it overdue, so a wrong date on the computer for one session removes nothing.
 _Avoid_: bin, recycle bin, archive
 
 **Favorite**:
@@ -117,18 +117,19 @@ _Avoid_: pinned, bookmarked, starred item
 - Moving a **Vault** to the other computer means opening a **Backup** there. There is no separate "export" or "sync" concept.
 - The app nudges the owner when changes have gone 7+ days without a **Backup**, and warns if a **Backup** is saved into a cloud-synced folder.
 - Copying a **Vault** replaces the copy on the other computer; the two are never merged.
-- Opening a **Backup** replaces this computer's **Vault**, which becomes a **Safety Copy**; if the **Backup** is older, the owner is warned first, in plain words.
+- Opening a **Backup** replaces this computer's **Vault**, which becomes a **Safety Copy**; if the **Backup** is older, or the two were changed separately, the owner is warned first, in plain words. When the app is **Locked** and can't compare them, it says so instead.
 - A **Vault** holds zero or more **Notes**; each **Note** has exactly one **Kind**.
 - Every **Note** has a title, which is never a **Hidden Field**.
-- **Hidden Fields** by **Kind**: the words and **Passphrase** of a **Seed Phrase**; the key of a **Private Key** (chain and address stay visible); the password of a **Login** (website and username stay visible); the key of an **API Key** (service name stays visible); the whole body of a **Text**.
+- **Hidden Fields** by **Kind**: the words and **Passphrase** of a **Seed Phrase** (wallet name, address and derivation path stay visible); the key of a **Private Key** (chain and address stay visible); the password of a **Login** (website, username and purpose stay visible); the key and the secret of an **API Key** (service name, key ID, purpose, where it is managed, expiry date and variable name stay visible); the whole body of a **Text**.
 - While the **Sharing Guard** is up, no **Hidden Field** can be shown, and the window shows only the shield (no titles either).
 - **Capture Hiding** is always on; the **Sharing Guard** exists because **Capture Hiding** alone can't be trusted on Mac.
-- Search matches only the visible parts of a **Note** (title, website, username, wallet name, chain, address, service name), never its **Hidden Fields**.
+- Search matches only the visible parts of a **Note** (title, website, username, purpose, wallet name, chain, address, derivation path, service name, key ID, where it is managed, expiry date, variable name), never its **Hidden Fields**. Several words can be typed: a **Note** is found when each word is somewhere in those parts, in any order, and a **Private Key** is also found by the name of its chain (such as "ethereum").
 - A **Vault** opens with either its **Master Password** or its **Recovery Key**; nothing else can open it.
 - A **Vault** has exactly one **Recovery Key**, shown to the owner once, at setup, to write onto their **Recovery Kit**.
 - **Safety Copies** stay on this computer; a **Backup** is the owner's copy somewhere else. Both are complete **Vaults**.
 - The **Emergency Reader** never writes **Notes** to disk; it only shows them.
 - A **Note** in **Trash** is still inside the **Vault** (still encrypted); "Delete forever" removes it from this copy only; older copies still contain it.
+- Removing a **Wallet Kind** needs the **Master Password**, like every other change to one: moving it to **Trash**, "Delete forever", and emptying a **Trash** that holds one.
 - Changing the **Master Password** changes it only in the copy of the **Vault** where it was changed; older copies still open with the old **Master Password** and old **Recovery Key**.
 - Changing the **Master Password** keeps the same **Recovery Key**; only **Key Rotation** replaces it.
 
@@ -145,4 +146,4 @@ _Avoid_: pinned, bookmarked, starred item
 - "wallet" never means the **Vault**; it only appears in **Wallet Kinds** and in wallet names inside a **Seed Phrase**.
 - "passphrase" could mean the **Master Password** or a wallet's 25th word. Resolved: **Passphrase** is only ever the **Seed Phrase** extra word.
 - "invisible to screen sharing" was used as a guarantee. Resolved: no platform guarantees it. Windows **Capture Hiding** is strong, Mac's is best-effort, and both are layered with **Hidden Fields** + **Sharing Guard** (ADR-0002).
-- "secret" is used loosely for sensitive values. It is not a domain term; say **Note**, or name the field (the password of a **Login**).
+- "secret" is used loosely for sensitive values. It is not a domain term; say **Note**, or name the field (the password of a **Login**). The one field with that name is the secret of an **API Key**, its second **Hidden Field**.

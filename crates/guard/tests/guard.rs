@@ -39,6 +39,12 @@ const MAC_IDS: &[(&str, &str)] = &[
     ("com.TechSmith.Snagit2026", "Snagit"),
     ("com.timpler.screenstudio", "Screen Studio"),
     ("com.wulkano.kap", "Kap"),
+    ("us.zoom.CptHost", "Zoom screen sharing"),
+    ("com.apple.FaceTime", "FaceTime"),
+    ("com.teamviewer.TeamViewer", "TeamViewer"),
+    ("com.philandro.anydesk", "AnyDesk"),
+    ("com.carriez.rustdesk", "RustDesk"),
+    ("com.apple.screensharing.agent", "Screen Sharing"),
 ];
 
 #[test]
@@ -79,7 +85,7 @@ fn detect_mac_does_not_use_exe_names() {
 
 const WIN_EXES: &[(&str, &str)] = &[
     ("Zoom.exe", "Zoom"),
-    ("CptHost.exe", "Zoom"),
+    ("CptHost.exe", "Zoom screen sharing"),
     ("Teams.exe", "Microsoft Teams"),
     ("ms-teams.exe", "Microsoft Teams"),
     ("Discord.exe", "Discord"),
@@ -96,7 +102,12 @@ const WIN_EXES: &[(&str, &str)] = &[
     ("voovmeetingapp.exe", "Tencent Meeting"),
     ("Skype.exe", "Skype"),
     ("SnippingTool.exe", "Snipping Tool"),
-    ("ScreenClippingHost.exe", "Snipping Tool"),
+    ("ScreenClippingHost.exe", "Snipping Tool capture"),
+    ("bcastdvr.exe", "Xbox Game Bar recording"),
+    ("TeamViewer.exe", "TeamViewer"),
+    ("AnyDesk.exe", "AnyDesk"),
+    ("rustdesk.exe", "RustDesk"),
+    ("QuickAssist.exe", "Quick Assist"),
     ("GameBar.exe", "Xbox Game Bar"),
     ("ShareX.exe", "ShareX"),
     ("Snagit32.exe", "Snagit"),
@@ -174,6 +185,12 @@ fn detect_every_required_app_exists_on_some_platform() {
         "Snagit",
         "Screen Studio",
         "Kap",
+        "FaceTime",
+        "TeamViewer",
+        "AnyDesk",
+        "RustDesk",
+        "Quick Assist",
+        "Screen Sharing",
     ] {
         assert!(
             MAC_IDS
@@ -250,14 +267,49 @@ fn dismiss_lowers_the_shield_while_the_same_apps_run() {
 }
 
 #[test]
-fn dismissal_survives_a_subset_of_the_dismissed_apps() {
+fn dismissal_survives_dismissed_apps_quitting() {
     let mut state = GuardState::new();
     state.update(&["Discord", "Zoom"]);
     state.dismiss(&["Discord", "Zoom"]);
     assert!(!state.update(&["Discord"]));
+    assert!(!state.update(&["Discord"]));
     assert!(!state.update(&[]));
-    // An app that was in the set when dismissed coming back doesn't raise it.
-    assert!(!state.update(&["Discord", "Zoom"]));
+}
+
+#[test]
+fn a_dismissed_app_that_quit_and_came_back_raises_the_shield() {
+    let mut state = GuardState::new();
+    state.update(&["Discord", "Zoom"]);
+    state.dismiss(&["Discord", "Zoom"]);
+    assert!(!state.update(&["Discord"]));
+    // Zoom is started again, perhaps for a call this time.
+    assert!(state.update(&["Discord", "Zoom"]));
+    assert_eq!(
+        state.shield_apps().into_iter().collect::<Vec<_>>(),
+        vec!["Discord", "Zoom"]
+    );
+}
+
+#[test]
+fn starting_a_share_in_an_app_dismissed_while_idle_raises_the_shield() {
+    // Zoom sits idle and is dismissed; then its share host process appears.
+    let idle = detect(Platform::Windows, &[win("Zoom.exe")]);
+    let sharing = detect(Platform::Windows, &[win("Zoom.exe"), win("CptHost.exe")]);
+    let mut state = GuardState::new();
+    state.update(&idle);
+    state.dismiss(&idle);
+    assert!(!state.update(&idle));
+    assert!(state.update(&sharing));
+    // The same for the Win+Shift+S overlay of an open Snipping Tool.
+    let idle = detect(Platform::Windows, &[win("SnippingTool.exe")]);
+    let capturing = detect(
+        Platform::Windows,
+        &[win("SnippingTool.exe"), win("ScreenClippingHost.exe")],
+    );
+    let mut state = GuardState::new();
+    state.update(&idle);
+    state.dismiss(&idle);
+    assert!(state.update(&capturing));
 }
 
 #[test]

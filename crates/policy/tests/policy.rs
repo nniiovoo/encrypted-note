@@ -89,6 +89,54 @@ fn common_passwords_joined_together_are_refused() {
     }
 }
 
+/// The blocklist used to match the whole password only, so one more character, a look-alike
+/// digit or saying the phrase twice got a famous phrase through.
+#[test]
+fn famous_phrases_with_small_changes_are_refused() {
+    for pw in [
+        "correct horse battery staple 1",
+        "correcthorsebatterystaple1",
+        "Correct Horse Battery Staple!1",
+        "c0rrect h0rse battery staple",
+        "the quick brown fox jumps over the lazy dog 1",
+        "to be or not to be that is the question 2",
+        "maytheforcebewithyou1",
+        "i forgot my password 1",
+        "hello world hello world",
+        // Every look-alike that is undone: 0 1 3 4 5 7 @ $, and 1 standing for l as well as i.
+        "7h3 qu1ck br0wn f0x jump5 0v3r 7h3 l4zy d0g",
+        "C0rrect H0r$e B@ttery St@ple",
+        "he11o wor1d he11o wor1d",
+        // Two listed phrases, and a listed phrase followed by a common password.
+        "hello world game over",
+        "correct horse battery staple password",
+        // A listed phrase run into itself: each "to be" ends one occurrence and starts the next.
+        "to be or not to be or not to be or not to be or not to be or not to be or not to be",
+    ] {
+        assert!(pw.chars().count() >= MIN_CHARS);
+        let a = assess(pw);
+        assert!(!a.acceptable, "{pw:?} should be blocklisted");
+        assert_eq!(a.score, 0, "{pw:?} got {a:?}");
+        assert!(
+            a.feedback.iter().any(|h| h.contains("well-known")),
+            "{pw:?} should get the well-known hint: {:?}",
+            a.feedback
+        );
+    }
+}
+
+/// A famous phrase counts for nothing: what is left has to be long enough on its own.
+#[test]
+fn famous_phrase_needs_fifteen_other_characters_around_it() {
+    // 14 other letters and digits.
+    let a = assess("hello-world-tvq-ghx-plo-wmn-zz");
+    assert!(!a.acceptable, "{a:?}");
+    assert!(a.feedback.iter().any(|h| h.contains("well-known")), "{a:?}");
+    // 19 of them, unguessable: the phrase does not spoil the password.
+    let a = assess("hello-world-tvq-ghx-plo-wmn-zzr-9912");
+    assert!(a.acceptable, "{a:?}");
+}
+
 #[test]
 fn blocklist_does_not_refuse_unrelated_long_passwords() {
     // Contains a common password as one part, but is not made only of well-known pieces.
@@ -130,6 +178,102 @@ fn long_but_guessable_passwords_are_refused() {
         assert!(a.score < REQUIRED_SCORE);
         assert!(!a.feedback.is_empty(), "{pw} should get a hint");
     }
+}
+
+/// zxcvbn counts every space, hyphen or dot as a token of its own and rated each of these
+/// 10^16 to 10^19 guesses. With the separators taken out they are 10^1 to 10^12.
+#[test]
+fn guessable_passwords_spread_out_with_separators_are_refused() {
+    for pw in [
+        "1 2 3 4 5 6 7 8 9 0",
+        "q w e r t y u i o p",
+        "a b c d e f g h i j",
+        "aa bb cc dd ee ff",
+        "1q 2w 3e 4r 5t 6y",
+        "qwe asd zxc 123 456",
+        "one two three four five",
+        "one-two-three-four-five",
+        "i love you i love you",
+        "let me in let me in",
+        "hello world hello world",
+        "mary had a little lamb",
+        "my name is john smith",
+        "john paul george ringo",
+        "+1 (555) 010-0199",
+    ] {
+        assert!(pw.chars().count() >= MIN_CHARS);
+        let a = assess(pw);
+        assert!(!a.acceptable, "{pw:?} should be refused");
+        assert!(!a.feedback.is_empty(), "{pw:?} should get a hint");
+    }
+}
+
+#[test]
+fn every_separator_is_looked_through() {
+    for sep in [
+        " ", "\t", "-", "_", ".", ",", "/", "\\", ":", ";", "|", "+", "(", ")", "[", "]", " - ",
+        "!", "#", "*", "=", "~", "@", "$",
+    ] {
+        let digits = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"].join(sep);
+        let words = ["one", "two", "three", "four", "five"].join(sep);
+        for pw in [digits, words] {
+            assert!(pw.chars().count() >= MIN_CHARS);
+            assert!(!assess(&pw).acceptable, "{pw:?} should be refused");
+        }
+    }
+    // A digit can be the separator too.
+    for pw in ["one1two1three1four1five", "i7love7you7i7love7you"] {
+        assert!(!assess(pw).acceptable, "{pw:?} should be refused");
+    }
+}
+
+/// zxcvbn adds 10^4 guesses per token after the first, so five common passwords glued
+/// together came to exactly 10^16 and passed.
+#[test]
+fn a_password_is_not_strong_just_for_having_five_parts() {
+    for pw in [
+        "monkeydragonshadowmasterqwerty",
+        "password123456qwertyletmein",
+    ] {
+        let a = assess(pw);
+        assert!(!a.acceptable, "{pw:?} should be refused: {a:?}");
+        assert!(a.score < REQUIRED_SCORE, "{pw:?} got {a:?}");
+    }
+}
+
+/// A symbol used once or twice is part of the password, not a separator: random passwords from
+/// a generator contain them, and must not need extra length for it.
+#[test]
+fn a_random_password_keeps_the_credit_for_its_symbols() {
+    for pw in [
+        "q7#V-z!m2.Kx9@_Lp",
+        "Xk9#mQ2$vL7!pR4@wZ8&",
+        "xk9mq2vl7pr4wz8b",
+    ] {
+        let a = assess(pw);
+        assert!(a.acceptable, "{pw:?} should be accepted: {a:?}");
+    }
+}
+
+/// The strength meter must not show full marks for a password the gate refuses as guessable.
+#[test]
+fn score_follows_the_reading_without_separators() {
+    for pw in [
+        "1 2 3 4 5 6 7 8 9 0",
+        "q w e r t y u i o p",
+        "i love you i love you",
+    ] {
+        let a = assess(pw);
+        assert!(a.score < REQUIRED_SCORE, "{pw:?} got {a:?}");
+    }
+}
+
+/// Only separators are looked through: other symbols and capitals still count.
+#[test]
+fn random_looking_password_with_separators_in_it_is_accepted() {
+    let a = assess("q7#Vz!m2-Kx9@Lp.4Wt_Rb");
+    assert!(a.acceptable, "{a:?}");
+    assert!(a.feedback.is_empty());
 }
 
 #[test]
@@ -224,10 +368,31 @@ fn suggestion_has_six_words_from_the_list_joined_by_hyphens() {
 
 #[test]
 fn suggestions_always_pass_assess() {
-    for _ in 0..50 {
+    for _ in 0..300 {
         let s = suggest_passphrase();
         let a = assess(&s);
         assert!(a.acceptable, "suggestion refused: {a:?}");
+    }
+}
+
+/// `suggest_passphrase` draws again when `assess` refuses, so the test above cannot show how
+/// often that happens. These six-word draws are made here and must pass first time.
+#[test]
+fn six_word_draws_pass_assess_without_drawing_again() {
+    let list = wordlist();
+    // xorshift64 from a fixed seed: the same 300 draws on every run.
+    let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
+    let mut next_word = || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        list[(state % list.len() as u64) as usize]
+    };
+    for _ in 0..300 {
+        let words: Vec<&str> = (0..PASSPHRASE_WORDS).map(|_| next_word()).collect();
+        let pw = words.join("-");
+        let a = assess(&pw);
+        assert!(a.acceptable, "{pw:?} refused: {a:?}");
     }
 }
 

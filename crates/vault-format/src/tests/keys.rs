@@ -247,3 +247,34 @@ fn rotate_keys_with_a_wrong_credential_fails() {
     .unwrap_err();
     assert_eq!(err, Error::WrongCredential);
 }
+
+#[test]
+fn a_password_change_can_be_undone_in_memory_without_any_credential() {
+    let mut created = testing_vault(TEST_BODY);
+    let old = pw(TEST_PASSWORD);
+    let new = pw(OTHER_PASSWORD);
+    let before = created.unlocked.password_slot();
+    change_password(
+        &mut created.unlocked,
+        password(&old),
+        &new,
+        &Limits::TESTING,
+    )
+    .unwrap();
+    // As after a save that failed: the slot goes back exactly as it was.
+    created.unlocked.restore_password_slot(before);
+    let bytes = seal(&created.unlocked, TEST_BODY).unwrap();
+    assert!(open(&bytes, password(&old), &Limits::TESTING).is_ok());
+    assert_eq!(
+        open(&bytes, password(&new), &Limits::TESTING).unwrap_err(),
+        Error::WrongCredential
+    );
+    assert!(
+        open(
+            &bytes,
+            Credential::RecoveryKey(&created.recovery_key),
+            &Limits::TESTING
+        )
+        .is_ok()
+    );
+}

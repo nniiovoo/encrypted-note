@@ -1,5 +1,7 @@
 # Famous phrases attackers try early, even though zxcvbn rates them "very unguessable".
-# One per line; matched case-insensitively ignoring spaces and punctuation. Never add a real secret.
+# One per line; matched anywhere in the password, ignoring case, spaces, punctuation and
+# look-alike digits (0 for o, 1 for i or l, ...), so keep entries long enough to be unmistakable.
+# Never add a real secret.
 correct horse battery staple
 the quick brown fox jumps over the lazy dog
 the quick brown fox jumped over the lazy dog

@@ -123,6 +123,9 @@ pub struct AppStatus {
     pub show_recovery_hint: bool,
     pub backup: BackupView,
     pub purge_trash_failed: bool,
+    pub save_durability_uncertain: bool,
+    /// The settings file was there but unreadable, so the strictest lock rules are in force.
+    pub settings_unreadable: bool,
     pub settings: SettingsView,
 }
 
@@ -177,13 +180,20 @@ pub struct PickedFile {
 pub struct BackupWritten {
     pub display_path: String,
     pub note_count: usize,
+    /// False when the file is written and checked but its folder entry could not be flushed
+    /// (a sandboxed save): the drive should be ejected properly before it is unplugged.
+    pub durable: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct VaultPreview {
     pub note_count: usize,
     pub changed_at: i64,
+    /// `Some(true)`: this computer's Vault may hold changes this copy lacks. `None`: there is
+    /// nothing to compare with, or (`replaces_vault`) the Vault here couldn't be compared.
     pub older_than_current: Option<bool>,
+    /// Installing this copy replaces a Vault that exists on this computer.
+    pub replaces_vault: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -225,8 +235,9 @@ enum Source {
     SafetyCopy,
 }
 
-/// A Backup or Safety Copy decrypted by `inspect_*`, waiting for "Replace". Dropped after the
-/// idle time (whatever the phase), on anything that locks, on any phase change and on any edit.
+/// A Backup or Safety Copy decrypted by `inspect_*`, waiting for "Replace". Dropped when the
+/// owner closes the preview, after the idle time (two minutes while no Vault is Unlocked), on
+/// anything that locks, on any phase change and on any edit.
 struct Inspected {
     source: Source,
     bytes: Vec<u8>,
@@ -244,6 +255,10 @@ struct StoredSettings {
     seed_explainer_seen: bool,
     last_backup_at: Option<i64>,
     oldest_unbacked_change_at: Option<i64>,
+    /// Consecutive wrong credentials, so that restarting the app doesn't reset the delays.
+    failed_attempts: u32,
+    /// When an unlock first found Notes whose 30 days in Trash were over (see `purge_trash`).
+    trash_expiry_seen_at: Option<i64>,
 }
 
 impl Default for StoredSettings {
@@ -254,9 +269,37 @@ impl Default for StoredSettings {
             seed_explainer_seen: false,
             last_backup_at: None,
             oldest_unbacked_change_at: None,
+            failed_attempts: 0,
+            trash_expiry_seen_at: None,
         }
     }
 }
+
+impl StoredSettings {
+    /// For a settings file that is there but can't be read: the strictest lock rules, not the
+    /// defaults, so damaging the file can only make the app lock sooner.
+    fn strictest() -> Self {
+        StoredSettings {
+            idle_minutes: session::IDLE_MINUTE_CHOICES[0],
+            lock_on_app_switch: true,
+            ..StoredSettings::default()
+        }
+    }
+}
+
+/// Where the next Backup goes: the file the owner just picked in the save dialog. Used once.
+struct BackupDestination {
+    path: PathBuf,
+    expires_at: u64,
+}
+
+/// A picked Backup destination is forgotten if no Backup is written to it within this long.
+const BACKUP_DESTINATION_MS: u64 = 10 * 60_000;
+/// How long a preview of a Backup or Safety Copy is kept while no Vault is Unlocked.
+const LOCKED_PREVIEW_MS: u64 = 2 * 60_000;
+/// Trash is emptied of expired Notes only when two unlocks at least this far apart both find
+/// them expired, so one unlock under a wrong clock removes nothing.
+const PURGE_CONFIRM_SECS: i64 = 24 * 60 * 60;
 
 /// A credential as typed, parsed.
 enum Cred {
@@ -321,27 +364,34 @@ pub struct AppCore {
     capture_hiding_active: Option<bool>,
     phase: Phase,
     settings: StoredSettings,
-    backup_destination: Option<PathBuf>,
+    settings_unreadable: bool,
+    backup_destination: Option<BackupDestination>,
     backup_to_open: Option<PathBuf>,
     inspected: Option<Inspected>,
     purge_trash_failed: bool,
+    save_durability_uncertain: bool,
 }
 
 impl AppCore {
     /// Opens the data folder (taking the single-instance lock) and reads the settings.
     pub fn new(config: Config) -> Result<AppCore, ApiError> {
         let dir = VaultDir::open(&config.data_dir).map_err(store_error)?;
-        // A missing or unreadable settings file just means defaults; it holds nothing precious.
-        let settings: StoredSettings = dir
-            .read_settings()
-            .ok()
-            .flatten()
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-            .unwrap_or_default();
-        let session = Session::new(LockSettings {
+        // No settings file yet means defaults. One that is there but can't be read means the
+        // strictest rules, and the owner is told (`settings_unreadable`).
+        let stored = match dir.read_settings() {
+            Ok(None) => Some(StoredSettings::default()),
+            Ok(Some(bytes)) => serde_json::from_slice(&bytes).ok(),
+            Err(_) => None,
+        };
+        let settings_unreadable = stored.is_none();
+        let settings = stored.unwrap_or_else(StoredSettings::strictest);
+        let mut session = Session::new(LockSettings {
             idle_minutes: settings.idle_minutes,
             lock_on_app_switch: settings.lock_on_app_switch,
         });
+        if settings.failed_attempts > 0 {
+            session.restore_failures(settings.failed_attempts, config.clock.now_ms());
+        }
         let phase = if dir.has_vault() {
             Phase::Locked
         } else {
@@ -359,10 +409,12 @@ impl AppCore {
             capture_hiding_active: None,
             phase,
             settings,
+            settings_unreadable,
             backup_destination: None,
             backup_to_open: None,
             inspected: None,
             purge_trash_failed: false,
+            save_durability_uncertain: false,
         })
     }
 
@@ -412,6 +464,8 @@ impl AppCore {
                 unbacked_changes: self.settings.oldest_unbacked_change_at.is_some(),
             },
             purge_trash_failed: self.purge_trash_failed,
+            save_durability_uncertain: self.save_durability_uncertain,
+            settings_unreadable: self.settings_unreadable,
             settings: SettingsView {
                 idle_minutes: lock.idle_minutes,
                 lock_on_app_switch: lock.lock_on_app_switch,
@@ -423,6 +477,11 @@ impl AppCore {
     /// Wall-clock Unix seconds from the injected clock (e.g. for a Backup's default file name).
     pub fn unix_secs(&self) -> i64 {
         self.clock.unix_secs()
+    }
+
+    /// The owner's home folder (where the Backup panels start when no drive is plugged in).
+    pub fn home_dir(&self) -> &Path {
+        &self.home_dir
     }
 
     /// Owner activity (keeps Auto-lock away).
@@ -437,6 +496,13 @@ impl AppCore {
         let effects = self.session.tick(now);
         self.apply(effects);
         self.inspected.take_if(|i| now >= i.expires_at);
+        self.backup_destination.take_if(|d| now >= d.expires_at);
+        // Keep the wrong-credential count on disk, so a restart doesn't hand out fresh attempts.
+        let failures = self.session.failed_attempts();
+        if failures != self.settings.failed_attempts {
+            self.settings.failed_attempts = failures;
+            let _ = self.write_settings();
+        }
     }
 
     /// Sleep, screen lock, user switch, quit, focus changes.
@@ -480,11 +546,14 @@ impl AppCore {
     }
 
     pub fn assess_password(&self, password: &str) -> AssessmentView {
-        let a = policy::assess(password);
-        AssessmentView {
-            acceptable: a.acceptable,
-            score: a.score,
-            feedback: a.feedback,
+        assess_password(password)
+    }
+
+    /// Whether "Create my Vault" may run now (asked before the KDF is calibrated).
+    pub fn create_vault_allowed(&self) -> Result<(), ApiError> {
+        match self.phase {
+            Phase::NoVault => Ok(()),
+            _ => Err(not_now()),
         }
     }
 
@@ -558,9 +627,8 @@ impl AppCore {
         }
         let cred = parse_credential(credential)?;
         let bytes = self.dir.read_vault().map_err(store_error)?;
-        let now = self.clock.now_ms();
         let limits = self.limits;
-        let opened = attempt(&mut self.session, now, &cred, || {
+        let opened = attempt(&mut self.session, &*self.clock, &cred, || {
             vault_format::open(&bytes, cred.credential(), &limits)
         })
         .and_then(|(vault, body)| {
@@ -691,9 +759,37 @@ impl AppCore {
         })
     }
 
-    pub fn trash_note(&mut self, id: &str) -> Result<(), ApiError> {
+    /// Removing a Wallet Kind needs the Master Password like every other change to one (PRD
+    /// story 46): trashing it starts the 30 days after which it is gone, and deleting it for
+    /// good is the one change that can't be undone at all.
+    pub fn trash_note(
+        &mut self,
+        id: &str,
+        master_password: Option<Zeroizing<String>>,
+    ) -> Result<(), ApiError> {
         self.tick();
-        self.mutate(|doc, now| doc.trash(id, now))
+        if self.note_kind(id)?.is_wallet() {
+            self.wallet(master_password)?;
+        }
+        let was_in_trash = self
+            .open()?
+            .doc
+            .get(id)
+            .is_some_and(|note| note.deleted_at.is_some());
+        self.mutate(|doc, now| doc.trash(id, now))?;
+        // If the clock went backwards while Unlocked, a newly trashed Note can look as though
+        // it was already overdue at an earlier sighting. That sighting cannot cover it.
+        if !was_in_trash
+            && let Some(seen) = self.settings.trash_expiry_seen_at
+            && self.open()?.doc.get(id).is_some_and(|note| {
+                note.deleted_at
+                    .is_some_and(|at| at.saturating_add(notes::TRASH_RETENTION_SECS) <= seen)
+            })
+        {
+            self.settings.trash_expiry_seen_at = None;
+            let _ = self.write_settings();
+        }
+        Ok(())
     }
 
     pub fn restore_note(&mut self, id: &str) -> Result<(), ApiError> {
@@ -701,13 +797,28 @@ impl AppCore {
         self.mutate(|doc, now| doc.restore(id, now))
     }
 
-    pub fn delete_forever(&mut self, id: &str) -> Result<(), ApiError> {
+    pub fn delete_forever(
+        &mut self,
+        id: &str,
+        master_password: Option<Zeroizing<String>>,
+    ) -> Result<(), ApiError> {
         self.tick();
+        if self.note_kind(id)?.is_wallet() {
+            self.wallet(master_password)?;
+        }
         self.mutate(|doc, now| doc.delete_forever(id, now))
     }
 
-    pub fn empty_trash(&mut self) -> Result<usize, ApiError> {
+    /// Needs the Master Password when a Wallet Kind is in Trash.
+    pub fn empty_trash(
+        &mut self,
+        master_password: Option<Zeroizing<String>>,
+    ) -> Result<usize, ApiError> {
         self.tick();
+        let trash = self.open()?.doc.list(Filter::Trash, "");
+        if trash.iter().any(|note| note.kind.is_wallet()) {
+            self.wallet(master_password)?;
+        }
         self.mutate(|doc, now| Ok(doc.empty_trash(now)))
     }
 
@@ -815,22 +926,35 @@ impl AppCore {
         self.open().map(|_| ())
     }
 
-    /// The tauri layer's save dialog returned `path`.
+    /// The tauri layer's save dialog returned `path`. It is good for one Backup, written soon.
     pub fn set_backup_destination(&mut self, path: PathBuf) -> Result<PickedFile, ApiError> {
         self.open()?;
         let picked = self.picked(&path);
-        self.backup_destination = Some(path);
+        self.backup_destination = Some(BackupDestination {
+            path,
+            expires_at: self.clock.now_ms().saturating_add(BACKUP_DESTINATION_MS),
+        });
         Ok(picked)
     }
 
+    /// The owner closed "Back up now" without writing (e.g. after the cloud-folder warning).
+    pub fn forget_backup_destination(&mut self) {
+        self.backup_destination = None;
+    }
+
     /// Seal the current Vault into the picked destination, read it back and check it.
+    ///
+    /// The destination is used up whether or not the write works: every Backup goes where the
+    /// owner pointed in a dialog just now, never to a path left over from earlier.
     pub fn write_backup(&mut self) -> Result<BackupWritten, ApiError> {
         self.tick();
-        let open = self.open()?;
+        self.open()?;
         let dest = self
             .backup_destination
-            .as_deref()
-            .ok_or_else(|| err("invalid_input", MSG_PICK_DESTINATION))?;
+            .take()
+            .ok_or_else(|| err("invalid_input", MSG_PICK_DESTINATION))?
+            .path;
+        let open = self.open()?;
         let bytes = vault_format::seal(&open.vault, &open.doc.to_json())
             .map_err(|e| format_error(e, CredKind::Password))?;
         let note_count = Cell::new(None);
@@ -838,11 +962,14 @@ impl AppCore {
             note_count.set(verified_count(&open.vault, written));
             note_count.get().is_some()
         };
-        store::write_backup(dest, &bytes, &verify).map_err(store_error)?;
+        let commit = store::write_backup(&dest, &bytes, &verify).map_err(store_error)?;
         let written = BackupWritten {
             display_path: dest.display().to_string(),
             note_count: note_count.get().unwrap_or(0),
+            durable: commit == store::CommitStatus::Durable,
         };
+        // Written, flushed and read back: that is a Backup, whether or not the folder entry
+        // could be flushed too (inside the Mac App Sandbox it never can).
         self.settings.last_backup_at = Some(self.clock.unix_secs());
         self.settings.oldest_unbacked_change_at = None;
         // The Backup itself is done and checked; failing to note the time isn't worth an error.
@@ -874,8 +1001,14 @@ impl AppCore {
             .backup_to_open
             .as_deref()
             .ok_or_else(|| err("invalid_input", MSG_PICK_BACKUP))?;
-        let bytes = std::fs::read(path).map_err(|e| store_error(StoreError::Io(e)))?;
+        let bytes = store::read_file(path).map_err(store_error)?;
         self.inspect(Source::Backup, bytes, credential)
+    }
+
+    /// The owner closed the preview without installing it: forget the decrypted copy now.
+    pub fn discard_inspection(&mut self) {
+        self.inspected = None;
+        self.backup_to_open = None;
     }
 
     /// Install the inspected Backup; the current Vault becomes a Safety Copy.
@@ -937,21 +1070,19 @@ impl AppCore {
         };
 
         if !rotate {
-            attempt(&mut self.session, now, &current, || {
+            let old_slot = open.vault.password_slot();
+            attempt(&mut self.session, &*self.clock, &current, || {
                 vault_format::change_password(&mut open.vault, current.credential(), &new, &limits)
             })?;
             self.session.unlocked(now); // this Vault's password: reset the wrong-password count
             let before = open.doc.to_json();
             open.doc.touch(self.clock.unix_secs());
             if let Err(e) = self.save() {
-                // Put the old password back in memory too, so a later save can't switch it silently.
-                if let (Phase::Unlocked(open), Cred::Password(old)) = (&mut self.phase, &current) {
-                    let _ = vault_format::change_password(
-                        &mut open.vault,
-                        Credential::MasterPassword(&new),
-                        old,
-                        &limits,
-                    );
+                // Put the old password back in memory too, so a later save can't switch it
+                // silently. The saved copy of the slot goes back as it was: nothing to derive,
+                // so nothing that can fail.
+                if let Phase::Unlocked(open) = &mut self.phase {
+                    open.vault.restore_password_slot(old_slot);
                     if let Ok(doc) = Document::from_json(&before) {
                         open.doc = doc;
                     }
@@ -962,7 +1093,7 @@ impl AppCore {
             return Ok(RecoveryKeyShown { recovery_key: None });
         }
 
-        let rotation = attempt(&mut self.session, now, &current, || {
+        let rotation = attempt(&mut self.session, &*self.clock, &current, || {
             vault_format::rotate_keys(&open.vault, current.credential(), &new, &limits)
         })?;
         self.session.unlocked(now);
@@ -1045,6 +1176,7 @@ impl AppCore {
             _ => Phase::Locked,
         };
         self.inspected = None;
+        self.backup_destination = None;
         self.reset_guard();
     }
 
@@ -1054,6 +1186,7 @@ impl AppCore {
         self.phase = phase;
         self.inspected = None;
         self.backup_to_open = None;
+        self.backup_destination = None;
     }
 
     /// A Vault was just opened (created, unlocked or installed): start the idle timer, and forget
@@ -1108,7 +1241,7 @@ impl AppCore {
         let Phase::Unlocked(open) = &self.phase else {
             return Err(locked());
         };
-        let key = attempt(&mut self.session, now, &password, || {
+        let key = attempt(&mut self.session, &*self.clock, &password, || {
             vault_format::unlock_wallet_key(&open.vault, password.credential(), &limits)
         })?;
         self.session.unlocked(now); // this Vault's password: reset the wrong-password count
@@ -1149,7 +1282,7 @@ impl AppCore {
     }
 
     /// Crash-safe save of the Vault held in the current phase, verified by reopening it.
-    fn save(&self) -> Result<(), ApiError> {
+    fn save(&mut self) -> Result<(), ApiError> {
         let open = match &self.phase {
             Phase::Unlocked(open)
             | Phase::NeedsNewPassword { open, .. }
@@ -1159,27 +1292,83 @@ impl AppCore {
         let bytes = vault_format::seal(&open.vault, &open.doc.to_json())
             .map_err(|e| format_error(e, CredKind::Password))?;
         let verify = |written: &[u8]| verified_count(&open.vault, written).is_some();
-        self.dir
+        let status = self
+            .dir
             .save_vault(&bytes, &verify, self.clock.unix_secs())
-            .map_err(store_error)
+            .map_err(store_error)?;
+        self.save_durability_uncertain = status == store::CommitStatus::Uncertain;
+        Ok(())
     }
 
     /// Remove Notes that have been in Trash for 30 days (after an unlock).
+    ///
+    /// Not on one clock reading: the first unlock that finds expired Notes only records when.
+    /// At an unlock at least a day later, only Notes already expired at that first sighting go;
+    /// newly expired Notes start their own wait. One mistaken future date must not let them use
+    /// another Note's earlier sighting.
     fn purge_trash(&mut self) {
         let now = self.clock.unix_secs();
+        let expired = match &self.phase {
+            Phase::Unlocked(open) | Phase::NeedsNewPassword { open, .. } => {
+                open.doc.expired_count(now) > 0
+            }
+            _ => return,
+        };
+        let seen = self.settings.trash_expiry_seen_at;
+        let confirmed = seen.is_some_and(|seen| now.saturating_sub(seen) >= PURGE_CONFIRM_SECS);
+        let remember = match (expired, seen) {
+            (false, _) => None,
+            // First sighting, or the clock has gone back since: start counting from now.
+            (true, None) => Some(now),
+            (true, Some(seen)) if now < seen => Some(now),
+            (true, Some(seen)) => Some(seen),
+        };
+        if remember != seen && !(expired && confirmed) {
+            self.settings.trash_expiry_seen_at = remember;
+            let _ = self.write_settings();
+        }
+        if !(expired && confirmed) {
+            return;
+        }
         let before = match &self.phase {
             Phase::Unlocked(open) | Phase::NeedsNewPassword { open, .. } => open.doc.to_json(),
             _ => return,
         };
         let changed = match &mut self.phase {
             Phase::Unlocked(open) | Phase::NeedsNewPassword { open, .. } => {
-                open.doc.purge_expired(now) > 0
+                // `expired_count(now)` checked the Vault's last change against the clock.
+                // Delete only the subset also overdue at the first sighting, rather than all
+                // Notes overdue at this (possibly mistaken) date.
+                let eligible: Vec<_> = open
+                    .doc
+                    .list(Filter::Trash, "")
+                    .into_iter()
+                    .filter(|note| {
+                        note.deleted_at.is_some_and(|at| {
+                            at.saturating_add(notes::TRASH_RETENTION_SECS) <= seen.unwrap_or(now)
+                        })
+                    })
+                    .collect();
+                let mut removed = false;
+                for note in eligible {
+                    removed |= open.doc.delete_forever(&note.id, now).is_ok();
+                }
+                removed
             }
             _ => false,
         };
         if changed {
             if self.save().is_ok() {
                 self.purge_trash_failed = false;
+                self.settings.trash_expiry_seen_at = match &self.phase {
+                    Phase::Unlocked(open) | Phase::NeedsNewPassword { open, .. }
+                        if open.doc.expired_count(now) > 0 =>
+                    {
+                        Some(now)
+                    }
+                    _ => None,
+                };
+                let _ = self.write_settings();
                 self.note_change();
             } else if let (Phase::Unlocked(open) | Phase::NeedsNewPassword { open, .. }, Ok(doc)) =
                 (&mut self.phase, Document::from_json(&before))
@@ -1187,6 +1376,11 @@ impl AppCore {
                 open.doc = doc;
                 self.purge_trash_failed = true;
             }
+        } else {
+            // The earlier subset was restored or removed before this unlock. Any Notes only
+            // just overdue still need their own first sighting and a later confirmation.
+            self.settings.trash_expiry_seen_at = Some(now);
+            let _ = self.write_settings();
         }
     }
 
@@ -1226,33 +1420,56 @@ impl AppCore {
     ) -> Result<VaultPreview, ApiError> {
         self.inspected = None;
         let cred = parse_credential(credential)?;
-        let (now, limits) = (self.clock.now_ms(), self.limits);
-        let (vault, body) = attempt(&mut self.session, now, &cred, || {
+        let limits = self.limits;
+        let (vault, body) = attempt(&mut self.session, &*self.clock, &cred, || {
             vault_format::open(&bytes, cred.credential(), &limits)
         })?;
         let doc = Document::from_json(&body).map_err(notes_error)?;
+        let copy = Open { vault, doc };
         let preview = VaultPreview {
-            note_count: doc.count(),
-            changed_at: doc.changed_at(),
+            note_count: copy.doc.count(),
+            changed_at: copy.doc.changed_at(),
             older_than_current: match &self.phase {
-                Phase::Unlocked(current) => Some(doc.is_older_than(&current.doc)),
+                Phase::Unlocked(current) => Some(lacks_changes_of(&copy, current)),
+                // The Vault here is Locked. The credential just given often opens it too (a
+                // Safety Copy, or a Backup of this Vault): then the two can be compared after
+                // all. If it doesn't, the screens say that no comparison was possible.
+                Phase::Locked => self
+                    .open_locked_vault(&cred)
+                    .map(|c| lacks_changes_of(&copy, &c)),
                 _ => None,
             },
+            replaces_vault: matches!(self.phase, Phase::Locked | Phase::Unlocked(_)),
         };
         let recovery_key = match cred {
             Cred::Key(key) => Some(key),
             Cred::Password(_) => None,
         };
-        // Its own idle limit: in NoVault or Locked no session timer is running.
-        let idle_ms = u64::from(self.session.settings().idle_minutes) * 60_000;
+        // Its own time limit: in NoVault or Locked no session timer is running, and the app
+        // must not go on holding a readable Vault behind a lock screen for long.
+        let now = self.clock.now_ms();
+        let keep_ms = match self.phase {
+            Phase::Unlocked(_) => u64::from(self.session.settings().idle_minutes) * 60_000,
+            _ => LOCKED_PREVIEW_MS,
+        };
         self.inspected = Some(Inspected {
             source,
             bytes,
-            open: Box::new(Open { vault, doc }),
+            open: Box::new(copy),
             recovery_key,
-            expires_at: now.saturating_add(idle_ms),
+            expires_at: now.saturating_add(keep_ms),
         });
         Ok(preview)
+    }
+
+    /// This computer's Vault opened with `cred`, only to compare a copy against it; dropped by
+    /// the caller at once. `None` if there is none or `cred` is not its credential (which is
+    /// not counted as a wrong attempt: nobody was asked for this Vault's credential).
+    fn open_locked_vault(&self, cred: &Cred) -> Option<Open> {
+        let bytes = self.dir.read_vault().ok()?;
+        let (vault, body) = vault_format::open(&bytes, cred.credential(), &self.limits).ok()?;
+        let doc = Document::from_json(&body).ok()?;
+        Some(Open { vault, doc })
     }
 
     fn install(&mut self, source: Source) -> Result<(), ApiError> {
@@ -1266,10 +1483,16 @@ impl AppCore {
             self.dir
                 .replace_vault(&inspected.bytes, &verify, self.clock.unix_secs())
         };
-        if let Err(e) = result {
-            self.inspected = Some(inspected);
-            return Err(store_error(e));
-        }
+        let commit = match result {
+            Ok(status) => status,
+            Err(e) => {
+                self.inspected = Some(inspected);
+                return Err(store_error(e));
+            }
+        };
+        // Another Vault's wrong-credential count and Trash sighting don't carry over.
+        self.settings.trash_expiry_seen_at = None;
+        self.save_durability_uncertain = commit == store::CommitStatus::Uncertain;
         let effects = self.session.end_reveal();
         self.apply(effects);
         self.start_session();
@@ -1292,20 +1515,41 @@ impl AppCore {
     }
 }
 
+/// The strength of a candidate Master Password (needs no Vault and no state).
+pub fn assess_password(password: &str) -> AssessmentView {
+    let a = policy::assess(password);
+    AssessmentView {
+        acceptable: a.acceptable,
+        score: a.score,
+        feedback: a.feedback,
+    }
+}
+
+/// May `current` hold changes that `copy` lacks? Copies of one Vault are compared by both their
+/// change counters and their clocks; different Vaults only have clocks in common.
+fn lacks_changes_of(copy: &Open, current: &Open) -> bool {
+    if copy.vault.vault_id() == current.vault.vault_id() {
+        copy.doc.is_older_than(&current.doc)
+    } else {
+        copy.doc.changed_at() < current.doc.changed_at()
+    }
+}
+
 /// Note count of a written file, if it reopens with `vault`'s keys and parses.
 fn verified_count(vault: &UnlockedVault, written: &[u8]) -> Option<usize> {
     let body = vault_format::reopen(vault, written).ok()?;
     Document::from_json(&body).ok().map(|doc| doc.count())
 }
 
-/// Run a credential check under the wrong-credential delays (Session backoff).
+/// Run a credential check under the wrong-credential delays (Session backoff). A failure is
+/// timed from when the check ends, so the second or so it took isn't taken off the delay.
 fn attempt<T>(
     session: &mut Session,
-    now: u64,
+    clock: &dyn Clock,
     cred: &Cred,
     check: impl FnOnce() -> Result<T, vault_format::Error>,
 ) -> Result<T, ApiError> {
-    if let Err(wait_ms) = session.attempt_allowed(now) {
+    if let Err(wait_ms) = session.attempt_allowed(clock.now_ms()) {
         let seconds = wait_ms.div_ceil(1000);
         let unit = if seconds == 1 { "second" } else { "seconds" };
         return Err(ApiError {
@@ -1319,7 +1563,7 @@ fn attempt<T>(
     };
     check().map_err(|e| {
         if e == vault_format::Error::WrongCredential {
-            session.failed_attempt(now);
+            session.failed_attempt(clock.now_ms());
         }
         format_error(e, kind)
     })
@@ -1414,6 +1658,13 @@ const MSG_NEEDS_PASSWORD: &str =
 const MSG_NOT_WALLET: &str = "Only Seed Phrases and Private Keys are shown this way.";
 const MSG_EMPTY_TITLE: &str = "Give the Note a title.";
 const MSG_EMPTY_FIELD: &str = "That field is empty.";
+const MSG_BAD_EXPIRES: &str =
+    "Write the expiry date as year-month-day, like 2027-01-31, using a day that exists.";
+const MSG_BAD_ENV_VAR: &str = "A variable name can use letters, digits and underscores, can't start with a digit, and can be up to 128 characters long.";
+const MSG_BAD_PURPOSE: &str = "Keep the purpose to one line of up to 200 characters.";
+const MSG_ONE_LINE_ONLY: &str =
+    "One of the fields has a line break or a tab in it. Keep each of them to one line.";
+const MSG_NOTHING_TO_ADD: &str = "Type the text to add first.";
 const MSG_KIT_MISMATCH: &str =
     "That doesn't match the end of your Recovery Key. Check what you wrote down and try again.";
 const MSG_PICK_DESTINATION: &str = "Choose where to save the Backup first.";
@@ -1427,6 +1678,9 @@ const MSG_VERIFY_FAILED: &str =
     "The file was written but didn't read back correctly, so it wasn't used. Nothing was changed.";
 const MSG_BACKUP_OVERWRITE_NOT_ATOMIC: &str = "This Backup already exists, and encrypted-note can't safely replace it with the access the file picker granted. Choose a new file name. Nothing was changed.";
 const MSG_INTERNAL: &str = "Something went wrong inside encrypted-note. Nothing was changed.";
+const MSG_NO_MEMORY: &str = "There isn't enough free memory to check that right now. Close other apps and try again. Nothing was changed.";
+const MSG_TOO_LARGE: &str =
+    "That file is far larger than any Vault, so encrypted-note left it alone. Nothing was changed.";
 
 fn err(code: &'static str, message: &str) -> ApiError {
     ApiError {
@@ -1451,6 +1705,16 @@ fn reveal_refused(refused: RevealRefused) -> ApiError {
     match refused {
         RevealRefused::Locked => locked(),
         RevealRefused::SharingGuardUp => err("sharing_guard_up", MSG_GUARD_UP),
+        RevealRefused::TooMany(wait_ms) => {
+            let seconds = wait_ms.div_ceil(1000);
+            let unit = if seconds == 1 { "second" } else { "seconds" };
+            ApiError {
+                code: "too_many",
+                message: format!(
+                    "Too many different values were shown in a short time. Wait {seconds} {unit}, then try again."
+                ),
+            }
+        }
     }
 }
 
@@ -1463,8 +1727,9 @@ fn format_error(e: vault_format::Error, kind: CredKind) -> ApiError {
         },
         E::Malformed(_) | E::Damaged => err("damaged", MSG_DAMAGED),
         E::KdfOutOfLimits => err("damaged", MSG_REFUSED_SETTINGS),
+        E::OutOfMemory => err("io", MSG_NO_MEMORY),
         E::UnsupportedVersion(_) => err("unsupported", MSG_UNSUPPORTED),
-        E::Randomness => err("internal", MSG_INTERNAL),
+        E::Randomness | E::SlotCheckFailed => err("internal", MSG_INTERNAL),
     }
 }
 
@@ -1482,8 +1747,22 @@ fn notes_error(e: NotesError) -> ApiError {
             code: "invalid_input",
             message: format!("A Seed Phrase has 12 or 24 words. This one has {n}."),
         },
+        NotesError::InvalidValue(name) => err("invalid_input", invalid_value_message(&name)),
         NotesError::WalletCipher | NotesError::Corrupt(_) => err("damaged", MSG_DAMAGED),
+        NotesError::UnsupportedSchema(_) => err("unsupported", MSG_UNSUPPORTED),
         NotesError::Randomness => err("internal", MSG_INTERNAL),
+    }
+}
+
+/// What to say when a value breaks the rule for its field. The notes crate reports the
+/// field's name only, so the value itself can never end up in the message.
+fn invalid_value_message(field_name: &str) -> &'static str {
+    match field_name {
+        notes::field::EXPIRES => MSG_BAD_EXPIRES,
+        notes::field::ENV_VAR => MSG_BAD_ENV_VAR,
+        notes::field::PURPOSE => MSG_BAD_PURPOSE,
+        notes::field::BODY => MSG_NOTHING_TO_ADD,
+        _ => MSG_ONE_LINE_ONLY,
     }
 }
 
@@ -1494,6 +1773,7 @@ fn store_error(e: StoreError) -> ApiError {
         StoreError::NotFound => err("not_found", MSG_SAFETY_COPY_GONE),
         StoreError::VerifyFailed => err("io", MSG_VERIFY_FAILED),
         StoreError::BackupOverwriteNotAtomic => err("io", MSG_BACKUP_OVERWRITE_NOT_ATOMIC),
+        StoreError::TooLarge => err("io", MSG_TOO_LARGE),
         StoreError::Io(e) => ApiError {
             code: "io",
             message: format!(

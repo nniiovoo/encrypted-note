@@ -41,6 +41,8 @@
     "allow-pick-backup-to-open",
     "allow-inspect-backup",
     "allow-replace-with-backup",
+    "allow-discard-inspection",
+    "allow-forget-backup-destination",
     "allow-list-safety-copies",
     "allow-inspect-safety-copy",
     "allow-restore-safety-copy",

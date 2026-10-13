@@ -625,8 +625,8 @@ fn every_kind_can_be_created_viewed_edited_trashed_and_restored() {
             .len(),
         1
     );
-    core.trash_note(&text).unwrap();
-    core.trash_note(&login).unwrap();
+    core.trash_note(&text, None).unwrap();
+    core.trash_note(&login, None).unwrap();
     assert_eq!(core.list_notes(all(), "").unwrap().len(), 3);
     assert_eq!(
         core.list_notes(filter(json!({"type": "trash"})), "")
@@ -635,10 +635,10 @@ fn every_kind_can_be_created_viewed_edited_trashed_and_restored() {
         2
     );
     core.restore_note(&text).unwrap();
-    assert_eq!(code(core.delete_forever(&api)), "not_found"); // only from Trash
-    core.delete_forever(&login).unwrap();
-    core.trash_note(&text).unwrap();
-    assert_eq!(core.empty_trash().unwrap(), 1);
+    assert_eq!(code(core.delete_forever(&api, None)), "not_found"); // only from Trash
+    core.delete_forever(&login, None).unwrap();
+    core.trash_note(&text, None).unwrap();
+    assert_eq!(core.empty_trash(None).unwrap(), 1);
     assert_eq!(code(core.get_note(&text)), "not_found");
 
     // Everything was saved.
@@ -753,7 +753,7 @@ fn lists_views_and_status_never_contain_a_hidden_value() {
         ),
     ]
     .map(Result::unwrap);
-    core.trash_note(&ids[2]).unwrap();
+    core.trash_note(&ids[2], None).unwrap();
 
     let mut seen = String::new();
     for f in [
@@ -1142,9 +1142,23 @@ fn trash_older_than_30_days_is_purged_at_unlock() {
         .core
         .create_note(input("text", "Fake", json!({}), json!({})), None)
         .unwrap();
-    app.core.trash_note(&id).unwrap();
+    app.core.trash_note(&id, None).unwrap();
     app.core.lock();
     app.advance(30 * DAY_MS);
+    // The first unlock that finds it expired only takes note: one clock reading removes nothing.
+    app.core.unlock(password(PASSWORD)).unwrap();
+    let trash = |app: &mut App| {
+        let trash = filter(json!({"type": "trash"}));
+        app.core.list_notes(trash, "").unwrap().len()
+    };
+    assert_eq!(trash(&mut app), 1);
+    app.core.lock();
+    app.advance(DAY_MS - 1_000);
+    app.core.unlock(password(PASSWORD)).unwrap();
+    assert_eq!(trash(&mut app), 1, "not yet a day since it was first seen");
+    app.core.lock();
+    // An unlock a day or more later that still finds it expired removes it.
+    app.advance(1_000);
     app.core.unlock(password(PASSWORD)).unwrap();
     assert_eq!(
         app.core
@@ -1163,6 +1177,88 @@ fn trash_older_than_30_days_is_purged_at_unlock() {
 }
 
 #[test]
+fn a_future_clock_does_not_use_an_old_trash_sighting_to_delete_a_newly_overdue_note() {
+    let mut app = App::new();
+    unlocked(&mut app);
+    let old = app
+        .core
+        .create_note(input("text", "Fake older", json!({}), json!({})), None)
+        .unwrap();
+    app.core.trash_note(&old, None).unwrap();
+    app.core.lock();
+    app.advance(29 * DAY_MS);
+    app.core.unlock(password(PASSWORD)).unwrap();
+    let newer = app
+        .core
+        .create_note(input("text", "Fake newer", json!({}), json!({})), None)
+        .unwrap();
+    app.core.trash_note(&newer, None).unwrap();
+    app.core.lock();
+    app.advance(2 * DAY_MS);
+
+    // Only the older Note is overdue at the first sighting.
+    app.core.unlock(password(PASSWORD)).unwrap();
+    assert!(app.core.get_note(&old).is_ok());
+    assert!(app.core.get_note(&newer).is_ok());
+    app.core.lock();
+    let correct_time = app.ms.load(Ordering::SeqCst);
+    let mut app = app.restart();
+
+    // One unlock with the computer's date mistakenly a year ahead must not delete the newer
+    // Note on the strength of the older Note's sighting, including after an app restart.
+    app.advance(365 * DAY_MS);
+    app.core.unlock(password(PASSWORD)).unwrap();
+    assert_eq!(code(app.core.get_note(&old)), "not_found");
+    assert!(app.core.get_note(&newer).is_ok());
+    app.core.lock();
+    app.ms.store(correct_time + DAY_MS, Ordering::SeqCst);
+    let mut app = app.restart();
+    app.core.unlock(password(PASSWORD)).unwrap();
+    let trash = app
+        .core
+        .list_notes(filter(json!({"type": "trash"})), "")
+        .unwrap();
+    assert_eq!(trash.len(), 1);
+    assert_eq!(trash[0].id, newer);
+}
+
+#[test]
+fn trash_added_under_a_backwards_clock_cannot_inherit_an_earlier_sighting() {
+    let mut app = App::new();
+    unlocked(&mut app);
+    let old = app
+        .core
+        .create_note(input("text", "Fake older", json!({}), json!({})), None)
+        .unwrap();
+    app.core.trash_note(&old, None).unwrap();
+    app.core.lock();
+    let correct_time = app.ms.load(Ordering::SeqCst);
+    app.advance(365 * DAY_MS);
+    app.core.unlock(password(PASSWORD)).unwrap(); // first sighting of the older Note
+
+    // The date is corrected while Unlocked. A new deletion with an earlier timestamp was
+    // never in Trash at that first sighting, even though its date can make it look that way.
+    app.ms.store(correct_time + DAY_MS, Ordering::SeqCst);
+    let newer = app
+        .core
+        .create_note(input("text", "Fake newer", json!({}), json!({})), None)
+        .unwrap();
+    app.core.trash_note(&newer, None).unwrap();
+    app.core.lock();
+    app.ms.store(correct_time + 366 * DAY_MS, Ordering::SeqCst);
+    app.core.unlock(password(PASSWORD)).unwrap();
+    assert!(app.core.get_note(&old).is_ok());
+    assert!(app.core.get_note(&newer).is_ok());
+
+    // A later unlock that also sees both overdue may remove them.
+    app.core.lock();
+    app.advance(DAY_MS);
+    app.core.unlock(password(PASSWORD)).unwrap();
+    assert_eq!(code(app.core.get_note(&old)), "not_found");
+    assert_eq!(code(app.core.get_note(&newer)), "not_found");
+}
+
+#[test]
 fn failed_trash_purge_keeps_the_note_until_the_vault_can_be_saved() {
     let mut app = App::new();
     unlocked(&mut app);
@@ -1173,9 +1269,12 @@ fn failed_trash_purge_keeps_the_note_until_the_vault_can_be_saved() {
             None,
         )
         .unwrap();
-    app.core.trash_note(&id).unwrap();
+    app.core.trash_note(&id, None).unwrap();
     app.core.lock();
     app.advance(30 * DAY_MS);
+    app.core.unlock(password(PASSWORD)).unwrap(); // seen expired once
+    app.core.lock();
+    app.advance(DAY_MS);
     let vault = app.data_dir().join("vault.enote");
     app.break_vault_on_next_wall_clock_read();
 
@@ -1530,6 +1629,8 @@ fn status_has_the_shape_api_ts_expects() {
         "show_recovery_hint",
         "backup",
         "purge_trash_failed",
+        "save_durability_uncertain",
+        "settings_unreadable",
         "settings",
     ];
     expected.sort_unstable();
@@ -1547,6 +1648,7 @@ fn status_has_the_shape_api_ts_expects() {
     assert_eq!(status["sharing_guard"], json!({"up": false, "apps": []}));
     assert_eq!(status["revision"], 0);
     assert_eq!(status["purge_trash_failed"], false);
+    assert_eq!(status["settings_unreadable"], false);
 }
 
 #[test]
@@ -1569,23 +1671,39 @@ fn the_backup_reminder_is_due_after_7_days_of_unbacked_changes() {
 // ---------- review fixes ----------
 
 #[test]
-fn an_inspected_backup_is_dropped_after_the_idle_time_even_without_a_vault() {
+fn an_inspected_backup_is_dropped_after_two_minutes_without_an_unlocked_vault() {
     let (_source, backup) = a_backup();
     let mut app = App::new();
     app.core.set_backup_to_open(backup.clone()).unwrap();
     app.core.inspect_backup(password(PASSWORD)).unwrap();
-    app.advance(5 * 60_000);
+    app.advance(2 * 60_000);
     app.core.tick();
     assert_eq!(code(app.core.replace_with_backup()), "invalid_input");
     assert_eq!(app.phase(), "no_vault");
 
-    // Within the idle time it can still be installed.
+    // Within that time it can still be installed.
     app.core.set_backup_to_open(backup).unwrap();
     app.core.inspect_backup(password(PASSWORD)).unwrap();
-    app.advance(5 * 60_000 - 1);
+    app.advance(2 * 60_000 - 1);
     app.core.tick();
     app.core.replace_with_backup().unwrap();
     assert_eq!(app.phase(), "unlocked");
+}
+
+#[test]
+fn closing_a_preview_forgets_the_decrypted_copy_at_once() {
+    let (_source, backup) = a_backup();
+    let mut app = App::new();
+    app.core.set_backup_to_open(backup).unwrap();
+    app.core.inspect_backup(password(PASSWORD)).unwrap();
+    app.core.discard_inspection();
+    assert_eq!(code(app.core.replace_with_backup()), "invalid_input");
+    // The picked file is forgotten too: opening it again starts with the file dialog.
+    assert_eq!(
+        code(app.core.inspect_backup(password(PASSWORD))),
+        "invalid_input"
+    );
+    assert_eq!(app.phase(), "no_vault");
 }
 
 #[test]
@@ -1797,7 +1915,7 @@ fn changes_that_change_nothing_are_not_saved() {
     app.advance(1_000);
     app.core.set_favorite(&id, false).unwrap();
     app.core.restore_note(&id).unwrap();
-    assert_eq!(app.core.empty_trash().unwrap(), 0);
+    assert_eq!(app.core.empty_trash(None).unwrap(), 0);
     assert!(!app.core.app_status().backup.unbacked_changes);
     assert_eq!(app.core.list_safety_copies().unwrap(), copies);
 }
@@ -1836,4 +1954,473 @@ fn a_failed_save_leaves_memory_as_it_was_on_disk() {
     let mut app = app.restart();
     app.core.unlock(password(PASSWORD)).unwrap();
     assert_eq!(app.core.list_notes(all(), "").unwrap().len(), 2);
+}
+
+// ---------- security audit fixes (2026-10) ----------
+
+/// One Seed Phrase Note and one Text Note. Returns their ids.
+fn a_wallet_and_a_text_note(app: &mut App) -> (String, String) {
+    let seed = app
+        .core
+        .create_note(
+            input(
+                "seed_phrase",
+                "Fake S",
+                json!({}),
+                json!({"words": (["zoo"; 12].join(" "))}),
+            ),
+            Some(pw(PASSWORD)),
+        )
+        .unwrap();
+    let text = app
+        .core
+        .create_note(input("text", "Fake T", json!({}), json!({})), None)
+        .unwrap();
+    (seed, text)
+}
+
+#[test]
+fn removing_a_wallet_kind_needs_the_master_password_at_every_step() {
+    let mut app = App::new();
+    unlocked(&mut app);
+    let (seed, text) = a_wallet_and_a_text_note(&mut app);
+
+    // Trash.
+    assert_eq!(code(app.core.trash_note(&seed, None)), "invalid_input");
+    assert_eq!(
+        code(app.core.trash_note(&seed, Some(pw(WRONG_PASSWORD)))),
+        "wrong_credential"
+    );
+    assert!(app.core.get_note(&seed).unwrap().deleted_at.is_none());
+    app.core.trash_note(&seed, Some(pw(PASSWORD))).unwrap();
+    app.core.trash_note(&text, None).unwrap();
+
+    // Empty Trash, while a Wallet Kind is in it.
+    assert_eq!(code(app.core.empty_trash(None)), "invalid_input");
+    assert_eq!(
+        code(app.core.empty_trash(Some(pw(WRONG_PASSWORD)))),
+        "wrong_credential"
+    );
+
+    // Delete forever. An ordinary Note still goes without the password.
+    assert_eq!(code(app.core.delete_forever(&seed, None)), "invalid_input");
+    assert_eq!(
+        code(app.core.delete_forever(&seed, Some(pw(WRONG_PASSWORD)))),
+        "wrong_credential"
+    );
+    app.core.delete_forever(&text, None).unwrap();
+    assert!(app.core.get_note(&seed).is_ok());
+    app.core.delete_forever(&seed, Some(pw(PASSWORD))).unwrap();
+    assert_eq!(code(app.core.get_note(&seed)), "not_found");
+
+    // With only ordinary Notes in Trash, emptying it needs no password.
+    let other = app
+        .core
+        .create_note(input("text", "Fake U", json!({}), json!({})), None)
+        .unwrap();
+    app.core.trash_note(&other, None).unwrap();
+    assert_eq!(app.core.empty_trash(None).unwrap(), 1);
+
+    // Restoring from Trash is never destructive, so it needs none either.
+    let (seed, _) = a_wallet_and_a_text_note(&mut app);
+    app.core.trash_note(&seed, Some(pw(PASSWORD))).unwrap();
+    app.core.restore_note(&seed).unwrap();
+    assert_eq!(app.core.empty_trash(Some(pw(PASSWORD))).unwrap(), 0);
+}
+
+#[test]
+fn a_ninth_different_hidden_field_within_a_minute_is_not_shown() {
+    let mut app = App::new();
+    unlocked(&mut app);
+    let ids: Vec<String> = (0..9)
+        .map(|i| {
+            let note = input(
+                "login",
+                &format!("Fake {i}"),
+                json!({}),
+                json!({"password": format!("fake-value-{i}")}),
+            );
+            app.core.create_note(note, None).unwrap()
+        })
+        .collect();
+    for id in &ids[..8] {
+        app.core.show_field(id, "password").unwrap();
+        app.advance(1_000);
+    }
+    let refused = app.core.show_field(&ids[8], "password").unwrap_err();
+    assert_eq!(refused.code, "too_many");
+    assert!(
+        refused.message.contains("52 seconds"),
+        "{}",
+        refused.message
+    );
+    // One already shown can be shown again, and so can a new one once the minute has passed.
+    app.core.show_field(&ids[0], "password").unwrap();
+    app.advance(52_000);
+    app.core.activity();
+    assert_eq!(
+        app.core.show_field(&ids[8], "password").unwrap().as_str(),
+        "fake-value-8"
+    );
+}
+
+#[test]
+fn a_backup_destination_is_good_for_one_backup_only() {
+    let mut app = App::new();
+    unlocked(&mut app);
+    app.core
+        .create_note(input("text", "Fake", json!({}), json!({})), None)
+        .unwrap();
+    let dest = app.temp.path().join("fake-once.enote");
+
+    app.core.set_backup_destination(dest.clone()).unwrap();
+    let written = app.core.write_backup().unwrap();
+    assert!(written.durable);
+    assert_eq!(written.note_count, 1);
+    let status = app.core.app_status().backup;
+    assert!(status.last_backup_at.is_some() && !status.unbacked_changes);
+    // Writing again needs a fresh pick: the file just written is not overwritten.
+    let first = std::fs::read(&dest).unwrap();
+    app.core
+        .create_note(input("text", "Fake 2", json!({}), json!({})), None)
+        .unwrap();
+    assert_eq!(code(app.core.write_backup()), "invalid_input");
+    assert_eq!(std::fs::read(&dest).unwrap(), first);
+
+    // A pick the owner backs out of, one left for ten minutes, and one made before a lock are
+    // all forgotten.
+    let other = app.temp.path().join("fake-declined.enote");
+    app.core.set_backup_destination(other.clone()).unwrap();
+    app.core.forget_backup_destination();
+    assert_eq!(code(app.core.write_backup()), "invalid_input");
+
+    app.core.set_backup_destination(other.clone()).unwrap();
+    for _ in 0..10 {
+        app.advance(60_000);
+        app.core.activity();
+    }
+    assert_eq!(code(app.core.write_backup()), "invalid_input");
+
+    app.core.set_backup_destination(other.clone()).unwrap();
+    app.core.lock();
+    app.core.unlock(password(PASSWORD)).unwrap();
+    assert_eq!(code(app.core.write_backup()), "invalid_input");
+    assert!(!other.exists());
+}
+
+#[test]
+fn a_copy_opened_from_the_lock_screen_is_still_compared_with_the_vault_here() {
+    let mut app = App::new();
+    unlocked(&mut app);
+    app.core
+        .create_note(input("text", "Fake", json!({}), json!({})), None)
+        .unwrap();
+    let backup = app.temp.path().join("fake-earlier.enote");
+    app.core.set_backup_destination(backup.clone()).unwrap();
+    app.core.write_backup().unwrap();
+    app.advance(5_000);
+    app.core
+        .create_note(input("text", "Fake later", json!({}), json!({})), None)
+        .unwrap();
+    app.core.lock();
+
+    // Same Vault, same password: the older Backup is called older although the app is Locked.
+    app.core.set_backup_to_open(backup).unwrap();
+    let preview = app.core.inspect_backup(password(PASSWORD)).unwrap();
+    assert_eq!(preview.older_than_current, Some(true));
+    assert!(preview.replaces_vault);
+    app.core.discard_inspection();
+    assert_eq!(app.phase(), "locked");
+    assert_eq!(app.core.app_status().failed_attempts, 0);
+
+    // A Backup of another Vault with another password can't be compared, and says so: it still
+    // replaces a Vault, and the screens must not present it as a first Vault.
+    let (_source, foreign) = a_backup_with(NEW_PASSWORD);
+    app.core.set_backup_to_open(foreign.clone()).unwrap();
+    let preview = app.core.inspect_backup(password(NEW_PASSWORD)).unwrap();
+    assert_eq!(preview.older_than_current, None);
+    assert!(preview.replaces_vault);
+    assert_eq!(app.core.app_status().failed_attempts, 0);
+
+    // On a computer with no Vault there is nothing to replace.
+    let mut fresh = App::new();
+    fresh.core.set_backup_to_open(foreign).unwrap();
+    let preview = fresh.core.inspect_backup(password(NEW_PASSWORD)).unwrap();
+    assert_eq!(preview.older_than_current, None);
+    assert!(!preview.replaces_vault);
+}
+
+#[test]
+fn wrong_password_delays_survive_a_restart() {
+    let mut app = App::new();
+    unlocked(&mut app);
+    app.core.lock();
+    for _ in 0..5 {
+        app.advance(60_000);
+        assert_eq!(
+            code(app.core.unlock(password(WRONG_PASSWORD))),
+            "wrong_credential"
+        );
+    }
+    app.core.tick();
+    let mut app = app.restart();
+    let status = app.core.app_status();
+    assert_eq!(status.failed_attempts, 5);
+    assert!(status.show_recovery_hint);
+    assert!(status.retry_in_ms.is_some());
+    assert_eq!(code(app.core.unlock(password(PASSWORD))), "retry_later");
+    app.advance(5_000);
+    app.core.unlock(password(PASSWORD)).unwrap();
+    // The right password clears the count, on disk too.
+    app.core.tick();
+    app.core.lock();
+    let app = app.restart();
+    assert_eq!(app.core.app_status().failed_attempts, 0);
+}
+
+#[test]
+fn an_unreadable_settings_file_means_the_strictest_lock_rules() {
+    let mut app = App::new();
+    unlocked(&mut app);
+    app.core
+        .set_settings(SettingsInput {
+            idle_minutes: 30,
+            lock_on_app_switch: false,
+        })
+        .unwrap();
+    app.core.lock();
+    std::fs::write(app.data_dir().join(store::SETTINGS_FILE), b"{ not json").unwrap();
+
+    let app = app.restart();
+    let status = app.core.app_status();
+    assert!(status.settings_unreadable);
+    assert_eq!(status.settings.idle_minutes, 1);
+    assert!(status.settings.lock_on_app_switch);
+
+    // No settings file at all is a first run: the ordinary defaults, and nothing to report.
+    let fresh = App::new();
+    let status = fresh.core.app_status();
+    assert!(!status.settings_unreadable);
+    assert_eq!(status.settings.idle_minutes, 5);
+    assert!(!status.settings.lock_on_app_switch);
+}
+
+#[test]
+fn locking_on_app_switch_leaves_a_copy_long_enough_to_paste_it() {
+    let mut app = App::new();
+    unlocked(&mut app);
+    set_lock_on_app_switch(&mut app);
+    let id = app
+        .core
+        .create_note(
+            input(
+                "login",
+                "Fake",
+                json!({}),
+                json!({"password": "fake-copy-1"}),
+            ),
+            None,
+        )
+        .unwrap();
+    app.core.copy_field(&id, "password", None).unwrap();
+    app.advance(1_000);
+    app.core.os_event(OsEvent::FocusLost);
+    assert_eq!(app.phase(), "locked");
+    assert_eq!(app.clipboard().as_deref(), Some("fake-copy-1"));
+    app.advance(28_000);
+    app.core.tick();
+    assert_eq!(app.clipboard().as_deref(), Some("fake-copy-1"));
+    app.advance(1_000);
+    app.core.tick();
+    assert_eq!(app.clipboard(), None);
+}
+
+#[test]
+fn a_vault_from_a_newer_document_schema_is_not_called_damaged() {
+    let app = App::new();
+    let body = json!({
+        "schema_version": notes::SCHEMA_VERSION + 1,
+        "changed_at": START_UNIX,
+        "change_counter": 1,
+        "notes": []
+    });
+    let created = vault_format::create(
+        &secrecy::SecretString::from(PASSWORD),
+        KdfParams::TESTING,
+        &Limits::TESTING,
+        &serde_json::to_vec(&body).unwrap(),
+    )
+    .unwrap();
+    std::fs::create_dir_all(app.data_dir()).unwrap();
+    std::fs::write(vault_file(&app), &created.bytes).unwrap();
+    let mut app = app.restart();
+    assert_eq!(app.phase(), "locked");
+    let refused = app.core.unlock(password(PASSWORD)).unwrap_err();
+    assert_eq!(refused.code, "unsupported");
+    assert!(
+        refused.message.contains("newer version"),
+        "{}",
+        refused.message
+    );
+}
+
+#[test]
+fn a_file_far_larger_than_any_vault_is_not_opened_as_a_backup() {
+    let mut app = App::new();
+    let huge = app.temp.path().join("fake-huge.enote");
+    std::fs::File::create(&huge)
+        .unwrap()
+        .set_len(store::MAX_FILE_BYTES + 1)
+        .unwrap();
+    app.core.set_backup_to_open(huge).unwrap();
+    let refused = app.core.inspect_backup(password(PASSWORD)).unwrap_err();
+    assert_eq!(refused.code, "io");
+    assert!(
+        refused.message.contains("larger than any Vault"),
+        "{}",
+        refused.message
+    );
+}
+
+#[test]
+fn a_vault_can_only_be_created_where_there_is_none() {
+    let mut app = App::new();
+    app.core.create_vault_allowed().unwrap();
+    unlocked(&mut app);
+    assert_eq!(code(app.core.create_vault_allowed()), "invalid_input");
+    app.core.lock();
+    assert_eq!(code(app.core.create_vault_allowed()), "invalid_input");
+}
+
+// ---------- the optional fields of document schema 2 ----------
+
+#[test]
+fn the_fields_added_in_schema_2_are_saved_listed_and_shown_after_unlocking_again() {
+    let mut app = App::new();
+    unlocked(&mut app);
+    let id = app
+        .core
+        .create_note(
+            input(
+                "api_key",
+                "Fake deploy key",
+                json!({
+                    "service": "svc.example.test",
+                    "key_id": "FAKEKEYID0001",
+                    "purpose": "Nightly fake uploads",
+                    "url": "https://console.example.test/keys",
+                    "expires": "2027-01-31",
+                    "env_var": "FAKE_DEPLOY_KEY",
+                }),
+                // Pasted with a stray space and line ending around it.
+                json!({"key": " fake-api-key-0000\n", "secret": "fake-api-secret-0000"}),
+            ),
+            None,
+        )
+        .unwrap();
+    // Every save is read back and parsed before it replaces the Vault, and unlocking parses it
+    // again: a schema 2 document passes both.
+    app.core.lock();
+    app.core.unlock(password(PASSWORD)).unwrap();
+
+    let rows = app.core.list_notes(all(), "nightly fake_deploy").unwrap();
+    assert_eq!(rows.len(), 1);
+    let row = serde_json::to_value(&rows[0]).unwrap();
+    assert_eq!(row["expires"], "2027-01-31");
+    assert_eq!(row["has_hidden"], true);
+    assert_eq!(row["subtitle"], "svc.example.test");
+    let view = serde_json::to_value(app.core.get_note(&id).unwrap()).unwrap();
+    assert_eq!(view["visible"]["key_id"], "FAKEKEYID0001");
+    assert_eq!(view["visible"]["env_var"], "FAKE_DEPLOY_KEY");
+    assert_eq!(view["hidden"], json!([["key", true], ["secret", true]]));
+    assert_eq!(
+        app.core.show_field(&id, "key").unwrap().as_str(),
+        "fake-api-key-0000"
+    );
+    assert_eq!(
+        app.core.show_field(&id, "secret").unwrap().as_str(),
+        "fake-api-secret-0000"
+    );
+}
+
+#[test]
+fn a_value_that_breaks_the_rule_for_its_field_is_refused_without_repeating_it() {
+    let mut app = App::new();
+    unlocked(&mut app);
+    // (field, a value that breaks its rule, words the message must have)
+    let cases = [
+        ("expires", "2027-02-30", "2027-01-31"),
+        ("env_var", "FAKE-DEPLOY KEY", "underscores"),
+        ("purpose", "fake\npurpose", "one line"),
+        ("url", "console.example.test\n/keys", "one line"),
+    ];
+    for (field, value, hint) in cases {
+        let new = input(
+            "api_key",
+            "Fake key",
+            json!({"service": "svc.example.test", field: value}),
+            json!({"key": "fake-api-key-0000"}),
+        );
+        let refused = app.core.create_note(new, None).unwrap_err();
+        assert_eq!(refused.code, "invalid_input", "{field}");
+        assert!(
+            refused.message.contains(hint),
+            "{field}: {}",
+            refused.message
+        );
+        assert!(
+            !refused.message.contains(value),
+            "{field}: {}",
+            refused.message
+        );
+    }
+    assert!(app.core.list_notes(all(), "").unwrap().is_empty());
+}
+
+#[test]
+fn an_edit_saved_without_changing_anything_is_not_saved_as_a_change() {
+    let mut app = App::new();
+    unlocked(&mut app);
+    let visible = json!({"website": "site.example.test", "username": "fake-user"});
+    let id = app
+        .core
+        .create_note(
+            input(
+                "login",
+                "Fake login",
+                visible.clone(),
+                json!({"password": "fake-login-password-123"}),
+            ),
+            None,
+        )
+        .unwrap();
+    let backup = app.temp.path().join("fake-backup.enote");
+    app.core.set_backup_destination(backup).unwrap();
+    app.core.write_backup().unwrap();
+    let copies = app.core.list_safety_copies().unwrap();
+    let updated_at = app.core.get_note(&id).unwrap().updated_at;
+
+    // What the edit form sends when it is saved with nothing touched.
+    app.advance(60_000);
+    app.core
+        .update_note(&id, edit("Fake login", visible, json!({})), None)
+        .unwrap();
+    assert!(!app.core.app_status().backup.unbacked_changes);
+    assert_eq!(app.core.list_safety_copies().unwrap(), copies);
+    assert_eq!(app.core.get_note(&id).unwrap().updated_at, updated_at);
+
+    // A real difference is saved as before.
+    app.core
+        .update_note(
+            &id,
+            edit(
+                "Fake login",
+                json!({"username": "fake-user-two"}),
+                json!({}),
+            ),
+            None,
+        )
+        .unwrap();
+    assert!(app.core.app_status().backup.unbacked_changes);
+    assert!(app.core.get_note(&id).unwrap().updated_at > updated_at);
 }

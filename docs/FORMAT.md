@@ -11,7 +11,7 @@ Sources of truth, and what this document was checked against:
 
 * `crates/vault-format/src/lib.rs`, `header.rs`, `recovery_key.rs`: the file, the keys, the
   Recovery Key.
-* `crates/notes/src/lib.rs`, `note.rs`: the decrypted body (the Vault document).
+* `crates/notes/src/lib.rs`, `note.rs`, `rules.rs`: the decrypted body (the Vault document).
 * The Python reference decryptor in [section 11](#11-reference-decryptor-python) was run
   against Vaults written by the Rust code (opened with both credentials), and it rebuilds the
   pinned known-answer Vault in [section 12](#12-test-vectors) byte for byte.
@@ -102,12 +102,14 @@ doctored file from freezing the computer.
 
 | Parameter | Floor | Ceiling |
 |---|---:|---:|
-| `kdf_m_kib` | 65,536 (64 MiB) | 2,097,152 (2 GiB) |
+| `kdf_m_kib` | 65,536 (64 MiB) | 524,288 (512 MiB) |
 | `kdf_t` | 3 | 20 |
 | `kdf_p` | 1 | 16 |
 
 and also `kdf_m_kib ≥ 8 × kdf_p` (an Argon2 rule). The app and the Emergency Reader use exactly
-these limits (`Limits::PRODUCTION`).
+these limits (`Limits::PRODUCTION`). The memory ceiling is the most the app ever chooses when it
+calibrates (below), so a file can't demand more work than the app could have written itself.
+(Until October 2026 the ceiling was 2 GiB; no Vault written by the app is above 512 MiB.)
 
 When the app creates a Vault it starts from m = 524,288 KiB (512 MiB), t = 3, p = 4 and
 calibrates on that computer: while one derivation takes more than 1 s and memory is above the
@@ -231,19 +233,23 @@ The wallet AAD binds the value to this Vault, this Note and this field:
 A value of `v` bytes becomes `24 + v + 16` bytes, which is `2 × (40 + v)` hex characters. A
 sealed value copied to another field, Note or Vault fails to decrypt.
 
-## 8. The Vault document (body JSON, schema version 1)
+## 8. The Vault document (body JSON, schema versions 1 and 2)
 
 The decrypted document is one JSON object. The app writes it compactly (no whitespace) with
 object keys in the order below; maps (`visible`, `hidden`, `sealed`) have their keys sorted.
 The app's reader accepts any key order and whitespace.
 
+There are two schema versions. Schema 2 is schema 1 plus a few optional fields, marked
+"schema 2" below; nothing else differs. Which of the two a file holds follows from its Notes:
+see [Schema versions](#schema-versions).
+
 ### Top level
 
 | Key | JSON type | Meaning |
 |---|---|---|
-| `schema_version` | integer | `1` (anything else is rejected) |
+| `schema_version` | integer | `1` or `2` (see [Schema versions](#schema-versions)) |
 | `changed_at` | integer | Unix time in seconds of the last change to the document |
-| `change_counter` | integer (u64) | goes up by one on every change; with `changed_at` it tells which of two copies is older |
+| `change_counter` | integer (u64) | goes up by one on every change; with `changed_at` it tells which of two copies is older. At most 2^53: a larger value is rejected |
 | `notes` | array | every Note, Trash included |
 
 ### A Note
@@ -265,28 +271,112 @@ The app's reader accepts any key order and whitespace.
 
 | Kind | `kind` | Visible fields | Hidden Fields | Hidden values are in |
 |---|---|---|---|---|
-| Seed Phrase | `seed_phrase` | `wallet_name`, `word_count` | `words`, `passphrase` | `sealed` |
+| Seed Phrase | `seed_phrase` | `wallet_name`, `word_count`; schema 2: `address`, `derivation_path` | `words`, `passphrase` | `sealed` |
 | Private Key | `private_key` | `chain`, `address` | `key` | `sealed` |
-| Login | `login` | `website`, `username` | `password` | `hidden` |
-| API Key | `api_key` | `service` | `key` | `hidden` |
+| Login | `login` | `website`, `username`; schema 2: `purpose` | `password` | `hidden` |
+| API Key | `api_key` | `service`; schema 2: `key_id`, `purpose`, `url`, `expires`, `env_var` | `key`; schema 2: `secret` | `hidden` |
 | Text | `text` | none | `body` | `hidden` |
 
 * A field without a value is left out; empty strings are never stored.
 * `word_count` is the string `"12"` or `"24"`, counted from the words. Every Seed Phrase has
   `words` in `sealed`.
-* `words` is stored normalised: lowercase, separated by single spaces. The `passphrase` (the
+* `words` is stored normalised: separated by single spaces, and lowercase when every word is a
+  BIP39 English word (any other phrase keeps its letters as typed). The `passphrase` (the
   optional "25th word") is stored exactly as typed.
 * `chain` is free text; the app's Private Key checks know `evm`, `solana`, `bitcoin` and
   `other`.
+* The app removes whitespace from both ends of every visible value, and from a `key` (API Key
+  or Private Key) or `secret` that is a single line, before storing it; a key of several lines
+  (a PEM block, say) and every other Hidden Field (`password`, `passphrase`, `body`) are stored
+  exactly as entered.
+
+### The fields schema 2 added
+
+All of them are optional, and a Note that has none of them looks exactly as it did in schema 1.
+
+| Kind | Field | Stored in | Meaning | Rule for the value |
+|---|---|---|---|---|
+| API Key | `key_id` | `visible` | the half of the key that isn't hidden, for services that issue an ID beside the key | one line |
+| API Key | `purpose` | `visible` | what the key is for | one line, at most 200 characters |
+| API Key | `url` | `visible` | where the key is managed | one line |
+| API Key | `expires` | `visible` | the day the key stops working | a date written `YYYY-MM-DD` |
+| API Key | `env_var` | `visible` | the name of the variable the owner uses for the key | `[A-Za-z_][A-Za-z0-9_]*`, at most 128 characters |
+| API Key | `secret` | `hidden` | the API Key's secret: a second Hidden Field, for services that issue two values to keep hidden | none |
+| Login | `purpose` | `visible` | what the Login is for | one line, at most 200 characters |
+| Seed Phrase | `address` | `visible` | a public address of the wallet | one line |
+| Seed Phrase | `derivation_path` | `visible` | the derivation path that address is found at, such as `m/44'/60'/0'/0/0` | one line |
+
+* **One line** means the value has no control characters (Unicode category Cc), which rules
+  out line breaks and tabs.
+* **Characters** are counted as Unicode code points, not bytes.
+* **`expires`** is exactly ten ASCII characters: four digits, `-`, two digits, `-`, two digits.
+  The month is `01` to `12` and the day must exist in that month of the Gregorian calendar
+  (`29` February only in a leap year). It carries no time of day and no time zone.
+* The rules are checked when the owner enters a value and again whenever a body is read. They
+  apply to these fields only: the fields schema 1 already had, a Private Key's `address`
+  among them, take any non-empty text, as they always did.
+* `secret` is an ordinary Hidden Field, stored as plain text under `hidden` beside `key`. No
+  Wallet Kind gained a Hidden Field, so section 7 is unchanged: the sealed field names are
+  still only `words`, `passphrase` and `key`.
+* A Seed Phrase's `address` and `derivation_path` are visible fields. Like the address of a
+  Private Key, they can be read while the app is merely Unlocked.
+
+An API Key Note that uses them (fake values), from a document whose `schema_version` is 2:
+
+```json
+{
+  "id": "0c7e3f2a9d5b4e61a8f0b1c2d3e4f506",
+  "kind": "api_key",
+  "title": "Test deploy key",
+  "visible": {
+    "env_var": "FAKE_DEPLOY_KEY",
+    "expires": "2027-01-31",
+    "key_id": "FAKEKEYID0001",
+    "purpose": "Nightly fake uploads",
+    "service": "Example Test Service",
+    "url": "https://console.example.test/keys"
+  },
+  "hidden": { "key": "fake-api-key-0000", "secret": "fake-api-secret-0000" },
+  "sealed": {},
+  "favorite": false,
+  "created_at": 1790000000,
+  "updated_at": 1790000000,
+  "deleted_at": null
+}
+```
+
+### Schema versions
+
+* **Reading.** This version of the app and of the Emergency Reader reads schema 1 and
+  schema 2. Any other `schema_version` is refused as "made by a newer version", not as damage.
+  A body that says `1` but has a schema 2 field is rejected as damaged, because no version of
+  the app writes one. A body that says `2` and uses none of those fields is read, and saved
+  again as `1`.
+* **Writing.** The app keeps no version in memory. On every save it writes the oldest schema
+  that can hold the Notes: `2` if at least one Note, Trash included, has a value in a schema 2
+  field, and `1` otherwise. So a Vault that never uses the new fields is written exactly as an
+  older build would write it, and stays readable by older builds and older Emergency Readers.
+  Clearing the last schema 2 field, or removing the last Note that had one ("Delete forever",
+  emptying Trash, or the removal after 30 days in Trash), makes the next save schema 1 again.
+* **Older builds.** A build of the app or of the Emergency Reader from before schema 2 knows
+  schema 1 only. Given a schema 2 body it refuses the whole Vault and changes nothing; it does
+  not open the Vault and skip the fields it doesn't know. Builds from before 12 October 2026
+  word the refusal badly: they say the Vault file is **damaged**, which it is not. So before a
+  Vault that uses any schema 2 field is carried to another computer, update the app on that
+  computer, and replace every Emergency Reader you saved (next to a Backup on a USB stick, for
+  example) with the current one. The Vault keeps opening on the computer that wrote it, and
+  Backups and Safety Copies made before the new fields were used are still schema 1.
 
 ### What the app rejects
 
-Unknown keys (at the top level or in a Note); a `schema_version` other than 1; an unknown
-`kind`; a Note id that isn't 32 lowercase hex characters, or one used twice; a blank title;
-a visible or Hidden Field name that doesn't belong to the Note's Kind; an empty value; a
+Unknown keys (at the top level or in a Note); an unknown `kind`; a Note id that isn't 32
+lowercase hex characters, or one used twice; a blank title; a visible or Hidden Field name
+that doesn't belong to the Note's Kind; an empty value; a value that breaks the rule for its
+field (schema 2 fields only); a schema 2 field in a body whose `schema_version` is 1; a
 `hidden` entry on a Seed Phrase or Private Key, or a `sealed` entry on another Kind; a `sealed`
 value that isn't non-empty lowercase hex; a Seed Phrase without `words` or with a `word_count`
-other than `"12"` or `"24"`.
+other than `"12"` or `"24"`. All of these are reported as a damaged Vault. A `schema_version`
+other than 1 or 2 is refused too, but as a Vault made by a newer version.
 
 ### Example
 
@@ -380,7 +470,7 @@ key to a file.
    Recovery Key: decode it to 16 bytes as in section 9.
 5. **Derive the KEK**: Argon2id version 0x13 with that input, the slot's salt, `m` KiB of
    memory, `t` passes, `p` lanes, and a 32-byte output. With the app's parameters this takes
-   around a second and between 64 MiB and 512 MiB of memory (2 GiB at most).
+   around a second and between 64 MiB and 512 MiB of memory.
 6. **Open the slot**: build the 40-byte slot AAD (section 5) and XChaCha20-Poly1305-decrypt
    `wrapped` with the KEK and the slot's nonce. If authentication fails, the credential is
    wrong. Otherwise the 64 bytes are the **Vault Key** (first 32) and the **Wallet Key** (last
@@ -465,7 +555,7 @@ def parse_header(data):
     body = data[HEADER_LEN:]
     if (len(body) - TAG_LEN) % BLOCK != 0:
         sys.exit("malformed body length")
-    if not (65536 <= m <= 2097152 and 3 <= t <= 20 and 1 <= p <= 16 and m >= 8 * p):
+    if not (65536 <= m <= 524288 and 3 <= t <= 20 and 1 <= p <= 16 and m >= 8 * p):
         sys.exit("KDF parameters outside the allowed range")
     return vault_id, (m, t, p), slots, body_nonce, body
 
@@ -581,16 +671,33 @@ The result is a 4420-byte file whose SHA-256 is
 for you:
 
 ```text
-enote-reader <vault-or-backup-file> [--recovery-key] [--reveal] [--credential-stdin]
+enote-reader <vault-or-backup-file> [--recovery-key] [--note <number>] [--reveal]
+                    [--allow-non-terminal] [--credential-stdin]
 ```
 
 * It asks for the Master Password (or the Recovery Key with `--recovery-key`) without echo.
   `--credential-stdin` reads it from the first line of stdin instead, for scripts.
-* It always uses the limits of section 4.
-* It prints every Note, Trash included and marked: Kind, title, visible fields. Hidden Fields
-  are shown as `••••••` unless you add `--reveal`; with `--reveal`, Wallet Kind fields are
-  opened with the Wallet Key from the same credential.
+* It always uses the limits of section 4, and reads document schema 1 and 2 (section 8). A
+  newer schema is reported as such, with exit code 2.
+* On its own it lists every Note with a number, Trash included and marked: Kind, title,
+  visible fields. Hidden Fields are shown as `••••••`. The numbers start at 1 and follow the
+  order printed: Notes not in Trash first (Favorites, then most recently changed), then Trash
+  (most recently deleted first). The same file always gives the same numbers; a file saved
+  again after a change may not.
+* `--note <number>` (also `--note=<number>`) prints only the Note with that number, and
+  nothing about the others.
+* `--reveal` also prints Hidden Fields. With `--note` it opens only that Note's, which is the
+  way to read one password or key without putting every other one on the screen; the Wallet
+  Key is derived (from the same credential) only if that Note is a Seed Phrase or Private Key
+  with a value to open. Without `--note` it opens every Note's.
+* `--reveal` only prints to a terminal. If the output is redirected to a file or piped into
+  another program, it prints nothing and exits with 3, before reading the file or asking for
+  the credential. Adding `--allow-non-terminal` prints anyway.
+* Control characters (apart from tabs, and the line breaks of a value of several lines) and
+  invisible Unicode format characters are printed as `�`, so nothing stored in a Note can
+  drive the terminal or reorder the text.
 * It writes nothing to disk, and warns on stderr not to redirect its output to a file.
 * Exit codes: 0 ok, 1 wrong Master Password or Recovery Key, 2 damaged or unsupported file,
-  3 usage or I/O error. If one Wallet Kind field fails to decrypt, it prints everything else,
-  marks that field as damaged, and exits with 2.
+  3 usage or I/O error, 4 no Note has the number given with `--note` (it says which numbers
+  exist and prints no Note). If one Wallet Kind field fails to decrypt, it prints everything
+  else it was asked for, marks that field as damaged, and exits with 2.

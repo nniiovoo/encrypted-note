@@ -18,13 +18,24 @@
 //! the directory (Unix). On any failure the old file is untouched and the temp file is removed.
 //! The directory is opened for the fsync BEFORE the rename, so a folder that cannot be flushed
 //! fails while the old file is still in place; once the rename has happened the write is
-//! reported as a success (the final directory fsync is best effort).
+//! reported as done, [`CommitStatus::Uncertain`] if that final flush could not be confirmed.
+//! On Windows the rename is `std::fs::rename` (which copes with a target another program has
+//! open), followed by a flush of the renamed file.
 //!
-//! Safety Copy retention: keep the 10 newest `auto-*`; keep `replaced-*` for at least 30 days
-//! (delete older ones). Timestamps come from the caller (`now`, Unix seconds). A new Safety Copy
-//! is stamped with `max(now, newest existing created_at)` so that a clock going backwards can
-//! never make the copy just taken look older than the others (and be pruned at once); the
-//! same-second counter `<n>` is shared by both kinds, so "newest first" is always exact.
+//! Safety Copy retention: keep the 10 newest `auto-*`, and also the first `auto-*` of each day
+//! for 30 days. Every save makes a copy, so by count alone eleven quick saves would push out
+//! everything older; the first copy of a day is the Vault as it was before that day's changes,
+//! and it stays whatever happens later that day. Keep `replaced-*` for at least 30 days (delete
+//! older ones), and the newest `replaced-*` for as long as it is the newest, so one wrong clock
+//! reading can't remove it. Timestamps come from the caller (`now`, Unix seconds). A new Safety
+//! Copy is stamped with `max(now, newest existing created_at)` so that a clock going backwards
+//! can never make the copy just taken look older than the others (and be pruned at once); the
+//! same-second counter `<n>` is shared by both kinds, so "newest first" is always exact. A
+//! Safety Copy never replaces another file, and none is written when the newest one already
+//! holds the same bytes (a save that failed after its copy was taken, tried again).
+//!
+//! No file larger than [`MAX_FILE_BYTES`] is read or written: a real Vault is far smaller, and
+//! a picked "Backup" of any size must not be pulled into memory.
 //!
 //! Single instance: `VaultDir::open` takes an exclusive `File::try_lock` on `.lock`; if another
 //! process holds it, `StoreError::AlreadyOpen`.
@@ -32,7 +43,7 @@
 #![forbid(unsafe_code)]
 
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
 
 pub const VAULT_FILE: &str = "vault.enote";
@@ -40,6 +51,10 @@ pub const SETTINGS_FILE: &str = "settings.json";
 pub const SAFETY_DIR: &str = "safety";
 pub const AUTO_SAFETY_KEEP: usize = 10;
 pub const REPLACED_SAFETY_KEEP_SECS: i64 = 30 * 24 * 60 * 60;
+/// How long the first automatic Safety Copy of each day is kept.
+pub const DAILY_SAFETY_KEEP_SECS: i64 = 30 * 24 * 60 * 60;
+/// The largest Vault, Safety Copy or Backup this crate reads or writes (64 MiB).
+pub const MAX_FILE_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Debug)]
 pub enum StoreError {
@@ -50,7 +65,15 @@ pub enum StoreError {
     VerifyFailed,
     /// A sandboxed file picker granted only the existing file, so a sibling temp file cannot be made.
     BackupOverwriteNotAtomic,
+    /// Larger than [`MAX_FILE_BYTES`]; it was not read (or not written).
+    TooLarge,
     Io(std::io::Error),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CommitStatus {
+    Durable,
+    Uncertain,
 }
 
 impl std::fmt::Display for StoreError {
@@ -135,7 +158,7 @@ impl VaultDir {
         bytes: &[u8],
         verify: &dyn Fn(&[u8]) -> bool,
         now: i64,
-    ) -> Result<(), StoreError> {
+    ) -> Result<CommitStatus, StoreError> {
         self.install_vault(bytes, verify, now, SafetyKind::Automatic)
     }
 
@@ -146,7 +169,7 @@ impl VaultDir {
         bytes: &[u8],
         verify: &dyn Fn(&[u8]) -> bool,
         now: i64,
-    ) -> Result<(), StoreError> {
+    ) -> Result<CommitStatus, StoreError> {
         self.install_vault(bytes, verify, now, SafetyKind::Replaced)
     }
 
@@ -170,7 +193,8 @@ impl VaultDir {
 
     pub fn write_settings(&self, bytes: &[u8]) -> Result<(), StoreError> {
         TempFile::write_verified(&self.root, bytes, &|_| true)?
-            .commit(&self.root.join(SETTINGS_FILE))
+            .commit(&self.root.join(SETTINGS_FILE))?;
+        Ok(())
     }
 
     fn vault_path(&self) -> PathBuf {
@@ -187,29 +211,58 @@ impl VaultDir {
         verify: &dyn Fn(&[u8]) -> bool,
         now: i64,
         previous_becomes: SafetyKind,
-    ) -> Result<(), StoreError> {
+    ) -> Result<CommitStatus, StoreError> {
         // Write and verify the new version first; until the final rename nothing else changes
         // except (possibly) an extra Safety Copy of the current version.
         let temp = TempFile::write_verified(&self.root, bytes, verify)?;
-        if let Some(previous) = read_if_exists(&self.vault_path())? {
-            self.keep_safety_copy(&previous, previous_becomes, now)?;
+        let copy = match read_if_exists(&self.vault_path())? {
+            Some(previous) => self.keep_safety_copy(&previous, previous_becomes, now)?,
+            None => CommitStatus::Durable,
+        };
+        let status = temp.commit(&self.vault_path())?;
+        if status == CommitStatus::Durable {
+            self.apply_retention(now);
         }
-        temp.commit(&self.vault_path())?;
-        self.apply_retention(now);
-        Ok(())
+        // A Safety Copy whose folder could not be flushed is no reason to refuse the save.
+        Ok(if copy == CommitStatus::Uncertain {
+            CommitStatus::Uncertain
+        } else {
+            status
+        })
     }
 
-    fn keep_safety_copy(&self, bytes: &[u8], kind: SafetyKind, now: i64) -> Result<(), StoreError> {
+    fn keep_safety_copy(
+        &self,
+        bytes: &[u8],
+        kind: SafetyKind,
+        now: i64,
+    ) -> Result<CommitStatus, StoreError> {
         let dir = self.safety_dir();
         create_private_dir(&dir)?;
-        let (stamp, n) = match self.numbered_safety_copies()?.first() {
+        let newest = self.numbered_safety_copies()?.into_iter().next();
+        if let Some((copy, _)) = &newest
+            && read_if_exists(&dir.join(&copy.id))?.as_deref() == Some(bytes)
+        {
+            return Ok(CommitStatus::Durable);
+        }
+        let (stamp, mut n) = match newest {
             Some((newest, n)) if newest.created_at >= now => {
                 (newest.created_at, n.saturating_add(1))
             }
             _ => (now, 0),
         };
-        TempFile::write_verified(&dir, bytes, &|_| true)?
-            .commit(&dir.join(safety_id(kind, stamp, n)))
+        // Our own names never collide; a file somebody else put there is not to be replaced.
+        let mut path = dir.join(safety_id(kind, stamp, n));
+        let mut tries = 0;
+        while path.exists() {
+            tries += 1;
+            if tries > 1024 {
+                return Err(io::Error::other("no free Safety Copy name").into());
+            }
+            n = n.checked_add(1).unwrap_or(0);
+            path = dir.join(safety_id(kind, stamp, n));
+        }
+        TempFile::write_verified(&dir, bytes, &|_| true)?.commit(&path)
     }
 
     /// Best effort: the save itself already succeeded, so failing to prune is not an error.
@@ -217,15 +270,26 @@ impl VaultDir {
         let Ok(copies) = self.safety_copies() else {
             return;
         };
-        let expired_autos = copies
+        let autos: Vec<&SafetyCopyInfo> = copies
             .iter()
             .filter(|c| c.kind == SafetyKind::Automatic)
-            .skip(AUTO_SAFETY_KEEP);
-        let expired_replaced = copies.iter().filter(|c| {
-            c.kind == SafetyKind::Replaced
-                && now.saturating_sub(c.created_at) > REPLACED_SAFETY_KEEP_SECS
+            .collect();
+        // Newest first, so the last copy seen for a day is that day's first.
+        let mut first_of_day: std::collections::BTreeMap<i64, &str> = Default::default();
+        for copy in &autos {
+            first_of_day.insert(copy.created_at.div_euclid(DAY_SECS), &copy.id);
+        }
+        let expired_autos = autos.iter().skip(AUTO_SAFETY_KEEP).filter(|c| {
+            let days_first = first_of_day.get(&c.created_at.div_euclid(DAY_SECS));
+            days_first != Some(&c.id.as_str())
+                || now.saturating_sub(c.created_at) > DAILY_SAFETY_KEEP_SECS
         });
-        for copy in expired_autos.chain(expired_replaced) {
+        let expired_replaced = copies
+            .iter()
+            .filter(|c| c.kind == SafetyKind::Replaced)
+            .skip(1)
+            .filter(|c| now.saturating_sub(c.created_at) > REPLACED_SAFETY_KEEP_SECS);
+        for copy in expired_autos.copied().chain(expired_replaced) {
             let _ = fs::remove_file(self.safety_dir().join(&copy.id));
         }
     }
@@ -262,13 +326,35 @@ impl VaultDir {
     }
 }
 
-/// `None` if `path` does not exist.
+const DAY_SECS: i64 = 24 * 60 * 60;
+
+/// Read a Vault file the owner picked (a Backup). Refuses anything that is not an ordinary file
+/// of at most [`MAX_FILE_BYTES`].
+pub fn read_file(path: &Path) -> Result<Vec<u8>, StoreError> {
+    read_if_exists(path)?.ok_or_else(|| io::Error::from(io::ErrorKind::NotFound).into())
+}
+
+/// `None` if `path` does not exist. The size is checked before anything is read, and the read
+/// itself stops at the limit in case the file grows meanwhile.
 fn read_if_exists(path: &Path) -> Result<Option<Vec<u8>>, StoreError> {
-    match fs::read(path) {
-        Ok(bytes) => Ok(Some(bytes)),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(e.into()),
+    let file = match File::open(path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    let meta = file.metadata()?;
+    if !meta.is_file() {
+        return Err(io::Error::other("not an ordinary file").into());
     }
+    if meta.len() > MAX_FILE_BYTES {
+        return Err(StoreError::TooLarge);
+    }
+    let mut bytes = Vec::with_capacity(usize::try_from(meta.len()).unwrap_or(0));
+    file.take(MAX_FILE_BYTES + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_FILE_BYTES {
+        return Err(StoreError::TooLarge);
+    }
+    Ok(Some(bytes))
 }
 
 fn safety_prefix(kind: SafetyKind) -> &'static str {
@@ -301,7 +387,7 @@ pub fn write_backup(
     dest: &Path,
     bytes: &[u8],
     verify: &dyn Fn(&[u8]) -> bool,
-) -> Result<(), StoreError> {
+) -> Result<CommitStatus, StoreError> {
     let parent = dest
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -321,7 +407,10 @@ fn write_new_backup_without_folder_access(
     dest: &Path,
     bytes: &[u8],
     verify: &dyn Fn(&[u8]) -> bool,
-) -> Result<(), StoreError> {
+) -> Result<CommitStatus, StoreError> {
+    if bytes.len() as u64 > MAX_FILE_BYTES {
+        return Err(StoreError::TooLarge);
+    }
     let mut file = match private_options().write(true).create_new(true).open(dest) {
         Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
             return Err(StoreError::BackupOverwriteNotAtomic);
@@ -336,7 +425,8 @@ fn write_new_backup_without_folder_access(
         if read_back != bytes || !verify(&read_back) {
             return Err(StoreError::VerifyFailed);
         }
-        Ok(())
+        // The file itself is flushed and checked; only its folder entry could not be.
+        Ok(CommitStatus::Uncertain)
     })();
     if result.is_err() {
         let _ = fs::remove_file(dest);
@@ -358,6 +448,10 @@ impl TempFile {
         bytes: &[u8],
         verify: &dyn Fn(&[u8]) -> bool,
     ) -> Result<TempFile, StoreError> {
+        // What can't be read back later must not be written now.
+        if bytes.len() as u64 > MAX_FILE_BYTES {
+            return Err(StoreError::TooLarge);
+        }
         let mut attempts = 0;
         let (mut file, path) = loop {
             let random = getrandom::u64().map_err(|e| io::Error::other(e.to_string()))?;
@@ -382,23 +476,74 @@ impl TempFile {
         Ok(temp)
     }
 
-    /// Atomically rename over `target`. The directory is opened for the fsync first, so it can
-    /// fail while the old file is intact; once renamed, the directory fsync is best effort.
-    /// (Windows has no directory fsync; the rename is flushed with the file system journal.)
-    fn commit(mut self, target: &Path) -> Result<(), StoreError> {
+    /// Atomically replace `target`; report uncertainty if the directory entry cannot be flushed.
+    fn commit(mut self, target: &Path) -> Result<CommitStatus, StoreError> {
         #[cfg(unix)]
         let dir = File::open(self.path.parent().unwrap_or(Path::new(".")))?;
+        #[cfg(unix)]
+        return self.replace_and_flush(target, || dir.sync_all());
+        #[cfg(windows)]
+        {
+            self.replace(target)?;
+            // No directory handle to flush here; flush the renamed file, and say so if even
+            // that can't be confirmed.
+            let flushed = OpenOptions::new()
+                .write(true)
+                .open(target)
+                .and_then(|file| file.sync_all());
+            return Ok(if flushed.is_ok() {
+                CommitStatus::Durable
+            } else {
+                CommitStatus::Uncertain
+            });
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            self.replace(target)?;
+            Ok(CommitStatus::Uncertain)
+        }
+    }
+
+    fn replace(&mut self, target: &Path) -> Result<(), StoreError> {
         fs::rename(&self.path, target)?;
         self.committed = true;
-        #[cfg(unix)]
-        let _ = dir.sync_all();
         Ok(())
+    }
+
+    #[cfg(unix)]
+    fn replace_and_flush(
+        &mut self,
+        target: &Path,
+        flush: impl FnOnce() -> io::Result<()>,
+    ) -> Result<CommitStatus, StoreError> {
+        self.replace(target)?;
+        Ok(if flush().is_ok() {
+            CommitStatus::Durable
+        } else {
+            CommitStatus::Uncertain
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{StoreError, write_new_backup_without_folder_access};
+    use super::{CommitStatus, StoreError, TempFile, write_new_backup_without_folder_access};
+
+    #[cfg(unix)]
+    #[test]
+    fn post_rename_flush_failure_reports_uncertain_without_losing_installed_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("vault.enote");
+        std::fs::write(&target, b"fake old vault").unwrap();
+        let mut temp = TempFile::write_verified(dir.path(), b"fake new vault", &|_| true).unwrap();
+        let status = temp
+            .replace_and_flush(&target, || {
+                Err(std::io::Error::other("injected flush failure"))
+            })
+            .unwrap();
+        assert_eq!(std::fs::read(target).unwrap(), b"fake new vault");
+        assert_eq!(status, CommitStatus::Uncertain);
+    }
 
     #[test]
     fn sandbox_fallback_preserves_an_existing_backup_and_removes_failed_new_files() {
@@ -477,10 +622,15 @@ pub enum CloudProvider {
 /// Is `path` (a folder or file the owner picked) inside a cloud-synced location? `home` is the
 /// owner's home directory; `platform_is_mac` enables the Desktop/Documents rule. Pure path logic.
 /// Matching is on path components (case-insensitive), e.g. any component named "OneDrive" or
-/// starting with "OneDrive - ", "Dropbox", "Google Drive"/"My Drive", and `~/Library/CloudStorage/*`
+/// starting with "OneDrive - ", "Dropbox", "Google Drive"/"My Drive", and `Library/CloudStorage/*`
 /// (which on Mac also hosts OneDrive/Dropbox/Google Drive: report the specific provider from the
 /// folder name when recognisable, else ICloudDrive). `.` and `..` components are resolved
 /// lexically; symlinks are not followed (canonicalize first if that matters).
+///
+/// `home` is not trusted to be the real home folder: inside the Mac App Sandbox it is the app's
+/// container, while a file panel returns real paths. So `Library/CloudStorage` is matched
+/// wherever it appears, and on a Mac `/Users/<name>/Desktop` and `/Users/<name>/Documents`
+/// count as well as `home`'s own.
 pub fn cloud_location(path: &Path, home: &Path, platform_is_mac: bool) -> Option<CloudProvider> {
     let parts = lowercase_components(path);
     let home_parts = lowercase_components(home);
@@ -488,32 +638,26 @@ pub fn cloud_location(path: &Path, home: &Path, platform_is_mac: bool) -> Option
         .strip_prefix(home_parts.as_slice())
         .filter(|_| !home_parts.is_empty());
 
-    match under_home {
-        Some([library, storage, rest @ ..])
-            if library == "library" && storage == "cloudstorage" =>
-        {
-            return Some(
-                rest.first()
-                    .map_or(CloudProvider::ICloudDrive, |f| cloud_storage_provider(f)),
-            );
-        }
-        Some([library, mobile, ..]) if library == "library" && mobile == "mobile documents" => {
-            return Some(CloudProvider::ICloudDrive);
-        }
-        _ => {}
+    if let Some(at) = parts
+        .windows(2)
+        .position(|pair| pair[0] == "library" && pair[1] == "cloudstorage")
+    {
+        return Some(
+            parts
+                .get(at + 2)
+                .map_or(CloudProvider::ICloudDrive, |f| cloud_storage_provider(f)),
+        );
     }
 
     if let Some(provider) = parts.iter().find_map(|c| provider_folder(c)) {
         return Some(provider);
     }
 
-    if platform_is_mac
-        && let Some([first, ..]) = under_home
-        && (first == "desktop" || first == "documents")
-    {
-        return Some(CloudProvider::MacDesktopOrDocuments);
-    }
-    None
+    let synced = |folder: &String| folder == "desktop" || folder == "documents";
+    let in_home = matches!(under_home, Some([first, ..]) if synced(first));
+    let in_a_users_home = matches!(parts.as_slice(), [root, users, _, folder, ..] if root == "/" && users == "users" && synced(folder));
+    (platform_is_mac && (in_home || in_a_users_home))
+        .then_some(CloudProvider::MacDesktopOrDocuments)
 }
 
 /// Lowercased components with `.` dropped and `..` resolved lexically (no file system access),

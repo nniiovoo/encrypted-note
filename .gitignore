@@ -10,6 +10,7 @@ node_modules/
 
 # local AI-tooling databases (Ruflo), not project files
 ruvector.db
+ruvector.db.*
 agentdb.rvf
 agentdb.rvf.lock
 

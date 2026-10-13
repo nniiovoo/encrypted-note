@@ -3,6 +3,8 @@
 import { useEffect, useState, type FormEvent } from "react";
 import {
   changePassword,
+  discardInspection,
+  forgetBackupDestination,
   inspectBackup,
   inspectSafetyCopy,
   listSafetyCopies,
@@ -23,7 +25,7 @@ import { strings as s } from "./strings";
 
 const MINUTES = [1, 2, 5, 10, 15, 30, 60].map((m) => [m, s.minutes(m)] as const);
 
-export function Settings({ status, onKit }: { status: AppStatus; onKit: (recoveryKey: string) => void }) {
+export function Settings({ status, onKit, onOperationOutcome }: { status: AppStatus; onKit: (recoveryKey: string) => void; onOperationOutcome: (message: string) => void }) {
   const [lockRule, setLockRule] = useState({
     idle_minutes: status.settings.idle_minutes,
     lock_on_app_switch: status.settings.lock_on_app_switch,
@@ -122,9 +124,9 @@ export function Settings({ status, onKit }: { status: AppStatus; onKit: (recover
         ))}
       </details>
 
-      {flow === "password" && <ChangePassword onKit={onKit} onClose={closeFlow} />}
-      {flow === "open" && <ReplaceVault onClose={closeFlow} />}
-      {typeof flow === "object" && flow && <ReplaceVault copy={flow} onClose={closeFlow} />}
+      {flow === "password" && <ChangePassword onKit={onKit} onClose={closeFlow} onOperationOutcome={onOperationOutcome} />}
+      {flow === "open" && <ReplaceVault onClose={closeFlow} onOperationOutcome={onOperationOutcome} />}
+      {typeof flow === "object" && flow && <ReplaceVault copy={flow} onClose={closeFlow} onOperationOutcome={onOperationOutcome} />}
     </section>
   );
 }
@@ -160,11 +162,19 @@ function BackUp({ status }: { status: AppStatus }) {
             {s.backupDone(written.note_count)} <span className="hint">{written.display_path}</span>
           </p>
         )}
+        {written && !written.durable && <p className="hint">{s.backupEjectHint}</p>}
         <ErrorLine error={error} />
         <p className="hint">{s.exfatTip}</p>
       </div>
       {cloud && (
-        <Modal title={s.cloudTitle(cloud)} onClose={() => setCloud(null)}>
+        <Modal
+          title={s.cloudTitle(cloud)}
+          onClose={() => {
+            // Backing out: Rust must not keep the declined folder as the next Backup's place.
+            setCloud(null);
+            forgetBackupDestination().catch(() => {});
+          }}
+        >
           <p>{s.cloudWarning(cloud)}</p>
           <div className="actions">
             <button onClick={write}>{s.saveAnyway}</button>
@@ -179,12 +189,16 @@ function BackUp({ status }: { status: AppStatus }) {
 }
 
 /** Open a Backup (first run or Settings) or restore a Safety Copy: pick, credential, preview, replace. */
-export function ReplaceVault({ copy, onClose }: { copy?: SafetyCopy; onClose: () => void }) {
+export function ReplaceVault({ copy, onClose, onOperationOutcome }: { copy?: SafetyCopy; onClose: () => void; onOperationOutcome: (message: string) => void }) {
   const [picked, setPicked] = useState<string | null>(null);
   const [useKey, setUseKey] = useState(false);
   const [secret, setSecret] = useState("");
   const [preview, setPreview] = useState<VaultPreview | null>(null);
   const { busy, error, run } = useAction();
+  const [committing, setCommitting] = useState(false);
+  // However this dialog goes away (Cancel, Escape, a lock, another screen), Rust drops the
+  // decrypted copy it kept for "Replace". After a replace there is nothing left to drop.
+  useEffect(() => () => void discardInspection().catch(() => {}), []);
 
   function inspect(e: FormEvent) {
     e.preventDefault();
@@ -200,16 +214,24 @@ export function ReplaceVault({ copy, onClose }: { copy?: SafetyCopy; onClose: ()
         <p>{s.previewNotes(preview.note_count)}</p>
         <p>{s.previewChanged(formatDate(preview.changed_at))}</p>
         {preview.older_than_current && <p className="warn">{s.olderWarning(!!copy)}</p>}
-        {preview.older_than_current !== null && <p className="hint">{s.keptAsSafetyCopy}</p>}
+        {preview.replaces_vault && preview.older_than_current === null && <p className="warn">{s.cannotCompareWarning}</p>}
+        {preview.replaces_vault && <p className="hint">{s.keptAsSafetyCopy}</p>}
         <ErrorLine error={error} />
         <div className="actions">
-          <button onClick={onClose}>{s.cancel}</button>
+          <button disabled={committing} onClick={onClose}>{s.cancel}</button>
           <button
             className="primary"
-            disabled={busy}
-            onClick={() => run(copy ? restoreSafetyCopy : replaceWithBackup).then((ok) => ok && onClose())}
+            disabled={busy || committing}
+            onClick={() => {
+              setCommitting(true);
+              run(copy ? restoreSafetyCopy : replaceWithBackup).then((ok) => {
+                setCommitting(false);
+                onOperationOutcome(ok ? (copy ? s.safetyCopyRestoreCompleted : s.backupRestoreCompleted) : s.restoreFailed);
+                if (ok) onClose();
+              });
+            }}
           >
-            {preview.older_than_current === null ? s.useThisVault : s.replaceVault}
+            {preview.replaces_vault ? s.replaceVault : s.useThisVault}
           </button>
         </div>
       </>
@@ -253,36 +275,39 @@ export function ReplaceVault({ copy, onClose }: { copy?: SafetyCopy; onClose: ()
     );
 
   return (
-    <Modal title={copy ? s.safetyCopiesTitle : s.openBackupTitle} onClose={onClose}>
+    <Modal title={copy ? s.safetyCopiesTitle : s.openBackupTitle} onClose={committing ? () => {} : onClose}>
       {body}
     </Modal>
   );
 }
 
-function ChangePassword({ onKit, onClose }: { onKit: (recoveryKey: string) => void; onClose: () => void }) {
+function ChangePassword({ onKit, onClose, onOperationOutcome }: { onKit: (recoveryKey: string) => void; onClose: () => void; onOperationOutcome: (message: string) => void }) {
   const [rotate, setRotate] = useState(false);
   const [current, setCurrent] = useState("");
-  const [done, setDone] = useState(false);
+  const [committing, setCommitting] = useState(false);
 
   async function submit(password: string) {
     const c = current;
     setCurrent("");
-    const { recovery_key } = await changePassword(c, password, rotate);
-    if (recovery_key) onKit(recovery_key);
-    else setDone(true);
+    setCommitting(true);
+    try {
+      const { recovery_key } = await changePassword(c, password, rotate);
+      // With Key Rotation nothing is saved until the new Recovery Kit is confirmed, so nothing
+      // is announced yet: the app says how it ended when that step is left.
+      if (recovery_key) onKit(recovery_key);
+      else onOperationOutcome(s.passwordChangeCompleted);
+      onClose();
+    } catch (error) {
+      onOperationOutcome(s.passwordChangeFailed);
+      throw error;
+    } finally {
+      setCommitting(false);
+    }
   }
 
   return (
-    <Modal title={s.changePasswordTitle} onClose={onClose}>
-      {done ? (
-        <div className="stack">
-          <p className="ok">{s.passwordChanged}</p>
-          <p>{s.oldCopiesAfterChange}</p>
-          <button className="primary" onClick={onClose}>
-            {s.done}
-          </button>
-        </div>
-      ) : (
+    <Modal title={s.changePasswordTitle} onClose={committing ? () => {} : onClose}>
+      {
         <NewPassword
           submitLabel={rotate ? s.changeAndRotate : s.changePasswordTitle}
           busyLabel={s.saving}
@@ -300,7 +325,7 @@ function ChangePassword({ onKit, onClose }: { onKit: (recoveryKey: string) => vo
             <SecretInput value={current} onChange={(e) => setCurrent(e.target.value)} autoFocus />
           </Field>
         </NewPassword>
-      )}
+      }
     </Modal>
   );
 }
