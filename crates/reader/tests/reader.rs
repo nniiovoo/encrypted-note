@@ -29,6 +29,9 @@ const FLOOR: KdfParams = KdfParams {
 };
 const NOW: i64 = 1_790_000_000;
 const MASK: &str = "••••••";
+/// These tests read the reader's output through a pipe, and `--reveal` refuses to print into
+/// anything but a terminal unless it is told to.
+const REVEAL: [&str; 2] = ["--reveal", "--allow-non-terminal"];
 
 // The Text + Login Vault.
 const TEXT_TITLE: &str = "Test shopping list";
@@ -242,6 +245,22 @@ impl Run {
             .find(|line| line.starts_with(' ') && line.trim_start().starts_with(&prefix))
             .unwrap_or_else(|| panic!("no field line for {label:?}:\n{}", self.stdout))
     }
+
+    /// The number the list gives the Note with this title: its heading is
+    /// `<number>. <Kind>: <title>`, starting at the left edge.
+    fn number_of(&self, title: &str) -> String {
+        let heading = self
+            .stdout
+            .lines()
+            .find(|line| !line.starts_with(' ') && line.ends_with(title))
+            .unwrap_or_else(|| panic!("no heading for {title:?}:\n{}", self.stdout));
+        let (number, _) = heading.split_once(". ").expect("a numbered heading");
+        assert!(
+            number.parse::<usize>().is_ok_and(|n| n >= 1),
+            "{heading:?} doesn't start with a number from 1 up"
+        );
+        number.to_string()
+    }
 }
 
 /// Every path under `dir`, with each file's contents.
@@ -263,8 +282,20 @@ fn snapshot(dir: &Path) -> BTreeMap<PathBuf, Option<Vec<u8>>> {
     found
 }
 
+/// The built reader, set to run in `dir` with `dir` as its HOME and temp folder too.
+fn reader(dir: &Path) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_enote-reader"));
+    command
+        .current_dir(dir)
+        .env("HOME", dir)
+        .env("TMPDIR", dir)
+        .env("TMP", dir)
+        .env("TEMP", dir);
+    command
+}
+
 /// Write `file_bytes` (if any) into a fresh directory as `test.vault`, run the reader on it with
-/// `stdin`, and check that the directory is unchanged afterwards.
+/// `stdin`, and check that the directory is unchanged afterwards. The reader's output is a pipe.
 fn run_with_stdin(test: &str, file_bytes: Option<&[u8]>, args: &[&str], stdin: &[u8]) -> Run {
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
         .join("enote-reader-tests")
@@ -276,13 +307,8 @@ fn run_with_stdin(test: &str, file_bytes: Option<&[u8]>, args: &[&str], stdin: &
     }
     let before = snapshot(&dir);
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_enote-reader"))
+    let mut child = reader(&dir)
         .args(args)
-        .current_dir(&dir)
-        .env("HOME", &dir)
-        .env("TMPDIR", &dir)
-        .env("TMP", &dir)
-        .env("TEMP", &dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -358,7 +384,7 @@ fn prints_titles_and_visible_fields_with_hidden_fields_masked_and_warns_on_stder
 
 #[test]
 fn reveal_prints_hidden_fields() {
-    let run = run("reveal", &text_and_login().bytes, &["--reveal"], PASSWORD);
+    let run = run("reveal", &text_and_login().bytes, &REVEAL, PASSWORD);
     assert_exit(&run, 0);
 
     assert!(run.stdout.contains(TEXT_TITLE));
@@ -374,11 +400,143 @@ fn flags_may_come_before_the_file() {
     let run = run_with_stdin(
         "flags-first",
         Some(&text_and_login().bytes),
-        &["--reveal", "--credential-stdin", "test.vault"],
+        &[
+            "--reveal",
+            "--allow-non-terminal",
+            "--credential-stdin",
+            "test.vault",
+        ],
         format!("{PASSWORD}\n").as_bytes(),
     );
     assert_exit(&run, 0);
     assert!(run.stdout.contains(LOGIN_PASSWORD));
+}
+
+// --- Revealing when the output is not a terminal ---
+
+/// The same answer for a good Vault with the right password, with a wrong one, and with no
+/// file at all: the reader stops before it looks at either.
+#[test]
+fn reveal_into_a_pipe_is_refused_before_the_file_or_credential_is_read() {
+    let vault = text_and_login();
+    for (test, bytes, credential) in [
+        ("reveal-piped", Some(&vault.bytes[..]), PASSWORD),
+        ("reveal-piped-wrong", Some(&vault.bytes[..]), WRONG_PASSWORD),
+        ("reveal-piped-no-file", None, PASSWORD),
+    ] {
+        let run = run_with_stdin(
+            test,
+            bytes,
+            &["test.vault", "--credential-stdin", "--reveal"],
+            format!("{credential}\n").as_bytes(),
+        );
+        assert_exit(&run, 3);
+        assert!(run.stdout.is_empty(), "{test}");
+        assert!(
+            run.stderr.contains("not going to a terminal"),
+            "{test}: {}",
+            run.stderr
+        );
+        // It says how to do it anyway.
+        assert!(
+            run.stderr.contains("--allow-non-terminal"),
+            "{test}: {}",
+            run.stderr
+        );
+    }
+}
+
+/// `enote-reader vault --reveal > notes.txt` must not leave the secrets in `notes.txt`.
+#[test]
+fn reveal_redirected_to_a_file_leaves_it_empty_unless_allowed() {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join("enote-reader-tests")
+        .join(format!("reveal-redirected-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("test.vault"), &text_and_login().bytes).unwrap();
+
+    let redirect = |extra: &[&str]| {
+        let out = dir.join("notes.txt");
+        let mut child = reader(&dir)
+            .args(["test.vault", "--credential-stdin", "--reveal"])
+            .args(extra)
+            .stdin(Stdio::piped())
+            .stdout(std::fs::File::create(&out).unwrap())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut child_stdin = child.stdin.take().unwrap();
+        // The reader may exit before reading stdin, so a failed write is fine.
+        let _ = child_stdin.write_all(format!("{PASSWORD}\n").as_bytes());
+        drop(child_stdin);
+        let output = child.wait_with_output().unwrap();
+        let written = std::fs::read_to_string(&out).unwrap();
+        (output.status.code(), written)
+    };
+
+    let (code, written) = redirect(&[]);
+    assert_eq!(code, Some(3));
+    assert!(written.is_empty(), "nothing may reach the file");
+
+    let (code, written) = redirect(&["--allow-non-terminal"]);
+    assert_eq!(code, Some(0));
+    assert!(written.contains(LOGIN_PASSWORD));
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn control_and_format_characters_in_notes_are_printed_as_replacement_characters() {
+    // An escape sequence that would clear the screen, a right-to-left override that would show
+    // the rest of the line backwards, and two characters that take no space.
+    const ESCAPE: char = '\u{1b}';
+    const RIGHT_TO_LEFT_OVERRIDE: char = '\u{202e}';
+    const ZERO_WIDTH_SPACE: char = '\u{200b}';
+    const BYTE_ORDER_MARK: char = '\u{feff}';
+    let title = format!("Fake{ESCAPE}[2J title");
+    let website = format!("https://{RIGHT_TO_LEFT_OVERRIDE}tset.elpmaxe.etis");
+    let username = format!("fake{ZERO_WIDTH_SPACE}user");
+    let password = format!("fake{BYTE_ORDER_MARK}pass{RIGHT_TO_LEFT_OVERRIDE}word");
+
+    let mut doc = Document::new(NOW);
+    doc.create(
+        new_note(
+            Kind::Login,
+            &title,
+            &[(field::WEBSITE, &website), (field::USERNAME, &username)],
+            &[(field::PASSWORD, &password)],
+        ),
+        None,
+        NOW,
+    )
+    .unwrap();
+    let bytes = vault_format::seal(&wallet_vault().unlocked, &doc.to_json()).unwrap();
+
+    let run = run("hostile-characters", &bytes, &REVEAL, PASSWORD);
+    assert_exit(&run, 0);
+    for hostile in [
+        ESCAPE,
+        RIGHT_TO_LEFT_OVERRIDE,
+        ZERO_WIDTH_SPACE,
+        BYTE_ORDER_MARK,
+    ] {
+        assert!(
+            !run.stdout.contains(hostile),
+            "U+{:04X} was printed",
+            hostile as u32
+        );
+    }
+    assert!(run.stdout.contains("Fake\u{fffd}[2J title"));
+    assert!(
+        run.field_line("Website")
+            .contains("https://\u{fffd}tset.elpmaxe.etis")
+    );
+    assert!(run.field_line("Username").contains("fake\u{fffd}user"));
+    assert!(
+        run.field_line("Password")
+            .contains("fake\u{fffd}pass\u{fffd}word")
+    );
 }
 
 #[test]
@@ -434,10 +592,10 @@ fn wallet_kinds_and_trash_are_printed_with_hidden_fields_masked() {
 fn reveal_opens_wallet_kind_fields_with_either_credential() {
     let vault = wallet_vault();
     for (test, flags, credential) in [
-        ("wallet-reveal-password", &["--reveal"][..], PASSWORD),
+        ("wallet-reveal-password", &REVEAL[..], PASSWORD),
         (
             "wallet-reveal-recovery",
-            &["--recovery-key", "--reveal"],
+            &["--recovery-key", "--reveal", "--allow-non-terminal"],
             &vault.recovery_key,
         ),
     ] {
@@ -465,6 +623,408 @@ fn an_empty_vault_says_it_has_no_notes() {
     let run = run("empty", &bytes, &[], PASSWORD);
     assert_exit(&run, 0);
     assert!(run.stdout.contains("no Notes"));
+}
+
+// --- Numbers, and printing one Note ---
+
+const WALLET_VAULT_TITLES: [&str; 4] = [SEED_TITLE, KEY_TITLE, API_TITLE, TRASHED_TITLE];
+/// Something only `--reveal` prints, for each Note of the wallet Vault.
+const WALLET_VAULT_HIDDEN: [(&str, &[&str]); 4] = [
+    (SEED_TITLE, &["abandon", "about", SEED_PASSPHRASE]),
+    (KEY_TITLE, &[PRIVATE_KEY]),
+    (API_TITLE, &[API_KEY]),
+    (TRASHED_TITLE, &[TRASHED_BODY]),
+];
+
+#[test]
+fn the_list_numbers_every_note_from_1_with_trash_last_and_the_same_way_each_time() {
+    let vault = wallet_vault();
+    let first = run("numbered", &vault.bytes, &[], PASSWORD);
+    assert_exit(&first, 0);
+    let mut numbers = WALLET_VAULT_TITLES.map(|title| first.number_of(title));
+    // The Note in Trash is printed last.
+    assert_eq!(numbers[3], "4");
+    assert!(
+        first
+            .line_with(TRASHED_TITLE)
+            .starts_with("4. [In Trash] Text: ")
+    );
+    numbers.sort();
+    assert_eq!(numbers, ["1", "2", "3", "4"]);
+    // It says how to show one Note's Hidden Fields without showing them all.
+    assert!(first.stdout.contains("--note <its number> --reveal"));
+
+    // The same file, read again and with the other credential: the same numbers.
+    let again = run(
+        "numbered-again",
+        &vault.bytes,
+        &["--recovery-key"],
+        &vault.recovery_key,
+    );
+    assert_exit(&again, 0);
+    for title in WALLET_VAULT_TITLES {
+        assert_eq!(again.number_of(title), first.number_of(title), "{title}");
+    }
+}
+
+#[test]
+fn note_prints_only_that_note_with_its_hidden_fields_masked() {
+    let vault = wallet_vault();
+    let list = run("note-list", &vault.bytes, &[], PASSWORD);
+    for title in WALLET_VAULT_TITLES {
+        let number = list.number_of(title);
+        let one = run(
+            &format!("note-masked-{number}"),
+            &vault.bytes,
+            &["--note", &number],
+            PASSWORD,
+        );
+        assert_exit(&one, 0);
+        // The Note's heading is the first line: no count of Notes, nothing before it.
+        let heading = one.stdout.lines().next().unwrap();
+        assert!(heading.starts_with(&format!("{number}. ")), "{heading}");
+        assert!(heading.ends_with(title), "{heading}");
+        assert_eq!(heading, list.line_with(title));
+        for other in WALLET_VAULT_TITLES.iter().filter(|t| **t != title) {
+            assert!(
+                !one.stdout.contains(other),
+                "--note {number} printed {other}"
+            );
+        }
+        assert!(one.stdout.contains(MASK));
+        for (_, hidden) in WALLET_VAULT_HIDDEN {
+            for value in hidden {
+                assert!(
+                    !one.stdout.contains(value),
+                    "--note {number} printed {value}"
+                );
+            }
+        }
+        assert!(
+            one.stdout.contains(&format!("--note {number} --reveal")),
+            "{}",
+            one.stdout
+        );
+    }
+    // The visible fields of the chosen Note are there, and only its own.
+    let key = run(
+        "note-masked-visible",
+        &vault.bytes,
+        &[&format!("--note={}", list.number_of(KEY_TITLE))],
+        PASSWORD,
+    );
+    assert_exit(&key, 0);
+    assert!(key.field_line("Chain").contains(CHAIN));
+    assert!(key.field_line("Address").contains(ADDRESS));
+    assert!(key.field_line("Key").contains(MASK));
+    assert!(!key.stdout.contains(WALLET_NAME));
+    assert!(!key.stdout.contains(SERVICE));
+}
+
+#[test]
+fn note_with_reveal_reveals_only_that_note() {
+    let vault = wallet_vault();
+    let list = run("note-reveal-list", &vault.bytes, &[], PASSWORD);
+    for (title, shown) in WALLET_VAULT_HIDDEN {
+        let number = list.number_of(title);
+        let one = run(
+            &format!("note-reveal-{number}"),
+            &vault.bytes,
+            &["--note", &number, "--reveal", "--allow-non-terminal"],
+            PASSWORD,
+        );
+        assert_exit(&one, 0);
+        assert_eq!(one.stdout.lines().next().unwrap(), list.line_with(title));
+        assert!(!one.stdout.contains(MASK));
+        for value in shown {
+            assert!(one.stdout.contains(value), "--note {number}: no {value}");
+        }
+        for (other_title, hidden) in WALLET_VAULT_HIDDEN {
+            if other_title == title {
+                continue;
+            }
+            assert!(!one.stdout.contains(other_title));
+            for value in hidden {
+                assert!(
+                    !one.stdout.contains(value),
+                    "--note {number} revealed {value}"
+                );
+            }
+        }
+    }
+
+    // A Wallet Kind opens with the Recovery Key too.
+    let number = list.number_of(SEED_TITLE);
+    let seed = run(
+        "note-reveal-recovery",
+        &vault.bytes,
+        &[
+            "--recovery-key",
+            "--reveal",
+            "--allow-non-terminal",
+            "--note",
+            &number,
+        ],
+        &vault.recovery_key,
+    );
+    assert_exit(&seed, 0);
+    assert!(seed.field_line("Passphrase").contains(SEED_PASSPHRASE));
+    let printed: Vec<&str> = seed
+        .stdout
+        .split_whitespace()
+        .filter(|w| *w == "abandon" || *w == "about")
+        .collect();
+    assert_eq!(printed, SEED_WORDS.split(' ').collect::<Vec<_>>());
+    assert!(!seed.stdout.contains(PRIVATE_KEY));
+
+    // Revealing one Note into a pipe is refused like revealing them all.
+    let piped = run(
+        "note-reveal-piped",
+        &vault.bytes,
+        &["--note", &number, "--reveal"],
+        PASSWORD,
+    );
+    assert_exit(&piped, 3);
+    assert!(piped.stdout.is_empty());
+    assert!(piped.stderr.contains("--allow-non-terminal"));
+}
+
+/// The other Notes are not opened: a Wallet Kind field that can't be decrypted spoils a reveal
+/// of everything (exit 2), but not the reveal of a Login beside it.
+#[test]
+fn revealing_one_note_leaves_the_hidden_fields_of_the_others_alone() {
+    let vault = wallet_vault();
+    let wrong = TestWalletCipher {
+        key: &vault.wallet_key,
+        vault_id: [0xee; 16],
+    };
+    let mut doc = Document::new(NOW);
+    doc.create(
+        new_note(
+            Kind::PrivateKey,
+            KEY_TITLE,
+            &[(field::CHAIN, CHAIN), (field::ADDRESS, ADDRESS)],
+            &[(field::KEY, PRIVATE_KEY)],
+        ),
+        Some(&wrong),
+        NOW,
+    )
+    .unwrap();
+    doc.create(
+        new_note(
+            Kind::Login,
+            LOGIN_TITLE,
+            &[(field::WEBSITE, WEBSITE), (field::USERNAME, USERNAME)],
+            &[(field::PASSWORD, LOGIN_PASSWORD)],
+        ),
+        None,
+        NOW + 1,
+    )
+    .unwrap();
+    let bytes = vault_format::seal(&vault.unlocked, &doc.to_json()).unwrap();
+
+    // The Login was changed last, so it is Note 1 and the Private Key is Note 2.
+    let login = run(
+        "note-beside-damage",
+        &bytes,
+        &["--note", "1", "--reveal", "--allow-non-terminal"],
+        PASSWORD,
+    );
+    assert_exit(&login, 0);
+    assert!(login.line_with(LOGIN_TITLE).starts_with("1. Login: "));
+    assert!(login.field_line("Password").contains(LOGIN_PASSWORD));
+    assert!(!login.stdout.contains(KEY_TITLE));
+    assert!(!login.stdout.contains("damaged"));
+    assert!(login.stderr.to_lowercase().contains("warning"));
+    assert!(!login.stderr.contains("damaged"));
+
+    let key = run(
+        "note-is-damaged",
+        &bytes,
+        &["--note", "2", "--reveal", "--allow-non-terminal"],
+        PASSWORD,
+    );
+    assert_exit(&key, 2);
+    assert!(key.line_with(KEY_TITLE).starts_with("2. Private Key: "));
+    assert!(key.field_line("Key").contains("damaged"));
+    assert!(!key.stdout.contains(LOGIN_TITLE));
+    assert!(!key.stdout.contains(LOGIN_PASSWORD));
+}
+
+#[test]
+fn a_note_number_that_matches_nothing_exits_4_and_prints_no_notes() {
+    let vault = wallet_vault();
+    for (test, flags) in [
+        ("no-such-note", &["--note", "5"][..]),
+        ("no-such-note-far", &["--note=4000"]),
+        (
+            "no-such-note-reveal",
+            &["--note", "5", "--reveal", "--allow-non-terminal"],
+        ),
+    ] {
+        let run = run(test, &vault.bytes, flags, PASSWORD);
+        assert_exit(&run, 4);
+        assert!(run.stdout.is_empty(), "{test}");
+        assert!(
+            run.stderr.contains("There is no Note"),
+            "{test}: {}",
+            run.stderr
+        );
+        // It says which numbers there are, and nothing else about the Notes.
+        assert!(run.stderr.contains("1 to 4"), "{test}: {}", run.stderr);
+        for title in WALLET_VAULT_TITLES {
+            assert!(!run.stderr.contains(title), "{test}");
+        }
+    }
+
+    // The file is opened before the number can be judged, so a wrong credential comes first.
+    let wrong = run(
+        "no-such-note-wrong-password",
+        &vault.bytes,
+        &["--note", "5"],
+        WRONG_PASSWORD,
+    );
+    assert_exit(&wrong, 1);
+
+    let empty = Document::new(NOW);
+    let bytes = vault_format::seal(&vault.unlocked, &empty.to_json()).unwrap();
+    let none = run("no-such-note-empty", &bytes, &["--note", "1"], PASSWORD);
+    assert_exit(&none, 4);
+    assert!(none.stdout.is_empty());
+    assert!(none.stderr.contains("no Notes"), "{}", none.stderr);
+}
+
+// --- The fields added in document schema 2 ---
+
+const KEY_ID: &str = "FAKEKEYID0001";
+const API_PURPOSE: &str = "Nightly fake uploads";
+const API_URL: &str = "https://console.example.test/keys";
+const EXPIRES: &str = "2027-01-31";
+const ENV_VAR: &str = "FAKE_DEPLOY_KEY";
+const API_SECRET: &str = "fake-api-secret-0000";
+const LOGIN_PURPOSE: &str = "Shared with the fake team";
+const SEED_ADDRESS: &str = "0xfake-seed-address-0001";
+const DERIVATION_PATH: &str = "m/44'/60'/0'/0/0";
+
+/// A Vault whose Notes use every field schema 2 added, sealed into the wallet Vault's keys.
+fn schema_2_vault() -> Vec<u8> {
+    let vault = wallet_vault();
+    let cipher = TestWalletCipher {
+        key: &vault.wallet_key,
+        vault_id: vault.unlocked.vault_id(),
+    };
+    let mut doc = Document::new(NOW);
+    doc.create(
+        new_note(
+            Kind::ApiKey,
+            API_TITLE,
+            &[
+                (field::SERVICE, SERVICE),
+                (field::KEY_ID, KEY_ID),
+                (field::PURPOSE, API_PURPOSE),
+                (field::URL, API_URL),
+                (field::EXPIRES, EXPIRES),
+                (field::ENV_VAR, ENV_VAR),
+            ],
+            &[(field::KEY, API_KEY), (field::SECRET, API_SECRET)],
+        ),
+        None,
+        NOW,
+    )
+    .unwrap();
+    doc.create(
+        new_note(
+            Kind::Login,
+            LOGIN_TITLE,
+            &[
+                (field::WEBSITE, WEBSITE),
+                (field::USERNAME, USERNAME),
+                (field::PURPOSE, LOGIN_PURPOSE),
+            ],
+            &[(field::PASSWORD, LOGIN_PASSWORD)],
+        ),
+        None,
+        NOW,
+    )
+    .unwrap();
+    doc.create(
+        new_note(
+            Kind::SeedPhrase,
+            SEED_TITLE,
+            &[
+                (field::WALLET_NAME, WALLET_NAME),
+                (field::ADDRESS, SEED_ADDRESS),
+                (field::DERIVATION_PATH, DERIVATION_PATH),
+            ],
+            &[(field::WORDS, SEED_WORDS)],
+        ),
+        Some(&cipher),
+        NOW,
+    )
+    .unwrap();
+    assert_eq!(doc.schema_version(), 2);
+    vault_format::seal(&vault.unlocked, &doc.to_json()).unwrap()
+}
+
+#[test]
+fn a_schema_2_vault_is_read_and_its_new_fields_are_printed_under_their_names() {
+    let bytes = schema_2_vault();
+    let masked = run("schema-2-masked", &bytes, &[], PASSWORD);
+    assert_exit(&masked, 0);
+    for (label, value) in [
+        ("Key ID", KEY_ID),
+        ("Managed at", API_URL),
+        ("Expires", EXPIRES),
+        ("Environment variable", ENV_VAR),
+        ("Derivation path", DERIVATION_PATH),
+        ("Address", SEED_ADDRESS),
+    ] {
+        assert_eq!(
+            masked.field_line(label).trim(),
+            format!("{label}: {value}"),
+            "{label}"
+        );
+    }
+    // Both Notes with a purpose print it.
+    for purpose in [API_PURPOSE, LOGIN_PURPOSE] {
+        assert_eq!(
+            masked.line_with(purpose).trim(),
+            format!("Purpose: {purpose}")
+        );
+    }
+    // The second Hidden Field of an API Key is hidden like the first.
+    assert!(masked.field_line("Secret").contains(MASK));
+    assert!(!masked.stdout.contains(API_SECRET));
+    assert!(!masked.stdout.contains(API_KEY));
+
+    let number = masked.number_of(API_TITLE);
+    let revealed = run(
+        "schema-2-reveal",
+        &bytes,
+        &["--note", &number, "--reveal", "--allow-non-terminal"],
+        PASSWORD,
+    );
+    assert_exit(&revealed, 0);
+    assert_eq!(revealed.field_line("Key").trim(), format!("Key: {API_KEY}"));
+    assert_eq!(
+        revealed.field_line("Secret").trim(),
+        format!("Secret: {API_SECRET}")
+    );
+    assert!(!revealed.stdout.contains(LOGIN_PASSWORD));
+}
+
+#[test]
+fn a_vault_from_a_newer_document_schema_is_called_newer_not_damaged() {
+    let body = br#"{"schema_version":3,"changed_at":1790000000,"change_counter":0,"notes":[]}"#;
+    let bytes = vault_format::seal(&wallet_vault().unlocked, body).unwrap();
+    for (test, flags) in [("schema-3", &[][..]), ("schema-3-note", &["--note", "1"])] {
+        let run = run(test, &bytes, flags, PASSWORD);
+        assert_exit(&run, 2);
+        assert!(run.stdout.is_empty(), "{test}");
+        assert!(run.stderr.contains("schema 3"), "{test}: {}", run.stderr);
+        assert!(run.stderr.contains("newer"), "{test}: {}", run.stderr);
+        assert!(!run.stderr.contains("damaged"), "{test}: {}", run.stderr);
+    }
 }
 
 // --- Credentials ---
@@ -615,7 +1175,7 @@ fn a_wallet_field_that_fails_to_decrypt_is_marked_and_exits_2() {
     .unwrap();
     let bytes = vault_format::seal(&vault.unlocked, &doc.to_json()).unwrap();
 
-    let run = run("wallet-damaged", &bytes, &["--reveal"], PASSWORD);
+    let run = run("wallet-damaged", &bytes, &REVEAL, PASSWORD);
     assert_exit(&run, 2);
     // Everything else is still printed.
     assert!(run.stdout.contains(KEY_TITLE));
@@ -643,7 +1203,7 @@ fn a_missing_file_exits_3() {
 
 #[test]
 fn usage_errors_exit_3() {
-    let cases: [(&str, &[&str]); 4] = [
+    let cases: [(&str, &[&str]); 8] = [
         ("no-args", &[]),
         ("only-flags", &["--reveal", "--credential-stdin"]),
         (
@@ -653,6 +1213,29 @@ fn usage_errors_exit_3() {
         (
             "two-files",
             &["test.vault", "other.vault", "--credential-stdin"],
+        ),
+        // --note needs a number from 1 up, once. These stop before the file is opened.
+        (
+            "note-without-number",
+            &["test.vault", "--credential-stdin", "--note"],
+        ),
+        (
+            "note-zero",
+            &["test.vault", "--credential-stdin", "--note", "0"],
+        ),
+        (
+            "note-not-a-number",
+            &["test.vault", "--credential-stdin", "--note", "two"],
+        ),
+        (
+            "note-twice",
+            &[
+                "test.vault",
+                "--credential-stdin",
+                "--note",
+                "1",
+                "--note=2",
+            ],
         ),
     ];
     for (test, args) in cases {
@@ -674,5 +1257,9 @@ fn help_prints_usage_and_exits_0() {
     assert_exit(&run, 0);
     assert!(run.stdout.contains("Usage"));
     assert!(run.stdout.contains("--reveal"));
+    assert!(run.stdout.contains("--allow-non-terminal"));
     assert!(run.stdout.contains("--recovery-key"));
+    assert!(run.stdout.contains("--note <number>"));
+    // Every exit code is listed, the one for a number no Note has included.
+    assert!(run.stdout.contains("4 no Note has the number"));
 }

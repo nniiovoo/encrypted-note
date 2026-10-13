@@ -4,7 +4,7 @@ use crate::{Error, FORMAT_VERSION, KdfParams, MAGIC, PADDING_BLOCK};
 
 const KDF_ARGON2ID: u8 = 1;
 const SLOT_COUNT: u8 = 2;
-const WRAPPED_LEN: usize = 64 + TAG_LEN;
+pub(crate) const WRAPPED_LEN: usize = 64 + TAG_LEN;
 const SLOT_LEN: usize = 1 + 16 + 24 + WRAPPED_LEN;
 const TAG_LEN: usize = 16;
 /// magic, version, flags, vault id, kdf id, m, t, p, slot count, two slots, body nonce.
@@ -28,6 +28,7 @@ impl SlotType {
 }
 
 /// One credential slot: `vault_key || wallet_key` encrypted under the credential's KEK.
+#[derive(Clone)]
 pub(crate) struct Slot {
     pub salt: [u8; 16],
     pub nonce: [u8; 24],

@@ -34,6 +34,9 @@ pub struct CoreState(pub Mutex<AppCore>);
 /// not count as switching to another app (that could lock the Vault mid-backup).
 pub static DIALOG_OPEN: AtomicBool = AtomicBool::new(false);
 static STATUS_REVISION: AtomicU64 = AtomicU64::new(0);
+/// True while `create_vault` is calibrating the KDF: one calibration at a time (each run takes
+/// up to 512 MiB).
+static CALIBRATING: AtomicBool = AtomicBool::new(false);
 
 pub fn status(core: &AppCore) -> AppStatus {
     let mut status = core.app_status();
@@ -94,14 +97,17 @@ pub fn activity(app: AppHandle) {
 
 // ---------- setup, unlock, lock ----------
 
+// These two need no Vault and no state, so they don't wait for the core: scoring a long
+// password can take a while, and nothing that locks may queue behind it.
+
 #[tauri::command(async)]
-pub fn suggest_passphrase(app: AppHandle) -> Zeroizing<String> {
-    core(&app).suggest_passphrase()
+pub fn suggest_passphrase() -> Zeroizing<String> {
+    policy::suggest_passphrase()
 }
 
 #[tauri::command(async)]
-pub fn assess_password(app: AppHandle, password: Zeroizing<String>) -> AssessmentView {
-    core(&app).assess_password(&password)
+pub fn assess_password(password: Zeroizing<String>) -> AssessmentView {
+    crate::core::assess_password(&password)
 }
 
 #[tauri::command]
@@ -109,14 +115,24 @@ pub async fn create_vault(
     app: AppHandle,
     master_password: Zeroizing<String>,
 ) -> Result<RecoveryKeyShown, ApiError> {
-    // Calibrate first, without holding the core: it runs several Argon2id derivations, and the
-    // screens keep polling the status meanwhile.
+    // Only when a Vault can be created now, and never two at once: each calibration runs
+    // several Argon2id derivations of up to 512 MiB.
+    core(&app).create_vault_allowed()?;
+    if CALIBRATING.swap(true, Ordering::SeqCst) {
+        return Err(ApiError {
+            code: "invalid_input",
+            message: "encrypted-note is already setting up your Vault. Give it a moment."
+                .to_owned(),
+        });
+    }
+    // Calibrate without holding the core: the screens keep polling the status meanwhile.
     let limits = vault_format::Limits::PRODUCTION;
     let params = tauri::async_runtime::spawn_blocking(move || {
         vault_format::calibrate(&limits, vault_format::measure_kdf)
     })
-    .await
-    .map_err(|_| internal())?;
+    .await;
+    CALIBRATING.store(false, Ordering::SeqCst);
+    let params = params.map_err(|_| internal())?;
     blocking(app, move |core| core.create_vault(master_password, params)).await
 }
 
@@ -184,9 +200,13 @@ pub async fn update_note(
     .await
 }
 
-#[tauri::command(async)]
-pub fn trash_note(app: AppHandle, id: String) -> Result<(), ApiError> {
-    with_core(&app, |core| core.trash_note(&id))
+#[tauri::command]
+pub async fn trash_note(
+    app: AppHandle,
+    id: String,
+    master_password: Option<Zeroizing<String>>,
+) -> Result<(), ApiError> {
+    blocking(app, move |core| core.trash_note(&id, master_password)).await
 }
 
 #[tauri::command(async)]
@@ -194,14 +214,21 @@ pub fn restore_note(app: AppHandle, id: String) -> Result<(), ApiError> {
     with_core(&app, |core| core.restore_note(&id))
 }
 
-#[tauri::command(async)]
-pub fn delete_forever(app: AppHandle, id: String) -> Result<(), ApiError> {
-    with_core(&app, |core| core.delete_forever(&id))
+#[tauri::command]
+pub async fn delete_forever(
+    app: AppHandle,
+    id: String,
+    master_password: Option<Zeroizing<String>>,
+) -> Result<(), ApiError> {
+    blocking(app, move |core| core.delete_forever(&id, master_password)).await
 }
 
-#[tauri::command(async)]
-pub fn empty_trash(app: AppHandle) -> Result<usize, ApiError> {
-    with_core(&app, AppCore::empty_trash)
+#[tauri::command]
+pub async fn empty_trash(
+    app: AppHandle,
+    master_password: Option<Zeroizing<String>>,
+) -> Result<usize, ApiError> {
+    blocking(app, move |core| core.empty_trash(master_password)).await
 }
 
 #[tauri::command(async)]
@@ -255,8 +282,8 @@ pub async fn copy_field(
 // ---------- checks ----------
 
 #[tauri::command(async)]
-pub fn seed_wordlist(app: AppHandle) -> &'static [&'static str] {
-    core(&app).seed_wordlist()
+pub fn seed_wordlist() -> &'static [&'static str] {
+    notes::seed::wordlist()
 }
 
 #[tauri::command(async)]
@@ -278,7 +305,7 @@ pub fn check_private_key(
 #[tauri::command]
 pub async fn pick_backup_destination(app: AppHandle) -> Result<PickedFile, ApiError> {
     core(&app).backup_destination_allowed()?;
-    let home = home_dir(&app)?;
+    let home = home_dir(&app);
     let name = backup_file_name(core(&app).unix_secs());
     let path = pick_file(&app, move || {
         rfd::FileDialog::new()
@@ -292,6 +319,11 @@ pub async fn pick_backup_destination(app: AppHandle) -> Result<PickedFile, ApiEr
     with_core(&app, |core| core.set_backup_destination(path))
 }
 
+#[tauri::command(async)]
+pub fn forget_backup_destination(app: AppHandle) {
+    with_core(&app, AppCore::forget_backup_destination);
+}
+
 #[tauri::command]
 pub async fn write_backup(app: AppHandle) -> Result<BackupWritten, ApiError> {
     blocking(app, AppCore::write_backup).await
@@ -300,7 +332,7 @@ pub async fn write_backup(app: AppHandle) -> Result<BackupWritten, ApiError> {
 #[tauri::command]
 pub async fn pick_backup_to_open(app: AppHandle) -> Result<PickedFile, ApiError> {
     core(&app).backup_to_open_allowed()?;
-    let home = home_dir(&app)?;
+    let home = home_dir(&app);
     let path = pick_file(&app, move || {
         rfd::FileDialog::new()
             .set_title("Open a Backup")
@@ -323,6 +355,11 @@ pub async fn inspect_backup(
 #[tauri::command(async)]
 pub fn replace_with_backup(app: AppHandle) -> Result<(), ApiError> {
     with_core(&app, AppCore::replace_with_backup)
+}
+
+#[tauri::command(async)]
+pub fn discard_inspection(app: AppHandle) {
+    with_core(&app, AppCore::discard_inspection);
 }
 
 #[tauri::command(async)]
@@ -395,11 +432,9 @@ async fn pick_file(
     })
 }
 
-fn home_dir(app: &AppHandle) -> Result<PathBuf, ApiError> {
-    app.path().home_dir().map_err(|_| ApiError {
-        code: "io",
-        message: "encrypted-note couldn't find your home folder.".to_owned(),
-    })
+/// The owner's real home folder (not the App Sandbox container), as the core was given it.
+fn home_dir(app: &AppHandle) -> PathBuf {
+    core(app).home_dir().to_path_buf()
 }
 
 /// `encrypted-note-backup-YYYY-MM-DD.enote` (UTC date).

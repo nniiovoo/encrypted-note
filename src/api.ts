@@ -83,6 +83,9 @@ export interface AppStatus {
   show_recovery_hint: boolean;
   backup: { last_backup_at: number | null; reminder_due: boolean; unbacked_changes: boolean };
   purge_trash_failed: boolean;
+  save_durability_uncertain: boolean;
+  /** The settings file couldn't be read, so the strictest lock rules are in force. */
+  settings_unreadable: boolean;
   settings: Settings;
 }
 
@@ -108,13 +111,18 @@ export interface PickedFile {
 export interface BackupWritten {
   display_path: string;
   note_count: number;
+  /** false: written and checked, but the drive should be ejected properly before unplugging. */
+  durable: boolean;
 }
 
 export interface VaultPreview {
   note_count: number;
   changed_at: number;
-  /** null when this computer has no Vault yet. */
+  /** true: the Vault on this computer may hold changes this copy lacks. null: nothing to compare
+   *  with, or (when replaces_vault) the Vault here is Locked and couldn't be compared. */
   older_than_current: boolean | null;
+  /** Installing this copy replaces a Vault that exists on this computer. */
+  replaces_vault: boolean;
 }
 
 export interface SafetyCopy {
@@ -135,6 +143,7 @@ export interface ApiError {
     | "weak_password"
     | "locked"
     | "sharing_guard_up"
+    | "too_many" // Show refused: more than 8 different Hidden Fields within a minute
     | "not_found"
     | "invalid_input"
     | "already_open"
@@ -192,10 +201,15 @@ export const createNote = (input: NoteInput, masterPassword?: string) =>
   invoke<string>("create_note", { input, masterPassword: masterPassword ?? null });
 export const updateNote = (id: string, input: Omit<NoteInput, "kind">, masterPassword?: string) =>
   invoke<void>("update_note", { id, input, masterPassword: masterPassword ?? null });
-export const trashNote = (id: string) => invoke<void>("trash_note", { id });
+/** Removing a Wallet Kind needs the Master Password, like every other change to one: trashing
+ *  it, deleting it for good, and emptying a Trash that holds one. */
+export const trashNote = (id: string, masterPassword?: string) =>
+  invoke<void>("trash_note", { id, masterPassword: masterPassword ?? null });
 export const restoreNote = (id: string) => invoke<void>("restore_note", { id });
-export const deleteForever = (id: string) => invoke<void>("delete_forever", { id });
-export const emptyTrash = () => invoke<number>("empty_trash");
+export const deleteForever = (id: string, masterPassword?: string) =>
+  invoke<void>("delete_forever", { id, masterPassword: masterPassword ?? null });
+export const emptyTrash = (masterPassword?: string) =>
+  invoke<number>("empty_trash", { masterPassword: masterPassword ?? null });
 export const setFavorite = (id: string, favorite: boolean) => invoke<void>("set_favorite", { id, favorite });
 
 // ---------- showing & copying ----------
@@ -220,8 +234,11 @@ export const checkPrivateKey = (chain: Chain, key: string) => invoke<string | nu
 
 /** Opens the OS save dialog (Rust side). Rejects with code "cancelled" if the owner cancels. */
 export const pickBackupDestination = () => invoke<PickedFile>("pick_backup_destination");
-/** Writes, re-reads and verifies the Backup at the picked destination. */
+/** Writes, re-reads and verifies the Backup at the picked destination. The pick is used up:
+ *  every Backup needs a fresh pickBackupDestination. */
 export const writeBackup = () => invoke<BackupWritten>("write_backup");
+/** The owner backed out after picking (e.g. at the cloud-folder warning). */
+export const forgetBackupDestination = () => invoke<void>("forget_backup_destination");
 /** Opens the OS open dialog (Rust side) for a Backup file. */
 export const pickBackupToOpen = () => invoke<PickedFile>("pick_backup_to_open");
 /** Decrypt the picked Backup in memory with its credential and describe it. */
@@ -229,6 +246,8 @@ export const inspectBackup = (credential: Credential) => invoke<VaultPreview>("i
 /** Install the inspected Backup; the current Vault becomes a Safety Copy. Phase -> unlocked
  *  (or needs_new_password if a Recovery Key was used). */
 export const replaceWithBackup = () => invoke<void>("replace_with_backup");
+/** The preview was closed without installing: Rust forgets the decrypted copy and the picked file. */
+export const discardInspection = () => invoke<void>("discard_inspection");
 export const listSafetyCopies = () => invoke<SafetyCopy[]>("list_safety_copies");
 export const inspectSafetyCopy = (id: string, credential: Credential) =>
   invoke<VaultPreview>("inspect_safety_copy", { id, credential });

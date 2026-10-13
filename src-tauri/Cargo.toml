@@ -23,7 +23,8 @@ tauri = { version = "=2.11.6", features = ["isolation"] }
 serde.workspace = true
 serde_json.workspace = true
 secrecy.workspace = true
-# `serde`: Hidden Field values and passwords arrive straight into wiping types.
+# `serde`: Hidden Field values and passwords are deserialised into wiping types. Tauri's own
+# copies on the way (its IPC buffers) are wiped when freed, by the allocator in wipe_on_free.rs.
 zeroize = { workspace = true, features = ["serde"] }
 vault-format.workspace = true
 notes.workspace = true
@@ -96,8 +97,8 @@ windows = { version = "=0.62.2", default-features = false, features = [
 vault-format = { workspace = true, features = ["insecure-test-params"] }
 tempfile.workspace = true
 
-# Workspace lints, except that `unsafe_code` is `deny` rather than `forbid` so that exactly two
-# modules (platform.rs, hardening.rs) can opt in with `#[allow(unsafe_code)]`.
+# Workspace lints, except that `unsafe_code` is `deny` rather than `forbid` so that exactly three
+# modules (platform.rs, hardening.rs, wipe_on_free.rs) can opt in with `#[allow(unsafe_code)]`.
 [lints.rust]
 unsafe_code = "deny"
 

@@ -3,15 +3,23 @@
 //!
 //! macOS has no API that tells an app it is being captured, so this is a running-apps
 //! heuristic: while any known sharing or recording app is running, the shield is up. The owner
-//! may dismiss it ("I'm not sharing right now"). The dismissal lasts until an app joins the
-//! detected set that wasn't in it when they dismissed, or until the Vault locks.
+//! may dismiss it ("I'm not sharing right now"). The dismissal covers the apps running at that
+//! moment for as long as each keeps running: it ends when an app appears that it doesn't cover
+//! (a new one, or a covered one that quit and came back), or when the Vault locks.
 //!
 //! The known-app table covers, per platform, at least: Zoom, Microsoft Teams (classic and new),
 //! Discord, OBS Studio, QuickTime Player, macOS Screenshot (Cmd+Shift+5 UI), Loom, Webex,
 //! Tencent Meeting / VooV, Skype, Snipping Tool, Xbox Game Bar, ShareX, CleanShot X, Snagit,
-//! Screen Studio, Kap. Slack is deliberately NOT included (it's open all day). Match on
-//! macOS bundle id (exact) and on Windows executable file name (case-insensitive exact). Display
-//! names are what the shield shows ("Zoom", "Microsoft Teams", ...).
+//! Screen Studio, Kap, FaceTime, and the remote-control tools TeamViewer, AnyDesk, RustDesk,
+//! Quick Assist and macOS Screen Sharing (someone operating this computer sees everything).
+//! Slack is deliberately NOT included (it's open all day). Match on macOS bundle id (exact) and
+//! on Windows executable file name (case-insensitive exact). Display names are what the shield
+//! shows ("Zoom", "Microsoft Teams", ...).
+//!
+//! A helper process that only exists while its app is capturing (Zoom's share host, the
+//! Snipping Tool overlay) has its own entry and name. Under the app's name it would be covered
+//! by a dismissal made while the app sat idle, and the start of a real share would change
+//! nothing.
 
 #![forbid(unsafe_code)]
 
@@ -44,8 +52,13 @@ const KNOWN_APPS: &[KnownApp] = &[
     KnownApp {
         name: "Zoom",
         mac_bundle_ids: &["us.zoom.xos"],
-        // CptHost.exe is Zoom's screen-sharing host process.
-        windows_exe_names: &["Zoom.exe", "CptHost.exe"],
+        windows_exe_names: &["Zoom.exe"],
+    },
+    KnownApp {
+        // Zoom's screen-sharing host process: there only during a share.
+        name: "Zoom screen sharing",
+        mac_bundle_ids: &["us.zoom.CptHost"],
+        windows_exe_names: &["CptHost.exe"],
     },
     KnownApp {
         name: "Microsoft Teams",
@@ -112,14 +125,25 @@ const KNOWN_APPS: &[KnownApp] = &[
     },
     KnownApp {
         name: "Snipping Tool",
-        // ScreenClippingHost.exe is the Win+Shift+S capture overlay.
         mac_bundle_ids: &[],
-        windows_exe_names: &["SnippingTool.exe", "ScreenClippingHost.exe"],
+        windows_exe_names: &["SnippingTool.exe"],
+    },
+    KnownApp {
+        // The Win+Shift+S capture overlay: there only while capturing.
+        name: "Snipping Tool capture",
+        mac_bundle_ids: &[],
+        windows_exe_names: &["ScreenClippingHost.exe"],
     },
     KnownApp {
         name: "Xbox Game Bar",
         mac_bundle_ids: &[],
         windows_exe_names: &["GameBar.exe"],
+    },
+    KnownApp {
+        // The Game Bar's recording and broadcast server.
+        name: "Xbox Game Bar recording",
+        mac_bundle_ids: &[],
+        windows_exe_names: &["bcastdvr.exe"],
     },
     KnownApp {
         name: "ShareX",
@@ -162,6 +186,38 @@ const KNOWN_APPS: &[KnownApp] = &[
         mac_bundle_ids: &["com.wulkano.kap"],
         windows_exe_names: &[],
     },
+    KnownApp {
+        name: "FaceTime",
+        mac_bundle_ids: &["com.apple.FaceTime"],
+        windows_exe_names: &[],
+    },
+    // Remote control: whoever is connected sees and operates this computer.
+    KnownApp {
+        name: "TeamViewer",
+        mac_bundle_ids: &["com.teamviewer.TeamViewer"],
+        windows_exe_names: &["TeamViewer.exe"],
+    },
+    KnownApp {
+        name: "AnyDesk",
+        mac_bundle_ids: &["com.philandro.anydesk"],
+        windows_exe_names: &["AnyDesk.exe"],
+    },
+    KnownApp {
+        name: "RustDesk",
+        mac_bundle_ids: &["com.carriez.rustdesk"],
+        windows_exe_names: &["rustdesk.exe"],
+    },
+    KnownApp {
+        name: "Quick Assist",
+        mac_bundle_ids: &[],
+        windows_exe_names: &["QuickAssist.exe"],
+    },
+    KnownApp {
+        // The agent macOS runs while someone views or controls this Mac's screen.
+        name: "Screen Sharing",
+        mac_bundle_ids: &["com.apple.screensharing.agent"],
+        windows_exe_names: &[],
+    },
 ];
 
 /// Display names of known sharing/recording apps among `apps`, sorted and de-duplicated.
@@ -193,7 +249,8 @@ pub fn detect(platform: Platform, apps: &[RunningApp]) -> Vec<&'static str> {
 pub struct GuardState {
     /// Apps in the latest detection.
     detected: BTreeSet<&'static str>,
-    /// The detected set at the moment the owner dismissed the shield, while that dismissal holds.
+    /// While a dismissal holds: the apps it covers, i.e. those running when the owner dismissed
+    /// the shield that have kept running since.
     dismissed: Option<BTreeSet<&'static str>>,
 }
 
@@ -207,6 +264,10 @@ impl GuardState {
         self.detected = detected.iter().copied().collect();
         self.dismissed
             .take_if(|dismissed| !self.detected.is_subset(dismissed));
+        // An app that quit is no longer covered: if it starts again, that is news.
+        if let Some(dismissed) = &mut self.dismissed {
+            dismissed.retain(|app| self.detected.contains(app));
+        }
         !self.shield_apps().is_empty()
     }
 

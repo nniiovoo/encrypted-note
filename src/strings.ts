@@ -5,6 +5,8 @@
 import type { Chain, CloudProvider, Kind } from "./api";
 
 const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
+// The same with the thousands marked ("1,704 characters"), for lengths.
+const counted = (n: number, one: string, many: string) => `${n.toLocaleString("en-US")} ${n === 1 ? one : many}`;
 const cloudNames: Record<Exclude<CloudProvider, "mac_desktop_or_documents">, string> = {
   i_cloud_drive: "iCloud Drive",
   one_drive: "OneDrive",
@@ -18,6 +20,8 @@ export const strings = {
   locksIn: (time: string) => `Locks in ${time}`,
   lastBackup: (date: string) => `Last backup ${date}`,
   neverBackedUp: "No Backup yet",
+  lastBackupUnbacked: (date: string) => `Last backup ${date}, newer changes not backed up`,
+  neverBackedUpUnbacked: "No Backup yet, changes not backed up",
   somethingWentWrong: "Something went wrong. Please try again.",
 
   // shared buttons and labels
@@ -107,7 +111,8 @@ export const strings = {
   trashPurgeFailed: "Some Trash could not be removed because the Vault couldn't be saved. The Notes are still in Trash; try again after checking that the Vault folder is writable.",
   navKinds: "Kinds",
   noteCount: (n: number) => plural(n, "Note", "Notes"),
-  lockShortcut: (mac: boolean) => (mac ? "⌘L" : "Ctrl+L"),
+  shortcut: (mac: boolean, key: string) => (mac ? `⌘${key}` : `Ctrl+${key}`),
+  shiftShortcut: (mac: boolean, key: string) => (mac ? `⇧⌘${key}` : `Ctrl+Shift+${key}`),
   kindNames: { seed_phrase: "Seed Phrase", private_key: "Private Key", login: "Login", api_key: "API Key", text: "Text" } satisfies Record<Kind, string>,
   kindPlurals: { seed_phrase: "Seed Phrases", private_key: "Private Keys", login: "Logins", api_key: "API Keys", text: "Text" } satisfies Record<Kind, string>,
   kindBlurbs: {
@@ -126,6 +131,10 @@ export const strings = {
   pickNote: "Pick a Note on the left.",
   noMatches: "Nothing matches that search.",
   nothingHere: "Nothing here yet.",
+  sortLabel: "Sort",
+  sortRecent: "Recent",
+  sortAZ: "A to Z",
+  copyFrom: (field: string, title: string) => `Copy ${field} of ${title}`,
   backupReminder: "Your latest changes haven't been backed up for over a week.",
   backUpNow: "Back up now",
   goToBackups: "Go to Backups",
@@ -136,16 +145,33 @@ export const strings = {
   copiedAnnounce: "Copied. The clipboard clears in 30 seconds.",
 
   // Note detail
+  created: (date: string) => `Created ${date}`,
   updated: (date: string) => `Updated ${date}`,
   favorite: "Favorite",
   show: "Show",
   hide: "Hide",
   copy: "Copy",
+  replace: "Replace",
+  add: "Add",
+  // What a screen reader says for a button repeated on every row, e.g. "Copy Password".
+  fieldAction: (action: string, field: string) => `${action} ${field}`,
   edit: "Edit",
+  duplicate: "Duplicate",
+  duplicateTitle: (title: string) => `${title} copy`,
   moveToTrash: "Move to Trash",
+  walletTrashText: "Moving a Seed Phrase or Private Key to Trash needs your Master Password, like every other change to one.",
+  walletDeleteText: "Deleting a Seed Phrase or Private Key for good needs your Master Password.",
+  walletEmptyTrashText: "Trash holds a Seed Phrase or Private Key, so emptying it needs your Master Password.",
+  crashTitle: "Something went wrong",
+  crashText: "encrypted-note couldn't draw this screen, so it locked your Vault. Nothing was changed. Unlock to carry on.",
+  crashContinue: "Continue",
   movedToTrash: "Moved to Trash. It's kept there for 30 days.",
   empty: "Empty",
   hidesIn: (s: number) => `Hides in ${s} s`,
+  // Showing again starts the 30 seconds afresh; it doesn't add 30 to what is left.
+  resetTimer: "Reset to 30 s",
+  resetTimerFor: (field: string) => `Reset to 30 s for ${field}`,
+  keepHolding: "Released before it appeared. Keep holding until it shows.",
   showWalletTitle: (field: string) => `Show ${field}`,
   holdHint:
     "Type your Master Password, then press Enter to show it for 20 seconds, or press and hold the button to show it only while you hold (keyboard: Tab to the button, then hold Space).",
@@ -164,10 +190,10 @@ export const strings = {
   newTitle: (kind: string) => `New ${kind}`,
   editTitle: (kind: string) => `Edit ${kind}`,
   fields: {
-    seed_phrase: { word_count: "Number of words", words: "Words", wallet_name: "Wallet name", passphrase: "Passphrase" },
+    seed_phrase: { word_count: "Number of words", words: "Words", wallet_name: "Wallet name", address: "Public address", derivation_path: "Derivation path", passphrase: "Passphrase" },
     private_key: { chain: "Chain", address: "Public address", key: "Private Key" },
-    login: { website: "Website", username: "Username", password: "Password" },
-    api_key: { service: "Service", key: "Key" },
+    login: { website: "Website", username: "Username", purpose: "Purpose", password: "Password" },
+    api_key: { service: "Service", key_id: "Key ID", purpose: "Purpose", url: "Management URL", expires: "Expiry date", env_var: "Variable name", key: "Key", secret: "Secret" },
     text: { body: "Text" },
   } as Record<Kind, Record<string, string>>,
   chains: { evm: "Ethereum / EVM", solana: "Solana", bitcoin: "Bitcoin", other: "Other" } satisfies Record<Chain, string>,
@@ -176,6 +202,8 @@ export const strings = {
   leaveBlankToKeep: "Leave blank to keep the current value",
   leaveBlankToKeepWords: "Leave every word blank to keep the current words.",
   passphraseTip: "Only if your wallet uses one. Write it on paper too: without it the words alone won't restore the wallet.",
+  expiryDateHint: "Use YYYY-MM-DD, for example 2027-01-31.",
+  variableNameHint: "Use letters, digits and underscores, starting with a letter or underscore; at most 128 characters.",
   unknownWords: (positions: number[]) =>
     `${positions.length === 1 ? "Word" : "Words"} ${positions.join(", ")} ${positions.length === 1 ? "isn't" : "aren't"} in the standard word list. You can still save.`,
   checksumFailed: "These words don't pass the standard checksum, so one may be mistyped. You can still save.",
@@ -192,11 +220,34 @@ export const strings = {
     "Wallet makers recommend keeping your recovery phrase on paper or metal, offline. Think of this as a convenient extra copy, not your only one.",
   haveCopy: "I have a paper/metal copy",
   saveAnyway: "Save anyway",
+  // What the Editor can say about a typed Hidden Field without showing any of it.
+  typedCount: (n: number, edgeSpace: boolean, multiline: boolean) =>
+    `${counted(n, "character", "characters")}${edgeSpace ? `. It starts or ends with a space${multiline ? " or a line break" : ""}.` : ""}`,
+  multilineKey: (lines: number, characters: number) =>
+    `Multi-line key pasted: ${counted(lines, "line", "lines")}, ${counted(characters, "character", "characters")}`,
+  clear: "Clear",
+  clearField: (field: string) => `Remove the current ${field}`,
+  replacesText: "Saving replaces the current text.",
+  mainBlank: (field: string) => `No ${field} entered yet. You can still save.`,
+  // Something that belongs in a Hidden Field was typed into a visible one. Never repeats it.
+  looksLikeKey: (field: string) => `This looks like a key. The ${field} is always visible and searchable.`,
+  looksLikeSeed: (field: string) => `This looks like a Seed Phrase. The ${field} is always visible and searchable.`,
+  looksLikePrivateKey: (field: string) => `This looks like a Private Key. The ${field} is always visible and searchable.`,
+  clearAllWords: "Clear all words",
+  chainName: "Chain name",
+  chainNameHint: "For a chain that isn't listed. Leave blank to save it as Other.",
+  saveAndAddAnother: "Save and add another",
+  savedAnother: (kind: string) => `Saved. This is a new ${kind}.`,
+  // Seed Phrases and Private Keys: what the Sharing Guard shield doesn't bring back. Field names only.
+  draftLossWallet: (fields: string[]) => `If the Sharing Guard covers the window, everything typed here is kept except: ${fields.join(", ")}.`,
+  enterAgain: (fields: string[]) =>
+    `Enter again: ${fields.join(", ")}. A Seed Phrase's words, a Passphrase and a Private Key are never kept while the Sharing Guard covers the window.`,
 
   // Trash
   trashText:
     "Deleted Notes wait here for 30 days. Deleted Notes still exist in older Backups and Safety Copies, so if a password or key was exposed, change it, don't just delete it.",
   deletedOn: (date: string) => `Deleted ${date}`,
+  backToTrash: "Back to Trash",
   restore: "Restore",
   deleteForever: "Delete forever",
   deleteForeverText: "This removes it from this copy of your Vault. Older Backups and Safety Copies still contain it.",
@@ -231,7 +282,19 @@ export const strings = {
   previewNotes: (n: number) => `It holds ${plural(n, "Note", "Notes")}.`,
   previewChanged: (date: string) => `Last changed ${date}.`,
   olderWarning: (safetyCopy: boolean) =>
-    `This ${safetyCopy ? "Safety Copy" : "Backup"} is older than the Vault on this computer. Opening it replaces your newer changes (they're kept as a Safety Copy).`,
+    `This ${safetyCopy ? "Safety Copy" : "Backup"} doesn't have every change that is in the Vault on this computer: it is older, or the two were changed separately. Opening it replaces those changes (they're kept as a Safety Copy).`,
+  cannotCompareWarning:
+    "This computer already has a Vault, and encrypted-note couldn't compare it with this copy because it is locked. If this copy is older, opening it replaces newer changes. Not sure? Cancel, unlock first, then open it from Settings.",
+  backupEjectHint: "If this is a USB stick or other removable drive, eject it before you unplug it.",
+  vaultWasHereTitle: "A Vault was on this computer before",
+  vaultWasHereText:
+    "Its Vault file is missing, but Safety Copies of it are still here. You can restore one with its Master Password or Recovery Key.",
+  keyRotationCompleted:
+    "Your Master Password and Recovery Kit are changed. Backups and Safety Copies made before now, including the Safety Copies on this computer, still open with the old ones.",
+  keyRotationCancelled:
+    "The change was cancelled before it was saved. Your old Master Password and old Recovery Kit still apply; destroy the new Recovery Key you wrote down.",
+  settingsUnreadable:
+    "Your lock settings couldn't be read, so the strictest ones are in use: lock after 1 minute, and when you switch apps. Choose them again in Settings.",
   keptAsSafetyCopy: "This computer's current Vault will be kept as a Safety Copy.",
   replaceVault: "Replace this computer's Vault",
   useThisVault: "Use this Vault",
@@ -251,6 +314,14 @@ export const strings = {
   currentPassword: "Current Master Password",
   changeAndRotate: "Change and make a new Recovery Kit",
   passwordChanged: "Your Master Password is changed.",
+  saveDurabilityWarning: "A change was installed, but the system could not confirm it is durable. Make a Backup before closing or restarting.",
+  draftLossHint: "Locking the app discards unsaved changes.",
+  dismiss: "Dismiss",
+  passwordChangeCompleted: "Your Master Password changed. Existing Backups and Safety Copies still use their original credentials.",
+  passwordChangeFailed: "The password change did not complete; your previous Master Password remains active.",
+  backupRestoreCompleted: "The Backup was restored successfully.",
+  safetyCopyRestoreCompleted: "The Safety Copy was restored successfully.",
+  restoreFailed: "The restore did not complete; no replacement was made.",
   privacyTitle: "Screen privacy tips",
   privacyTips: [
     "On calls, share one window, not your whole screen. Lock first with Cmd/Ctrl+L.",

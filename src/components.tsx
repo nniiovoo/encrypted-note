@@ -11,6 +11,11 @@ export const mac = navigator.userAgent.includes("Mac");
 export const dragRegion = mac ? { "data-tauri-drag-region": "deep" } : {};
 export const TitlebarDrag = () => (mac ? <div className="titlebar-drag" {...dragRegion} /> : null);
 
+/** Whether the shortcut modifier is held: Cmd alone on Mac (Ctrl+letter moves the cursor in Mac
+ *  text boxes), Ctrl elsewhere (but not AltGr, which arrives as Ctrl+Alt). */
+export const cmdKey = (e: { metaKey: boolean; ctrlKey: boolean; altKey: boolean }) =>
+  mac ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.altKey;
+
 export const AppIcon = ({ large }: { large?: boolean }) => (
   <img className={large ? "app-icon large" : "app-icon"} src={appIcon} alt="" />
 );
@@ -62,8 +67,15 @@ export const ErrorLine = ({ error }: { error: string | null }) =>
     </p>
   );
 
-/** A labelled input. Says so when Caps Lock is on while typing into a password box. */
-export function Field({ label, hint, children }: { label: string; hint?: string | undefined; children: ReactNode }) {
+/** A labelled input. Says so when Caps Lock is on while typing into a password box. `hint`
+ *  explains the field; `check` is what the page says about what is in it now (its length, a
+ *  warning), one line each, and goes above the hint. */
+export function Field({ label, hint, check, children }: {
+  label: string;
+  hint?: string | undefined;
+  check?: ReactNode;
+  children: ReactNode;
+}) {
   const [caps, setCaps] = useState(false);
   const onKey = (e: KeyEvent) => setCaps((e.target as HTMLInputElement).type === "password" && e.getModifierState("CapsLock"));
   return (
@@ -71,6 +83,7 @@ export function Field({ label, hint, children }: { label: string; hint?: string 
       <span className="label">{label}</span>
       {children}
       {caps && <span className="warn">{s.capsLockOn}</span>}
+      {check}
       {hint && <span className="hint">{hint}</span>}
     </label>
   );
@@ -126,7 +139,8 @@ export function Modal(props: { title: string; onClose: () => void; alert?: boole
     return () => {
       document.removeEventListener("focusin", keep);
       const top = topDialog();
-      if (top) top.focus();
+      // Not when a dialog that replaced this one already put the keyboard in its own input.
+      if (top) top.contains(document.activeElement) || top.focus();
       else if (!el.isConnected) trigger?.focus();
     };
   }, []);
@@ -148,7 +162,11 @@ export const Confirm = (props: { title: string; text: string; confirmLabel: stri
   <Modal title={props.title} onClose={props.onClose} alert>
     <p>{props.text}</p>
     <div className="actions">
-      <button onClick={props.onClose}>{s.cancel}</button>
+      {/* Cancel has the keyboard: a stray Enter or Space changes nothing. A key still held down
+          from opening the dialog doesn't press it either. */}
+      <button autoFocus onKeyDown={(e) => e.repeat && e.preventDefault()} onClick={props.onClose}>
+        {s.cancel}
+      </button>
       <button className="primary" onClick={props.onConfirm}>
         {props.confirmLabel}
       </button>
@@ -163,28 +181,41 @@ export function PasswordModal(props: {
   submitLabel: string;
   onSubmit: (password: string) => Promise<unknown>;
   onClose: () => void;
+  /** status.retry_in_ms: after wrong passwords the core refuses any attempt for a while. */
+  retryInMs?: number | null | undefined;
 }) {
   const [password, setPassword] = useState("");
+  const input = useRef<HTMLInputElement>(null);
   const { busy, error, run } = useAction();
+  const wait = props.retryInMs ? seconds(props.retryInMs) : 0;
   async function submit(e: FormEvent) {
     e.preventDefault();
+    // During the wait even the right password is refused unchecked: keep what was typed.
+    if (wait > 0) return;
     const p = password;
     setPassword("");
     if (await run(() => props.onSubmit(p))) props.onClose();
   }
+  // After a wrong password the button that was clicked is disabled again and typing would go
+  // nowhere: the password box takes the keyboard back.
+  useEffect(() => {
+    const at = document.activeElement;
+    if (!busy && (!at || at === document.body || (at as HTMLButtonElement).disabled)) input.current?.focus();
+  }, [busy]);
   return (
     <Modal title={props.title} onClose={props.onClose}>
       <form onSubmit={submit} className="stack">
         <p>{props.text}</p>
         <Field label={s.masterPassword}>
-          <SecretInput value={password} onChange={(e) => setPassword(e.target.value)} autoFocus />
+          <SecretInput ref={input} value={password} onChange={(e) => setPassword(e.target.value)} autoFocus />
         </Field>
         <ErrorLine error={error} />
+        {wait > 0 && <p className="hint">{s.tryAgainIn(wait)}</p>}
         <div className="actions">
           <button type="button" onClick={props.onClose}>
             {s.cancel}
           </button>
-          <button className="primary" disabled={busy || !password}>
+          <button className="primary" disabled={busy || !password || wait > 0}>
             {busy ? s.checking : props.submitLabel}
           </button>
         </div>
@@ -227,11 +258,15 @@ export function NewPassword(props: {
     const p = password;
     setPassword("");
     setAgain("");
+    setShow(false);
     await run(() => props.onSubmit(p));
   }
 
+  // A shown Master Password is ordinary text. It must not reach the general clipboard, which
+  // nothing marks private or clears (Notes are copied by the Rust side for that reason).
+  const noCopy = (e: { preventDefault: () => void }) => e.preventDefault();
   return (
-    <form onSubmit={submit} className="stack">
+    <form onSubmit={submit} onCopy={noCopy} onCut={noCopy} className="stack">
       {props.children}
       <Field label={s.newPassword}>
         <SecretInput show={show} value={password} onChange={(e) => setPassword(e.target.value)} autoFocus={!props.children} />

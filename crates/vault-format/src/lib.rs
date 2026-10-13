@@ -81,12 +81,14 @@ mod header;
 use header::{Header, Slot, SlotType};
 
 // Build-time guard: the AEAD cipher copies every key it is given (Vault Key, Wallet Key, KEK),
-// and the Recovery Key checksum feeds its 16 bytes through SHA-256; both must wipe their copy on
-// drop. This stops compiling if either `zeroize` feature is dropped.
+// the Recovery Key checksum feeds its 16 bytes through SHA-256, and Argon2id hashes its blocks
+// (the KEK among them) with BLAKE2b; each must wipe its copy on drop. This stops compiling if
+// one of the `zeroize` features is dropped.
 const _: () = {
     fn wipes_on_drop<T: zeroize::ZeroizeOnDrop>() {}
     let _ = wipes_on_drop::<XChaCha20Poly1305>;
     let _ = wipes_on_drop::<sha2::Sha256>;
+    let _ = wipes_on_drop::<blake2::Blake2bVarCore>;
 };
 
 /// First 8 bytes of every Vault file.
@@ -124,7 +126,9 @@ impl KdfParams {
 }
 
 /// Floor and ceiling for KDF parameters. The floor stops a doctored file from downgrading
-/// protection; the ceiling stops a doctored file from freezing the app.
+/// protection; the ceiling stops a doctored file from freezing the app. The memory ceiling is
+/// the most [`calibrate`] ever picks, so a file can't ask for more work than the app itself
+/// could have chosen.
 #[derive(Clone, Copy, Debug)]
 pub struct Limits {
     pub min: KdfParams,
@@ -132,7 +136,7 @@ pub struct Limits {
 }
 
 impl Limits {
-    /// Used by the app and the Emergency Reader: m >= 64 MiB, t >= 3, p >= 1; m <= 2 GiB, t <= 20, p <= 16.
+    /// Used by the app and the Emergency Reader: m >= 64 MiB, t >= 3, p >= 1; m <= 512 MiB, t <= 20, p <= 16.
     pub const PRODUCTION: Limits = Limits {
         min: KdfParams {
             m_kib: 64 * 1024,
@@ -140,7 +144,7 @@ impl Limits {
             p: 1,
         },
         max: KdfParams {
-            m_kib: 2 * 1024 * 1024,
+            m_kib: KdfParams::DEFAULT.m_kib,
             t: 20,
             p: 16,
         },
@@ -174,6 +178,11 @@ pub enum Error {
     UnsupportedVersion(u16),
     /// KDF parameters outside [`Limits`].
     KdfOutOfLimits,
+    /// The Argon2id working memory (64 to 512 MiB) could not be allocated.
+    OutOfMemory,
+    /// A credential slot that was just written did not open again with its own credential, so
+    /// it was not used.
+    SlotCheckFailed,
     /// The Master Password or Recovery Key did not unwrap its slot.
     WrongCredential,
     /// The slot unwrapped but the body (or a wallet field) failed authentication: the file was
@@ -225,7 +234,21 @@ impl UnlockedVault {
     pub fn kdf(&self) -> KdfParams {
         self.header.kdf
     }
+
+    /// The Master Password slot as it is now (ciphertext only), to put back with
+    /// [`UnlockedVault::restore_password_slot`] if a [`change_password`] can't be saved.
+    pub fn password_slot(&self) -> PasswordSlot {
+        PasswordSlot(self.header.slots[SlotType::MasterPassword.index()].clone())
+    }
+
+    /// Undo a [`change_password`] in memory, with no key derivation.
+    pub fn restore_password_slot(&mut self, slot: PasswordSlot) {
+        self.header.slots[SlotType::MasterPassword.index()] = slot.0;
+    }
 }
+
+/// A copy of a Vault's Master Password slot (salt, nonce and wrapped keys; nothing secret).
+pub struct PasswordSlot(Slot);
 
 /// Result of [`create`].
 #[derive(Debug)]
@@ -541,13 +564,13 @@ fn derive_kek(input: &[u8], salt: &[u8; 16], kdf: KdfParams) -> Result<Zeroizing
 
 /// Argon2id working memory that is wiped on drop. `hash_password_into` frees its own memory
 /// unwiped, and the KEK can be recomputed cheaply from it (it is a hash of each lane's last
-/// block). An allocation failure is an error, not an abort.
+/// block). An allocation failure is an error ([`Error::OutOfMemory`]), not an abort.
 fn kdf_memory(params: &argon2::Params) -> Result<Zeroizing<Vec<argon2::Block>>, Error> {
     let count = params.block_count();
     let mut blocks = Vec::new();
     blocks
         .try_reserve_exact(count)
-        .map_err(|_| Error::KdfOutOfLimits)?;
+        .map_err(|_| Error::OutOfMemory)?;
     blocks.resize(count, argon2::Block::new());
     Ok(Zeroizing::new(blocks))
 }
@@ -568,6 +591,10 @@ fn decrypt(key: &[u8; 32], nonce: &[u8; 24], msg: &[u8], aad: &[u8]) -> Option<Z
 }
 
 /// Encrypt `vault_key || wallet_key` into a fresh slot (new salt and nonce) for `credential`.
+///
+/// The slot is then opened once more from scratch (a second derivation) and must give back the
+/// same keys: a slot that silently can't be opened would lock the owner out, and nothing else
+/// checks it (a save is verified with the Vault Key already held, not with the credential).
 fn wrap_slot(
     credential: Credential<'_>,
     vault_id: &[u8; 16],
@@ -582,9 +609,15 @@ fn wrap_slot(
     keys[..32].copy_from_slice(vault_key.0.as_ref());
     keys[32..].copy_from_slice(wallet_key.0.as_ref());
     let aad = header::slot_aad(vault_id, kdf, slot_type);
-    let wrapped = encrypt(&kek, &nonce, keys.as_ref(), &aad)?
+    let wrapped: [u8; header::WRAPPED_LEN] = encrypt(&kek, &nonce, keys.as_ref(), &aad)?
         .try_into()
         .map_err(|_| Error::Malformed("wrapped keys have the wrong length"))?;
+    drop(kek);
+    let again = derive_kek(&input, &salt, kdf)?;
+    let opens = decrypt(&again, &nonce, &wrapped, &aad).is_some_and(|opened| *opened == *keys);
+    if !opens {
+        return Err(Error::SlotCheckFailed);
+    }
     Ok(Slot {
         salt,
         nonce,

@@ -1,7 +1,7 @@
 // Screens outside the Unlocked Vault: Welcome, Create Master Password, Recovery Kit, lock screen,
 // and setting a new Master Password after a Recovery Key unlock.
 
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { confirmRecoveryKit, createVault, listSafetyCopies, lock, setNewPassword, unlock, type AppStatus, type SafetyCopy } from "./api";
 import { AppIcon, ErrorLine, Field, formatDate, Modal, NewPassword, SecretInput, seconds, useAction } from "./components";
 import { Icon, type IconName } from "./icons";
@@ -19,8 +19,13 @@ const LockLink = ({ label = s.lock }: { label?: string }) => (
   </button>
 );
 
-export function NoVault({ onKit }: { onKit: (recoveryKey: string) => void }) {
+export function NoVault({ onKit, onOperationOutcome }: { onKit: (recoveryKey: string) => void; onOperationOutcome: (message: string) => void }) {
   const [step, setStep] = useState<"welcome" | "create" | "open">("welcome");
+  // No Vault file, but Safety Copies: this is not a first run. Say so, before the owner
+  // concludes their Notes are gone and creates a new Vault over them.
+  const [copies, setCopies] = useState<SafetyCopy[]>([]);
+  const [copy, setCopy] = useState<SafetyCopy | null>(null);
+  useEffect(() => void listSafetyCopies().then(setCopies, () => {}), []);
   if (step === "create")
     return (
       <div className="center narrow">
@@ -53,13 +58,28 @@ export function NoVault({ onKit }: { onKit: (recoveryKey: string) => void }) {
           </section>
         ))}
       </div>
+      {copies.length > 0 && (
+        <section className="card stack">
+          <h2>{s.vaultWasHereTitle}</h2>
+          <p>{s.vaultWasHereText}</p>
+          <ul className="rows">
+            {copies.map((item) => (
+              <li key={item.id} className="trash-row">
+                <span>{formatDate(item.created_at)}</span>
+                <button onClick={() => setCopy(item)}>{s.restore}</button>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
       <button className="primary big" onClick={() => setStep("create")}>
         {s.createMyVault}
       </button>
       <button className="link centered" onClick={() => setStep("open")}>
         {s.haveVault}
       </button>
-      {step === "open" && <ReplaceVault onClose={() => setStep("welcome")} />}
+      {step === "open" && <ReplaceVault onClose={() => setStep("welcome")} onOperationOutcome={onOperationOutcome} />}
+      {copy && <ReplaceVault copy={copy} onClose={() => setCopy(null)} onOperationOutcome={onOperationOutcome} />}
     </div>
   );
 }
@@ -115,7 +135,7 @@ export const KitLost = () => (
 );
 
 /** No Note titles or counts here. */
-export function Locked({ status }: { status: AppStatus }) {
+export function Locked({ status, onOperationOutcome }: { status: AppStatus; onOperationOutcome: (message: string) => void }) {
   const [useKey, setUseKey] = useState(false);
   const [secret, setSecret] = useState("");
   const [restore, setRestore] = useState<"choose" | "backup" | null>(null);
@@ -179,8 +199,8 @@ export function Locked({ status }: { status: AppStatus }) {
           <ErrorLine error={error} />
         </Modal>
       )}
-      {restore === "backup" && <ReplaceVault onClose={() => setRestore(null)} />}
-      {copy && <ReplaceVault copy={copy} onClose={() => setCopy(null)} />}
+      {restore === "backup" && <ReplaceVault onClose={() => setRestore(null)} onOperationOutcome={onOperationOutcome} />}
+      {copy && <ReplaceVault copy={copy} onClose={() => setCopy(null)} onOperationOutcome={onOperationOutcome} />}
     </div>
   );
 }

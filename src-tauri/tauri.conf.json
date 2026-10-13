@@ -21,6 +21,7 @@
         "minHeight": 560,
         "resizable": true,
         "contentProtected": true,
+        "incognito": true,
         "titleBarStyle": "Overlay",
         "hiddenTitle": true,
         "trafficLightPosition": { "x": 20, "y": 28 }

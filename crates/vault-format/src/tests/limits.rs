@@ -161,3 +161,19 @@ fn a_doctored_floor_or_ceiling_is_rejected_before_any_derivation_runs() {
         );
     }
 }
+
+#[test]
+fn a_file_cannot_ask_for_more_memory_than_the_app_itself_would_choose() {
+    let limits = Limits::PRODUCTION;
+    assert_eq!(limits.max.m_kib, KdfParams::DEFAULT.m_kib);
+    for m_kib in [KdfParams::DEFAULT.m_kib + 1, 1024 * 1024, 2 * 1024 * 1024] {
+        assert_eq!(
+            limits.check(KdfParams {
+                m_kib,
+                ..KdfParams::DEFAULT
+            }),
+            Err(Error::KdfOutOfLimits),
+            "{m_kib} KiB"
+        );
+    }
+}

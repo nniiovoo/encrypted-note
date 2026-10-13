@@ -7,12 +7,15 @@
 //!   clipboard's contents.
 //! * [`observe_lock_events`]: OS notifications that must lock the app at once, and app switches.
 //! * [`default_backup_folder`]: where the Backup save panel starts.
+//! * [`clear_leftover_copy`]: at startup, clear a copy the last run didn't live to clear.
+//! * [`real_home_dir`]: the owner's home folder, even inside the Mac App Sandbox.
+//! * [`continuous_ms`]: a monotonic clock that keeps counting while the computer sleeps.
 //!
 //! macOS and Windows are implemented here; other platforms get harmless stand-ins (no self-check,
 //! no running apps, no copy).
 //!
-//! This module and `hardening.rs` are the only places allowed to use `unsafe`; every block says
-//! why it is sound.
+//! This module, `hardening.rs` and `wipe_on_free.rs` are the only places allowed to use
+//! `unsafe`; every block says why it is sound.
 
 #[cfg(target_os = "macos")]
 pub use mac::*;
@@ -74,16 +77,85 @@ mod mac {
         Some(state == i64::from(CGWindowSharingType::None.0))
     }
 
-    /// Bundle ids of the running applications.
-    pub fn running_apps() -> Vec<guard::RunningApp> {
-        NSWorkspace::sharedWorkspace()
+    /// Bundle ids of the running applications. `None` if they could not be listed (never, here).
+    pub fn running_apps() -> Option<Vec<guard::RunningApp>> {
+        let apps = NSWorkspace::sharedWorkspace()
             .runningApplications()
             .iter()
             .map(|app| guard::RunningApp {
                 bundle_id: app.bundleIdentifier().map(|id| id.to_string()),
                 exe_name: None,
             })
-            .collect()
+            .collect();
+        Some(apps)
+    }
+
+    /// Our own pasteboard type, put next to every copy: it says "encrypted-note wrote this"
+    /// without anyone having to read what was written.
+    fn copy_marker() -> &'static NSString {
+        ns_string!("com.encryptednote.app.copy")
+    }
+
+    /// If the clipboard still holds a copy from a run that ended without clearing it (a crash, a
+    /// force quit, a power cut within the 30 s), clear it now. Only our marker is looked at,
+    /// never the contents.
+    pub fn clear_leftover_copy() {
+        let pasteboard = NSPasteboard::generalPasteboard();
+        if pasteboard.dataForType(copy_marker()).is_some() {
+            pasteboard.clearContents();
+        }
+    }
+
+    /// The owner's home folder from the user database. Inside the App Sandbox `$HOME` (which is
+    /// what Tauri reads) is the app's container, while file panels return real paths.
+    pub fn real_home_dir() -> Option<PathBuf> {
+        use std::ffi::{CStr, OsStr};
+        use std::os::unix::ffi::OsStrExt;
+        let mut buffer = vec![0 as libc::c_char; 16 * 1024];
+        let mut entry = std::mem::MaybeUninit::<libc::passwd>::uninit();
+        let mut found: *mut libc::passwd = std::ptr::null_mut();
+        // SAFETY: `entry`, `buffer` (with its true length) and `found` are live, writable locals
+        // of the types getpwuid_r expects; it writes only into them.
+        let status = unsafe {
+            libc::getpwuid_r(
+                libc::getuid(),
+                entry.as_mut_ptr(),
+                buffer.as_mut_ptr(),
+                buffer.len(),
+                &mut found,
+            )
+        };
+        if status != 0 || found.is_null() {
+            return None;
+        }
+        // SAFETY: on success `found` points at `entry`, now initialised, whose `pw_dir` is a
+        // NUL-terminated string inside `buffer`; both are still alive here.
+        let dir = unsafe {
+            let dir = (*found).pw_dir;
+            if dir.is_null() {
+                return None;
+            }
+            CStr::from_ptr(dir)
+        };
+        let home = PathBuf::from(OsStr::from_bytes(dir.to_bytes()));
+        home.is_absolute().then_some(home)
+    }
+
+    /// Milliseconds on a clock that never goes back and keeps counting while the Mac sleeps.
+    /// `Instant` stops during sleep here, so a Vault left Unlocked would wake with its whole
+    /// idle time still to run if the sleep notification was ever missed.
+    pub fn continuous_ms() -> Option<u64> {
+        let mut now = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        // SAFETY: `now` is a live, writable timespec.
+        if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut now) } != 0 {
+            return None;
+        }
+        let secs = u64::try_from(now.tv_sec).ok()?;
+        let nanos = u64::try_from(now.tv_nsec).ok()?;
+        Some(secs.saturating_mul(1000).saturating_add(nanos / 1_000_000))
     }
 
     /// The general pasteboard, written current-host-only (no Universal Clipboard) and marked
@@ -99,11 +171,15 @@ mod mac {
             // SAFETY: an immutable NSString constant exported by AppKit, valid for the whole process.
             let string_type = unsafe { NSPasteboardTypeString };
             let marker = NSData::new();
-            let written = pasteboard.setString_forType(&NSString::from_str(text), string_type)
+            // Markers first, the text last: a clipboard manager that looks the moment the
+            // pasteboard changes must never find the text without them. (`NSString::from_str`
+            // makes a copy AppKit owns; it can't be wiped from here.)
+            let written = pasteboard
+                .setData_forType(Some(&marker), ns_string!("org.nspasteboard.ConcealedType"))
                 && pasteboard
-                    .setData_forType(Some(&marker), ns_string!("org.nspasteboard.ConcealedType"))
-                && pasteboard
-                    .setData_forType(Some(&marker), ns_string!("org.nspasteboard.TransientType"));
+                    .setData_forType(Some(&marker), ns_string!("org.nspasteboard.TransientType"))
+                && pasteboard.setData_forType(Some(&marker), copy_marker())
+                && pasteboard.setString_forType(&NSString::from_str(text), string_type);
             if !written {
                 pasteboard.clearContents();
                 return Err(ApiError {
@@ -285,12 +361,14 @@ mod win {
         unsafe { GetWindowLongW(hwnd, GWL_EXSTYLE) as u32 }
     }
 
-    /// Executable file names of the running processes (e.g. "Zoom.exe").
-    pub fn running_apps() -> Vec<guard::RunningApp> {
+    /// Executable file names of the running processes (e.g. "Zoom.exe"). `None` if the list
+    /// could not be read: that says nothing about what is running, so the Sharing Guard keeps
+    /// what it knew.
+    pub fn running_apps() -> Option<Vec<guard::RunningApp>> {
         let mut apps = Vec::new();
         // SAFETY: plain call with no pointers; the snapshot handle is closed below.
         let Ok(snapshot) = (unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }) else {
-            return apps;
+            return None;
         };
         let mut entry = PROCESSENTRY32W {
             dwSize: size_of::<PROCESSENTRY32W>() as u32,
@@ -311,7 +389,21 @@ mod win {
         }
         // SAFETY: `snapshot` is our handle, closed exactly once.
         let _ = unsafe { CloseHandle(snapshot) };
-        apps
+        Some(apps)
+    }
+
+    /// Not done on Windows yet: a copy left on the clipboard by a run that crashed stays until
+    /// something replaces it. (The Mac adapter clears it at the next start.)
+    pub fn clear_leftover_copy() {}
+
+    /// Tauri's home folder is the real one on Windows.
+    pub fn real_home_dir() -> Option<PathBuf> {
+        None
+    }
+
+    /// `Instant` already keeps counting through sleep on Windows.
+    pub fn continuous_ms() -> Option<u64> {
+        None
     }
 
     /// `CF_UNICODETEXT`, defined in the OLE bindings this crate doesn't otherwise need.
@@ -426,8 +518,16 @@ mod win {
         if locked && unsafe { SetClipboardData(format, Some(HANDLE(memory.0))) }.is_ok() {
             return true;
         }
-        // SAFETY: the clipboard didn't take `memory`, so it is still ours to free, once.
-        let _ = unsafe { GlobalFree(Some(memory)) };
+        // SAFETY: the clipboard didn't take `memory`, so it is still ours: `len` bytes, valid
+        // while locked. Wipe what `fill` wrote (it may be the copied value), then free it once.
+        unsafe {
+            let data = GlobalLock(memory).cast::<u8>();
+            if !data.is_null() {
+                std::ptr::write_bytes(data, 0, len);
+                let _ = GlobalUnlock(memory);
+            }
+            let _ = GlobalFree(Some(memory));
+        }
         false
     }
 
@@ -731,8 +831,18 @@ mod other {
         None
     }
 
-    pub fn running_apps() -> Vec<guard::RunningApp> {
-        Vec::new()
+    pub fn running_apps() -> Option<Vec<guard::RunningApp>> {
+        Some(Vec::new())
+    }
+
+    pub fn clear_leftover_copy() {}
+
+    pub fn real_home_dir() -> Option<PathBuf> {
+        None
+    }
+
+    pub fn continuous_ms() -> Option<u64> {
+        None
     }
 
     pub struct SystemClipboard;

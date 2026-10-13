@@ -13,6 +13,9 @@ insecure-test-params = []
 
 [dependencies]
 argon2.workspace = true
+# Argon2id's own hash. Named here only to switch on `zeroize`, so its state (which sees the KEK)
+# is wiped on drop; the version is the one argon2 already uses.
+blake2 = { version = "=0.11.0", default-features = false, features = ["zeroize"] }
 # `zeroize`: wipe the cipher's copy of each key (and the ChaCha20 state) on drop.
 chacha20poly1305 = { workspace = true, features = ["zeroize"] }
 zeroize.workspace = true

@@ -4,7 +4,8 @@ Showing a **Seed Phrase** or **Private Key** requires the **Master Password** ag
 
 ## Consequences
 
-- Adding or editing a Wallet Kind also asks for the **Master Password**, because it needs the Wallet Key to encrypt.
+- Adding or editing a Wallet Kind also asks for the **Master Password**, because it needs the Wallet Key to encrypt. Moving one to **Trash**, deleting it for good and emptying a **Trash** that holds one ask for it too: not because a key is needed, but so that nobody at an **Unlocked** computer can remove a wallet either.
+- "Anything reading the app's memory" is as true as wiping can make it (ADR-0003). The **Master Password** is typed in the WebView and passes through buffers on its way to Rust; the Rust heap is wiped as it is freed, the WebView's memory and the stack are not. A reader who catches the **Master Password** there can unwrap the Wallet Key from the **Vault** file. The separate key protects against someone at the **Unlocked** computer and against a read of the decrypted document; it is not a promise against software that can read this process's memory at will.
 - The Wallet Key sits in the same credential slots as the Vault Key (ADR-0005), so the **Master Password** or the **Recovery Key** yields both. On an ordinary unlock the app wipes the Wallet Key right away and keeps only the Vault Key. **Key Rotation** replaces both.
 - Once **Quick Unlock** lands (v1.1), it may release the Wallet Key only through a separate, biometry-gated Keychain / Windows Hello item. A plain "fingerprint OK" boolean is not enough.
 

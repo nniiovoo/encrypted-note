@@ -173,6 +173,9 @@ button.big {
   font-size: 14px;
   border-radius: 8px;
 }
+button.small {
+  padding: 3px 9px;
+}
 button.small .icon {
   width: 14px;
   height: 14px;
@@ -221,6 +224,11 @@ textarea::placeholder {
 textarea {
   resize: vertical;
 }
+/* A Hidden Field ticked to be removed. */
+input:disabled,
+textarea:disabled {
+  opacity: 0.45;
+}
 /* WebView2 (Windows) adds its own show-password eye: only Create Master Password may show. */
 input::-ms-reveal,
 input::-ms-clear {
@@ -251,6 +259,17 @@ textarea:focus-visible {
 .check input {
   margin: 0;
 }
+/* A pasted multi-line key, standing in for its one-line box. */
+.chip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 3px 3px 3px 8px;
+  border: 1px solid var(--input-border);
+  border-radius: 6px;
+  background: var(--fill);
+}
 /* A setting drawn as a row: text on the left, a switch on the right. */
 .switch-row {
   display: flex;
@@ -270,6 +289,13 @@ textarea:focus-visible {
   align-items: flex-start;
   gap: 5px;
   min-width: 0;
+}
+/* A Choice with a button beside it, level with the control (Clear all words). */
+.choice-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 8px 12px;
 }
 .segmented {
   display: inline-flex;
@@ -677,11 +703,18 @@ details.card ul {
   filter: none;
   background: var(--fill);
 }
-.nav kbd {
-  margin-left: auto;
+/* A shortcut, shown on the control it belongs to. */
+kbd {
   font: inherit;
   font-size: 12px;
   color: var(--tertiary);
+}
+button.primary kbd {
+  color: inherit;
+  opacity: 0.75;
+}
+.nav kbd {
+  margin-left: auto;
 }
 .sidebar .bottom {
   margin-top: auto;
@@ -705,10 +738,15 @@ details.card ul {
   background: var(--window);
   border-bottom: 1px solid var(--separator);
 }
+/* At the narrowest window (820px) only the search box gives way, so nothing overflows. */
+.toolbar-title,
+.toolbar > button {
+  flex: none;
+  white-space: nowrap;
+}
 .toolbar-title {
   display: flex;
   flex-direction: column;
-  min-width: 0;
   margin-right: auto;
 }
 .toolbar-title h1 {
@@ -722,7 +760,15 @@ details.card ul {
 }
 .search {
   position: relative;
-  width: min(260px, 32vw);
+  flex: 0 1 260px;
+  min-width: 120px;
+}
+.search kbd {
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  pointer-events: none;
 }
 .search .icon {
   position: absolute;
@@ -767,6 +813,29 @@ details.card ul {
   border-right: 1px solid var(--separator);
   overflow: auto;
 }
+/* Sort: the segmented control on one line with its label, a size smaller. */
+.list-pane > .choice {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  padding: 2px 2px 0 8px;
+  font-size: 12px;
+}
+.list-pane > .choice .label {
+  color: var(--muted);
+  font-weight: 400;
+}
+.list-pane > .choice label {
+  padding: 1px 10px;
+}
+/* A failed Copy from a row stays in view however far the list is scrolled. */
+.list-pane > .error {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 6px 8px;
+  background: var(--window);
+}
 .list {
   display: flex;
   flex-direction: column;
@@ -775,9 +844,29 @@ details.card ul {
   margin: 0;
   padding: 0;
 }
+.list > li {
+  position: relative;
+}
+/* API Keys sorted A to Z: a heading per service, and a line before the Notes without one. */
+.list-heading {
+  padding: 10px 8px 3px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.list-heading:first-child {
+  padding-top: 4px;
+}
+.list-gap {
+  margin: 8px 8px 4px;
+  border-top: 1px solid var(--separator);
+}
 .row {
   display: grid;
-  grid-template-columns: 30px 1fr;
+  grid-template-columns: 30px minmax(0, 1fr);
   column-gap: 10px;
   justify-items: start;
   width: 100%;
@@ -795,12 +884,38 @@ details.card ul {
   grid-row: span 2;
   align-self: center;
 }
+/* The row the arrow keys are on while typing in the search box: a ring, unlike the open row. */
+.row.marked {
+  background: var(--fill);
+  box-shadow: inset 0 0 0 2px var(--accent);
+}
 .row.on {
   background: var(--selection);
   color: #ffffff;
 }
+.row.on.marked {
+  box-shadow: inset 0 0 0 2px rgb(255 255 255 / 0.85);
+}
 .row.on .hint {
   color: rgb(255 255 255 / 0.78);
+}
+/* Copy straight from a row. A button beside the row button, seen on hover and keyboard focus. */
+.has-copy > .row {
+  padding-right: 40px;
+}
+.row-copy {
+  position: absolute;
+  top: 50%;
+  right: 6px;
+  transform: translateY(-50%);
+  opacity: 0;
+}
+li:hover > .row-copy,
+li:has(:focus-visible) > .row-copy {
+  opacity: 1;
+}
+.row.on + .row-copy {
+  color: #ffffff;
 }
 .row-title {
   display: flex;
@@ -809,10 +924,13 @@ details.card ul {
   max-width: 100%;
   font-weight: 600;
 }
+/* Two lines, so titles that differ only at the end can be told apart. */
 .row-title > span {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
 }
 .row .hint {
   max-width: 100%;
@@ -863,6 +981,7 @@ details.card ul {
   gap: 10px;
 }
 .tile {
+  position: relative;
   display: grid;
   grid-template-columns: auto 1fr;
   column-gap: 12px;
@@ -885,6 +1004,12 @@ details.card ul {
   color: var(--muted);
   font-size: 12px;
 }
+/* The digit that chooses the tile when the picker has the keyboard. */
+.tile kbd {
+  position: absolute;
+  top: 8px;
+  right: 10px;
+}
 .trash-row {
   display: flex;
   align-items: center;
@@ -896,11 +1021,20 @@ details.card ul {
   flex-direction: column;
   min-width: 0;
 }
-.trash-row .row-title {
-  display: block;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+/* The Trash list is itself the card (.rows clears a card's padding), so its rows bring their own
+   side padding: the part that opens a Note needs room for its focus ring. */
+.card.rows > .trash-row {
+  padding-left: 12px;
+  padding-right: 12px;
+}
+/* The part of a Trash row that opens the Note to read it. */
+.trash-row > .row {
+  flex: 1;
+  width: auto;
+  min-width: 0;
+  min-height: 0;
+  margin: -3px -6px;
+  padding: 3px 6px;
 }
 
 /* Kind icons */
@@ -959,6 +1093,10 @@ details.card ul {
   font-size: 20px;
   overflow-wrap: anywhere;
 }
+/* "Saved" after Save and add another: its line is there before its text, so nothing moves. */
+.detail-head [role="status"] {
+  min-height: 1.4em;
+}
 .star {
   color: var(--muted);
 }
@@ -974,7 +1112,8 @@ details.card ul {
 }
 .fields > div {
   display: flex;
-  gap: 16px;
+  flex-wrap: wrap;
+  gap: 4px 16px;
   padding: 11px 0;
 }
 .fields dt {
@@ -990,24 +1129,36 @@ details.card ul {
   padding-top: 3px;
   overflow-wrap: anywhere;
 }
+/* A Hidden Field: the dots give way to the buttons, whose line is the same whether the value is
+   shown or not, so Show and Hide never move. The shown value goes underneath. In a pane too
+   narrow for the buttons beside the label, the whole field goes under its label. */
 .fields dd.secret {
-  display: flex;
-  flex-wrap: wrap;
+  flex-basis: 330px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   gap: 8px 12px;
   padding-top: 0;
 }
-.secret > .dots {
-  flex: 1;
-}
-.secret > .value,
-.secret > .words {
-  flex: 1 1 100%;
-}
 .secret > .actions {
-  margin-left: auto;
+  justify-content: flex-end;
+  gap: 6px;
 }
+/* Show and Hide are the same button; it keeps one width. */
+.secret .toggle {
+  min-width: 74px;
+}
+.secret > .shown {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+/* Only whole dots: the ones that don't fit wrap out of sight. */
 .dots {
+  max-height: 1.4em;
+  overflow: hidden;
   color: var(--muted);
   letter-spacing: 0.15em;
 }
@@ -1083,6 +1234,11 @@ details.card ul {
   border-top: 1px solid var(--separator);
   color: var(--muted);
   font-size: 11px;
+}
+/* "Newer changes not backed up" goes to Settings; it sits in the line of text. */
+.status-line .link {
+  display: inline;
+  padding: 0;
 }
 .badge.warn {
   color: var(--warn);

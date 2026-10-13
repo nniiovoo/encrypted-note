@@ -13,13 +13,16 @@
 //!   `lock_on_app_switch` is on.
 //! * Wrong credential delays: attempts 1-3 have no delay; after the 3rd consecutive failure the
 //!   next attempt waits 1 s, then 2 s, 5 s, 10 s, and 30 s for every attempt after that.
-//!   A success resets the count. Nothing is ever erased.
+//!   A success resets the count. Nothing is ever erased. The app keeps the count across restarts
+//!   ([`Session::restore_failures`]).
 //! * Reveal: at most one shown Hidden Field. `Timed` expires after 30 s, `Accessible` after 20 s,
-//!   `Held` lasts until `end_reveal`. Any shown value is hidden on: lock, opening another Note,
-//!   `FocusLost`, or the Sharing Guard going up. While the guard is up or the app is Locked, a new
-//!   reveal is refused.
+//!   `Held` lasts until `end_reveal`, or 2 minutes if the release never arrives. Any shown value
+//!   is hidden on: lock, opening another Note, `FocusLost`, or the Sharing Guard going up. While
+//!   the guard is up or the app is Locked, a new reveal is refused. So is a 9th different field
+//!   within a minute: the screens never ask for that, so something else is asking.
 //! * Clipboard: a copy is cleared after 30 s, on lock, and on quit, but only if the clipboard's
-//!   change counter still equals the value right after our copy.
+//!   change counter still equals the value right after our copy. A lock caused by switching apps
+//!   (`lock_on_app_switch`) leaves the 30 s running, so the copy can still be pasted.
 //! * Backup reminder: due when the oldest change not yet in a Backup is 7+ days old.
 
 #![forbid(unsafe_code)]
@@ -29,6 +32,11 @@ pub type Millis = u64;
 
 pub const TIMED_REVEAL_MS: Millis = 30_000;
 pub const ACCESSIBLE_REVEAL_MS: Millis = 20_000;
+/// Backstop for a `Held` reveal whose release the screens never saw (e.g. a lost key-up).
+pub const HELD_REVEAL_MAX_MS: Millis = 120_000;
+/// At most [`MAX_FIELDS_PER_WINDOW`] different Hidden Fields may be shown within this long.
+pub const REVEAL_WINDOW_MS: Millis = 60_000;
+pub const MAX_FIELDS_PER_WINDOW: usize = 8;
 pub const CLIPBOARD_CLEAR_MS: Millis = 30_000;
 pub const BACKUP_REMINDER_MS: Millis = 7 * 24 * 60 * 60 * 1000;
 /// Idle choices offered in Settings; default 5.
@@ -76,7 +84,7 @@ pub struct Reveal {
     pub note_id: String,
     pub field: String,
     pub mode: RevealMode,
-    /// `None` for `Held`.
+    /// `None` for `Held` (which still ends after [`HELD_REVEAL_MAX_MS`]).
     pub expires_at: Option<Millis>,
 }
 
@@ -95,6 +103,8 @@ pub enum Effect {
 pub enum RevealRefused {
     Locked,
     SharingGuardUp,
+    /// Too many different Hidden Fields in a short time; try again in this many milliseconds.
+    TooMany(Millis),
 }
 
 /// Delays after the 4th, 5th, 6th, 7th and every later consecutive failure.
@@ -114,6 +124,11 @@ pub struct Session {
     failures: u32,
     last_failure_at: Millis,
     reveal: Option<Reveal>,
+    /// When a `Held` reveal is hidden even without `end_reveal`.
+    held_until: Option<Millis>,
+    /// (first shown at, note id, field) for each field shown within [`REVEAL_WINDOW_MS`]. Kept
+    /// across locks, so locking and unlocking again doesn't start a fresh allowance.
+    recently_shown: Vec<(Millis, String, String)>,
     sharing_guard_up: bool,
     clipboard: Option<PendingClear>,
 }
@@ -142,6 +157,8 @@ impl Session {
             failures: 0,
             last_failure_at: 0,
             reveal: None,
+            held_until: None,
+            recently_shown: Vec::new(),
             sharing_guard_up: false,
             clipboard: None,
         }
@@ -189,9 +206,10 @@ impl Session {
             return self.lock();
         }
         let mut effects = Vec::new();
+        let held_until = self.held_until;
         if self
             .reveal
-            .take_if(|reveal| reveal.expires_at.is_some_and(|at| now >= at))
+            .take_if(|reveal| reveal.expires_at.or(held_until).is_some_and(|at| now >= at))
             .is_some()
         {
             effects.push(Effect::HideReveal);
@@ -207,7 +225,13 @@ impl Session {
             OsEvent::Sleep | OsEvent::ScreenLocked | OsEvent::UserSwitched | OsEvent::Quit => {
                 self.lock()
             }
-            OsEvent::FocusLost if self.settings.lock_on_app_switch => self.lock(),
+            // Lock, but leave a pending clipboard clear on its 30 s timer (`tick` carries it out
+            // while Locked too): the owner most likely switched apps to paste what they copied.
+            OsEvent::FocusLost if self.settings.lock_on_app_switch => {
+                let mut effects = self.end_reveal();
+                effects.extend(self.last_activity.take().map(|_| Effect::Lock));
+                effects
+            }
             OsEvent::FocusLost => self.end_reveal(),
             OsEvent::FocusGained => Vec::new(),
         }
@@ -240,6 +264,12 @@ impl Session {
         self.failures = self.failures.saturating_add(1);
         self.last_failure_at = now;
     }
+    /// At startup: carry on from the failures counted before the app was closed, with the delay
+    /// they earned starting now. Without this, quitting and reopening buys three free attempts.
+    pub fn restore_failures(&mut self, failures: u32, now: Millis) {
+        self.failures = failures;
+        self.last_failure_at = now;
+    }
     pub fn failed_attempts(&self) -> u32 {
         self.failures
     }
@@ -267,11 +297,28 @@ impl Session {
         if self.sharing_guard_up {
             return Err(RevealRefused::SharingGuardUp);
         }
+        self.recently_shown
+            .retain(|(at, ..)| now < at.saturating_add(REVEAL_WINDOW_MS));
+        let shown_before = self
+            .recently_shown
+            .iter()
+            .any(|(_, n, f)| n == note_id && f == field);
+        if !shown_before {
+            if self.recently_shown.len() >= MAX_FIELDS_PER_WINDOW {
+                let oldest = self.recently_shown.iter().map(|(at, ..)| *at).min();
+                let free_at = oldest.unwrap_or(now).saturating_add(REVEAL_WINDOW_MS);
+                return Err(RevealRefused::TooMany(free_at.saturating_sub(now).max(1)));
+            }
+            self.recently_shown
+                .push((now, note_id.to_owned(), field.to_owned()));
+        }
         let expires_at = match mode {
             RevealMode::Timed => Some(now.saturating_add(TIMED_REVEAL_MS)),
             RevealMode::Accessible => Some(now.saturating_add(ACCESSIBLE_REVEAL_MS)),
             RevealMode::Held => None,
         };
+        self.held_until =
+            matches!(mode, RevealMode::Held).then(|| now.saturating_add(HELD_REVEAL_MAX_MS));
         self.reveal = Some(Reveal {
             note_id: note_id.to_owned(),
             field: field.to_owned(),
