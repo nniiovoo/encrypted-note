@@ -1,10 +1,11 @@
 //! Rules for the values of the visible fields that document schema 2 added (FORMAT.md
 //! section 8).
 //!
-//! Each rule is checked twice: when the owner supplies a value (create and update answer
-//! `NotesError::InvalidValue`, naming the field) and when a body is parsed (`Corrupt`). Fields
-//! that schema 1 already had carry no rule, because Vaults written before these rules existed
-//! must keep opening.
+//! Rules are checked when the owner supplies a value (create and update answer
+//! `NotesError::InvalidValue`, naming the field) and when a body is parsed (`Corrupt`). Reading
+//! keeps the original schema-2 rules so older Vaults still open, including values with Unicode
+//! line or paragraph separators. New or changed values must also exclude those separators.
+//! Fields that schema 1 already had carry no rule.
 
 use crate::{Kind, field};
 
@@ -20,22 +21,41 @@ pub const MAX_ENV_VAR_CHARS: usize = 128;
 /// * `purpose`: one line of at most [`MAX_PURPOSE_CHARS`] characters.
 /// * `key_id`, `url`, `derivation_path` and the `address` of a Seed Phrase: one line.
 ///
-/// "One line" means no control characters, which rules out line breaks and tabs.
+/// "One line" means no control characters, which rules out line breaks and tabs, and neither
+/// of the two Unicode characters that also end a line without being control characters: the
+/// line separator U+2028 and the paragraph separator U+2029.
 pub(crate) fn allows(kind: Kind, name: &str, value: &str) -> bool {
+    allows_with_line_rule(kind, name, value, is_one_line)
+}
+
+/// The original schema-2 rules, for stored values. The first build allowed U+2028 and U+2029
+/// in its one-line fields; those values must remain readable and must not be rewritten.
+pub(crate) fn allows_stored(kind: Kind, name: &str, value: &str) -> bool {
+    allows_with_line_rule(kind, name, value, |value| {
+        !value.chars().any(char::is_control)
+    })
+}
+
+fn allows_with_line_rule(kind: Kind, name: &str, value: &str, line_rule: fn(&str) -> bool) -> bool {
     match (kind, name) {
         (Kind::ApiKey, field::EXPIRES) => is_calendar_date(value),
         (Kind::ApiKey, field::ENV_VAR) => is_variable_name(value),
         (Kind::ApiKey | Kind::Login, field::PURPOSE) => {
-            is_one_line(value) && value.chars().count() <= MAX_PURPOSE_CHARS
+            line_rule(value) && value.chars().count() <= MAX_PURPOSE_CHARS
         }
         (Kind::ApiKey, field::KEY_ID | field::URL)
-        | (Kind::SeedPhrase, field::ADDRESS | field::DERIVATION_PATH) => is_one_line(value),
+        | (Kind::SeedPhrase, field::ADDRESS | field::DERIVATION_PATH) => line_rule(value),
         _ => true,
     }
 }
 
+/// No control character (Unicode category Cc), and neither U+2028 (line separator) nor U+2029
+/// (paragraph separator): those two are categories Zl and Zp, so `char::is_control` alone
+/// lets them through, and they break a line wherever the value is shown.
 fn is_one_line(value: &str) -> bool {
-    !value.chars().any(char::is_control)
+    !value
+        .chars()
+        .any(|c| c.is_control() || matches!(c, '\u{2028}' | '\u{2029}'))
 }
 
 /// `[A-Za-z_][A-Za-z0-9_]*`: the names every shell and most languages accept for a variable.
@@ -137,16 +157,26 @@ mod tests {
     }
 
     #[test]
-    fn one_line_means_no_control_characters() {
-        assert!(is_one_line(
-            "fake value with spaces, caf\u{e9} and \u{65e5}\u{672c}"
-        ));
+    fn one_line_means_no_control_characters_and_no_line_or_paragraph_separator() {
+        for good in [
+            "fake value with spaces, caf\u{e9} and \u{65e5}\u{672c}",
+            // The code points on either side of U+2028 and U+2029 don't end a line.
+            "before\u{2027}the pair",
+            "after\u{202a}the pair",
+        ] {
+            assert!(is_one_line(good), "{good:?}");
+        }
         for bad in [
             "two\nlines",
             "carriage\rreturn",
             "a\ttab",
             "escape\u{1b}[2J",
             "c1\u{85}",
+            // Not control characters, but they end a line all the same.
+            "line\u{2028}separator",
+            "paragraph\u{2029}separator",
+            "\u{2028}",
+            "ends with one\u{2029}",
         ] {
             assert!(!is_one_line(bad), "{bad:?}");
         }

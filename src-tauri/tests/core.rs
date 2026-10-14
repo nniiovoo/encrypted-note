@@ -50,6 +50,8 @@ struct Board {
     text: Option<String>,
     change_count: u64,
     clear_failures: u32,
+    /// How many of the next writes the clipboard refuses.
+    write_failures: u32,
 }
 
 struct FakeClipboard(Arc<Mutex<Board>>);
@@ -57,6 +59,16 @@ struct FakeClipboard(Arc<Mutex<Board>>);
 impl Clipboard for FakeClipboard {
     fn write(&mut self, text: &str) -> Result<u64, ApiError> {
         let mut board = self.0.lock().unwrap();
+        if board.write_failures > 0 {
+            // As the real one does: whatever was there is gone, and nothing of ours is left.
+            board.write_failures -= 1;
+            board.change_count += 1;
+            board.text = None;
+            return Err(ApiError {
+                code: "io",
+                message: "The clipboard didn't accept the copy. Try again.".to_owned(),
+            });
+        }
         board.change_count += 1;
         board.text = Some(text.to_owned());
         Ok(board.change_count)
@@ -80,11 +92,18 @@ struct App {
     ms: Arc<AtomicU64>,
     board: Arc<Mutex<Board>>,
     break_vault_on_next_wall_clock_read: Arc<Mutex<Option<PathBuf>>>,
+    activity_anywhere_supported: bool,
     temp: tempfile::TempDir,
 }
 
 impl App {
+    /// On a computer where the app can see input outside its own window (a Mac).
     fn new() -> App {
+        App::on_a_computer(true)
+    }
+
+    /// `activity_anywhere_supported`: whether the OS can say when input was last seen anywhere.
+    fn on_a_computer(activity_anywhere_supported: bool) -> App {
         let temp = tempfile::tempdir().unwrap();
         let (ms, board) = (
             Arc::new(AtomicU64::new(1_000)),
@@ -96,12 +115,14 @@ impl App {
             &ms,
             &board,
             &break_vault_on_next_wall_clock_read,
+            activity_anywhere_supported,
         );
         App {
             core,
             ms,
             board,
             break_vault_on_next_wall_clock_read,
+            activity_anywhere_supported,
             temp,
         }
     }
@@ -113,6 +134,7 @@ impl App {
             ms,
             board,
             break_vault_on_next_wall_clock_read,
+            activity_anywhere_supported,
             temp,
         } = self;
         drop(core);
@@ -121,12 +143,14 @@ impl App {
             &ms,
             &board,
             &break_vault_on_next_wall_clock_read,
+            activity_anywhere_supported,
         );
         App {
             core,
             ms,
             board,
             break_vault_on_next_wall_clock_read,
+            activity_anywhere_supported,
             temp,
         }
     }
@@ -165,6 +189,7 @@ fn start(
     ms: &Arc<AtomicU64>,
     board: &Arc<Mutex<Board>>,
     break_vault_on_next_wall_clock_read: &Arc<Mutex<Option<PathBuf>>>,
+    activity_anywhere_supported: bool,
 ) -> AppCore {
     AppCore::new(Config {
         data_dir: root.join("Vault.noindex"),
@@ -175,6 +200,7 @@ fn start(
             break_vault_on_next_wall_clock_read: break_vault_on_next_wall_clock_read.clone(),
         }),
         clipboard: Box::new(FakeClipboard(board.clone())),
+        activity_anywhere_supported,
     })
     .unwrap()
 }
@@ -276,12 +302,28 @@ fn a_backup_with(master_password: &str) -> (App, PathBuf) {
 }
 
 fn set_lock_on_app_switch(app: &mut App) {
-    app.core
-        .set_settings(SettingsInput {
-            idle_minutes: 5,
-            lock_on_app_switch: true,
-        })
-        .unwrap();
+    app.core.set_settings(lock_rule(5, true)).unwrap();
+}
+
+/// What the Settings screen has always sent: the lock rule alone. The newer settings are left
+/// out, which keeps them as they are.
+fn lock_rule(idle_minutes: u32, lock_on_app_switch: bool) -> SettingsInput {
+    SettingsInput {
+        idle_minutes,
+        lock_on_app_switch,
+        clipboard_clear_seconds: None,
+        count_activity_anywhere: None,
+    }
+}
+
+/// Settings as the screens send them: JSON, in which a setting may be left out.
+fn settings(value: Value) -> SettingsInput {
+    serde_json::from_value(value).unwrap()
+}
+
+/// True if the clipboard holds nothing and no clear is waiting for its time.
+fn nothing_copied(app: &App) -> bool {
+    app.clipboard().is_none() && app.core.app_status().clipboard_clear_in_ms.is_none()
 }
 
 // ---------- setup, unlock, lock ----------
@@ -1105,12 +1147,7 @@ fn auto_lock_after_the_chosen_idle_time_and_on_os_events() {
     assert_eq!(app.phase(), "locked");
 
     app.core.unlock(password(PASSWORD)).unwrap();
-    app.core
-        .set_settings(SettingsInput {
-            idle_minutes: 1,
-            lock_on_app_switch: true,
-        })
-        .unwrap();
+    app.core.set_settings(lock_rule(1, true)).unwrap();
     let settings = app.core.app_status().settings;
     assert_eq!(
         (settings.idle_minutes, settings.lock_on_app_switch),
@@ -1623,6 +1660,7 @@ fn status_has_the_shape_api_ts_expects() {
         "sharing_guard",
         "lock_in_ms",
         "clipboard_clear_in_ms",
+        "copies",
         "reveal",
         "failed_attempts",
         "retry_in_ms",
@@ -1639,7 +1677,14 @@ fn status_has_the_shape_api_ts_expects() {
     assert_eq!(keys, expected);
     assert_eq!(
         status["settings"],
-        json!({"idle_minutes": 5, "lock_on_app_switch": false, "seed_explainer_seen": false})
+        json!({
+            "idle_minutes": 5,
+            "lock_on_app_switch": false,
+            "seed_explainer_seen": false,
+            "clipboard_clear_seconds": 30,
+            "count_activity_anywhere": false,
+            "count_activity_anywhere_supported": true,
+        })
     );
     assert_eq!(
         status["backup"],
@@ -1647,6 +1692,7 @@ fn status_has_the_shape_api_ts_expects() {
     );
     assert_eq!(status["sharing_guard"], json!({"up": false, "apps": []}));
     assert_eq!(status["revision"], 0);
+    assert_eq!(status["copies"], 0);
     assert_eq!(status["purge_trash_failed"], false);
     assert_eq!(status["settings_unreadable"], false);
 }
@@ -2182,12 +2228,23 @@ fn wrong_password_delays_survive_a_restart() {
 fn an_unreadable_settings_file_means_the_strictest_lock_rules() {
     let mut app = App::new();
     unlocked(&mut app);
+    // Every setting at its most relaxed.
     app.core
         .set_settings(SettingsInput {
             idle_minutes: 30,
             lock_on_app_switch: false,
+            clipboard_clear_seconds: Some(60),
+            count_activity_anywhere: Some(true),
         })
         .unwrap();
+    let relaxed = app.core.app_status().settings;
+    assert_eq!(
+        (
+            relaxed.clipboard_clear_seconds,
+            relaxed.count_activity_anywhere
+        ),
+        (60, true)
+    );
     app.core.lock();
     std::fs::write(app.data_dir().join(store::SETTINGS_FILE), b"{ not json").unwrap();
 
@@ -2196,6 +2253,8 @@ fn an_unreadable_settings_file_means_the_strictest_lock_rules() {
     assert!(status.settings_unreadable);
     assert_eq!(status.settings.idle_minutes, 1);
     assert!(status.settings.lock_on_app_switch);
+    assert_eq!(status.settings.clipboard_clear_seconds, 30);
+    assert!(!status.settings.count_activity_anywhere);
 
     // No settings file at all is a first run: the ordinary defaults, and nothing to report.
     let fresh = App::new();
@@ -2203,6 +2262,75 @@ fn an_unreadable_settings_file_means_the_strictest_lock_rules() {
     assert!(!status.settings_unreadable);
     assert_eq!(status.settings.idle_minutes, 5);
     assert!(!status.settings.lock_on_app_switch);
+    assert_eq!(status.settings.clipboard_clear_seconds, 30);
+    assert!(!status.settings.count_activity_anywhere);
+}
+
+#[test]
+fn a_settings_file_from_before_the_newer_settings_is_read_with_their_defaults() {
+    let mut app = App::new();
+    unlocked(&mut app);
+    app.core.lock();
+    // What a build from before these two settings wrote: the lock rule and its own notes.
+    let older = json!({
+        "idle_minutes": 10,
+        "lock_on_app_switch": true,
+        "seed_explainer_seen": true,
+        "last_backup_at": null,
+        "oldest_unbacked_change_at": null,
+        "failed_attempts": 0,
+        "trash_expiry_seen_at": null,
+    });
+    let file = app.data_dir().join(store::SETTINGS_FILE);
+    std::fs::write(&file, older.to_string()).unwrap();
+
+    // It is not an unreadable file: the owner's lock rule is kept, the new settings start at
+    // their defaults.
+    let app = app.restart();
+    let status = app.core.app_status();
+    assert!(!status.settings_unreadable);
+    assert_eq!(
+        serde_json::to_value(status.settings).unwrap(),
+        json!({
+            "idle_minutes": 10,
+            "lock_on_app_switch": true,
+            "seed_explainer_seen": true,
+            "clipboard_clear_seconds": 30,
+            "count_activity_anywhere": false,
+            "count_activity_anywhere_supported": true,
+        })
+    );
+
+    // A file that can be read but holds a clipboard time that is neither choice: 30, like an
+    // idle time that is not one of the choices goes to the nearest one.
+    let odd = json!({
+        "idle_minutes": 7,
+        "lock_on_app_switch": false,
+        "clipboard_clear_seconds": 45,
+        "count_activity_anywhere": true,
+    });
+    std::fs::write(&file, odd.to_string()).unwrap();
+    let mut app = app.restart();
+    let status = app.core.app_status();
+    assert!(!status.settings_unreadable);
+    assert_eq!(
+        (
+            status.settings.idle_minutes,
+            status.settings.clipboard_clear_seconds,
+            status.settings.count_activity_anywhere
+        ),
+        (5, 30, true)
+    );
+    app.core.unlock(password(PASSWORD)).unwrap();
+    let id = app
+        .core
+        .create_note(
+            input("login", "Fake", json!({}), json!({"password": "fake-pass"})),
+            None,
+        )
+        .unwrap();
+    app.core.copy_field(&id, "password", None).unwrap();
+    assert_eq!(app.core.app_status().clipboard_clear_in_ms, Some(30_000));
 }
 
 #[test]
@@ -2423,4 +2551,1489 @@ fn an_edit_saved_without_changing_anything_is_not_saved_as_a_change() {
         .unwrap();
     assert!(app.core.app_status().backup.unbacked_changes);
     assert!(app.core.get_note(&id).unwrap().updated_at > updated_at);
+}
+
+#[test]
+fn an_api_key_is_created_and_edited_with_the_schema_2_fields() {
+    let mut app = App::new();
+    unlocked(&mut app);
+    let id = app
+        .core
+        .create_note(
+            input(
+                "api_key",
+                "Fake deploy key",
+                json!({
+                    "service": "svc.example.test",
+                    "key_id": "FAKEKEYID0001",
+                    "purpose": "Nightly fake uploads",
+                    "url": "https://console.example.test/keys",
+                    "expires": "2027-01-31",
+                    "env_var": "FAKE_DEPLOY_KEY",
+                }),
+                json!({"key": "fake-api-key-0000", "secret": "fake-api-secret-0000"}),
+            ),
+            None,
+        )
+        .unwrap();
+
+    // An edit: three values changed, one removed, two left out (kept); the secret replaced
+    // and the key left out (kept).
+    app.advance(5_000);
+    app.core
+        .update_note(
+            &id,
+            edit(
+                "Fake deploy key",
+                json!({
+                    "key_id": "FAKEKEYID0002",
+                    "expires": "2028-02-29",
+                    "env_var": "FAKE_DEPLOY_KEY_2",
+                    "purpose": "",
+                }),
+                json!({"secret": "fake-api-secret-0001"}),
+            ),
+            None,
+        )
+        .unwrap();
+    let expected = json!({
+        "service": "svc.example.test",
+        "key_id": "FAKEKEYID0002",
+        "url": "https://console.example.test/keys",
+        "expires": "2028-02-29",
+        "env_var": "FAKE_DEPLOY_KEY_2",
+    });
+    // Saved and read back, not only held in memory.
+    let mut app = app.restart();
+    app.core.unlock(password(PASSWORD)).unwrap();
+    let view = serde_json::to_value(app.core.get_note(&id).unwrap()).unwrap();
+    assert_eq!(view["visible"], expected);
+    assert_eq!(view["hidden"], json!([["key", true], ["secret", true]]));
+    assert_eq!(
+        app.core.show_field(&id, "key").unwrap().as_str(),
+        "fake-api-key-0000"
+    );
+    assert_eq!(
+        app.core.show_field(&id, "secret").unwrap().as_str(),
+        "fake-api-secret-0001"
+    );
+    let row =
+        serde_json::to_value(&app.core.list_notes(all(), "fakekeyid0002").unwrap()[0]).unwrap();
+    assert_eq!(row["expires"], "2028-02-29");
+    assert_eq!(row["has_hidden"], true);
+    // The edited variable name is the one a NAME=value copy uses.
+    app.core.copy_field_env(&id).unwrap();
+    assert_eq!(
+        app.clipboard().as_deref(),
+        Some("FAKE_DEPLOY_KEY_2=fake-api-key-0000")
+    );
+
+    // Both Hidden Fields cleared: the row has nothing left to copy.
+    app.core
+        .update_note(
+            &id,
+            edit(
+                "Fake deploy key",
+                json!({}),
+                json!({"key": "", "secret": ""}),
+            ),
+            None,
+        )
+        .unwrap();
+    let view = serde_json::to_value(app.core.get_note(&id).unwrap()).unwrap();
+    assert_eq!(view["visible"], expected);
+    assert_eq!(view["hidden"], json!([["key", false], ["secret", false]]));
+    let row = serde_json::to_value(&app.core.list_notes(all(), "").unwrap()[0]).unwrap();
+    assert_eq!(row["has_hidden"], false);
+    assert_eq!(code(app.core.copy_field_env(&id)), "not_found");
+}
+
+#[test]
+fn an_edit_that_breaks_the_rule_for_a_field_names_the_field_and_never_the_value() {
+    let mut app = App::new();
+    unlocked(&mut app);
+    let n = sample_notes(&mut app);
+    let long_purpose = "fake ".repeat(41);
+    // (Note, its title, field, a value that breaks the field's rule, what the Editor calls it)
+    let cases = [
+        (
+            &n.api,
+            "Fake API key",
+            "expires",
+            "2027-02-30",
+            "expiry date",
+        ),
+        (
+            &n.api,
+            "Fake API key",
+            "expires",
+            "31/01/2027",
+            "expiry date",
+        ),
+        (
+            &n.api,
+            "Fake API key",
+            "env_var",
+            "FAKE-DEPLOY KEY",
+            "variable name",
+        ),
+        (&n.api, "Fake API key", "env_var", "9FAKE", "variable name"),
+        (
+            &n.api,
+            "Fake API key",
+            "purpose",
+            "fake\npurpose",
+            "purpose",
+        ),
+        (
+            &n.api,
+            "Fake API key",
+            "url",
+            "console.example.test\n/keys",
+            "management URL",
+        ),
+        (&n.api, "Fake API key", "key_id", "FAKE\tKEYID", "key ID"),
+        (
+            &n.login,
+            "Fake login",
+            "purpose",
+            long_purpose.as_str(),
+            "purpose",
+        ),
+        (
+            &n.seed,
+            "Fake seed",
+            "address",
+            "fake\naddress",
+            "public address",
+        ),
+        (
+            &n.seed,
+            "Fake seed",
+            "derivation_path",
+            "m/44'\n/0'",
+            "derivation path",
+        ),
+    ];
+    let before: Vec<Value> = [&n.api, &n.login, &n.seed]
+        .map(|id| serde_json::to_value(app.core.get_note(id).unwrap()).unwrap())
+        .to_vec();
+    app.advance(5_000);
+    for (id, title, field, value, name) in cases {
+        let master_password = (title == "Fake seed").then(|| pw(PASSWORD));
+        let refused = app
+            .core
+            .update_note(
+                id,
+                edit(title, json!({ field: value }), json!({})),
+                master_password,
+            )
+            .unwrap_err();
+        assert_eq!(refused.code, "invalid_input", "{field}");
+        assert!(
+            refused.message.contains(name),
+            "{field}: {}",
+            refused.message
+        );
+        assert!(
+            !refused.message.contains(value),
+            "{field}: {}",
+            refused.message
+        );
+        // Plain words on one line: nothing of the value's shape got in either.
+        assert!(!refused.message.contains(['\n', '\t']), "{field}");
+    }
+    // Nothing was changed by any of them.
+    let after: Vec<Value> = [&n.api, &n.login, &n.seed]
+        .map(|id| serde_json::to_value(app.core.get_note(id).unwrap()).unwrap())
+        .to_vec();
+    assert_eq!(after, before);
+
+    // The same when a new Note is created.
+    let new = input(
+        "api_key",
+        "Fake new key",
+        json!({"service": "svc.example.test", "key_id": "FAKE\nKEYID"}),
+        json!({"key": "fake-api-key-0000"}),
+    );
+    let refused = app.core.create_note(new, None).unwrap_err();
+    assert_eq!(refused.code, "invalid_input");
+    assert!(refused.message.contains("key ID"), "{}", refused.message);
+    assert!(!refused.message.contains("KEYID"), "{}", refused.message);
+    assert_eq!(app.core.list_notes(all(), "").unwrap().len(), 5);
+}
+
+// ---------- key convenience: more ways to copy ----------
+
+/// A Text Note's body of four lines with mixed line endings, the third one empty.
+const BODY: &str = "fake first line\r\nfake second line\n\nfake fourth line\r\n";
+
+/// One Note of every Kind. The API Key has a variable name and no management URL.
+struct Samples {
+    login: String,
+    api: String,
+    text: String,
+    pk: String,
+    seed: String,
+}
+
+fn sample_notes(app: &mut App) -> Samples {
+    let core = &mut app.core;
+    Samples {
+        login: core
+            .create_note(
+                input(
+                    "login",
+                    "Fake login",
+                    json!({"website": "site.example.test", "username": "fake-user"}),
+                    json!({"password": "fake-login-pass"}),
+                ),
+                None,
+            )
+            .unwrap(),
+        api: core
+            .create_note(
+                input(
+                    "api_key",
+                    "Fake API key",
+                    json!({"service": "svc.example.test", "env_var": "FAKE_DEPLOY_KEY"}),
+                    json!({"key": "fake-api-key-0000"}),
+                ),
+                None,
+            )
+            .unwrap(),
+        text: core
+            .create_note(
+                input("text", "Fake text", json!({}), json!({ "body": BODY })),
+                None,
+            )
+            .unwrap(),
+        pk: core
+            .create_note(
+                input(
+                    "private_key",
+                    "Fake private key",
+                    json!({"chain": "evm", "address": "0xfake-address"}),
+                    json!({"key": "fake-private-key"}),
+                ),
+                Some(pw(PASSWORD)),
+            )
+            .unwrap(),
+        seed: core
+            .create_note(
+                input(
+                    "seed_phrase",
+                    "Fake seed",
+                    json!({"wallet_name": "Fake wallet"}),
+                    json!({"words": (["zoo"; 12].join(" ")), "passphrase": "fake-25th"}),
+                ),
+                Some(pw(PASSWORD)),
+            )
+            .unwrap(),
+    }
+}
+
+/// How many times anything was written to (or cleared from) the clipboard.
+fn clipboard_changes(app: &App) -> u64 {
+    app.board.lock().unwrap().change_count
+}
+
+#[test]
+fn a_visible_field_is_copied_and_cleared_like_a_hidden_one() {
+    let mut app = App::new();
+    unlocked(&mut app);
+    let n = sample_notes(&mut app);
+
+    app.core.copy_visible_field(&n.login, "username").unwrap();
+    assert_eq!(app.clipboard().as_deref(), Some("fake-user"));
+    assert_eq!(app.core.app_status().clipboard_clear_in_ms, Some(30_000));
+    app.advance(29_999);
+    app.core.tick();
+    assert_eq!(app.clipboard().as_deref(), Some("fake-user"));
+    app.advance(1);
+    app.core.tick();
+    assert!(nothing_copied(&app));
+
+    // A Wallet Kind's visible parts are readable while Unlocked, so copying one takes no
+    // Master Password.
+    app.core.copy_visible_field(&n.pk, "address").unwrap();
+    assert_eq!(app.clipboard().as_deref(), Some("0xfake-address"));
+    app.core.copy_visible_field(&n.seed, "wallet_name").unwrap();
+    assert_eq!(app.clipboard().as_deref(), Some("Fake wallet"));
+    app.core.copy_visible_field(&n.api, "service").unwrap();
+    assert_eq!(app.clipboard().as_deref(), Some("svc.example.test"));
+    // A Note in Trash, as with a Hidden Field.
+    app.core.trash_note(&n.login, None).unwrap();
+    app.core.copy_visible_field(&n.login, "website").unwrap();
+    assert_eq!(app.clipboard().as_deref(), Some("site.example.test"));
+
+    let before = clipboard_changes(&app);
+    // A Hidden Field is not copied this way, whatever its Kind.
+    for (id, field) in [
+        (&n.login, "password"),
+        (&n.api, "key"),
+        (&n.api, "secret"),
+        (&n.text, "body"),
+        (&n.pk, "key"),
+        (&n.seed, "words"),
+        (&n.seed, "passphrase"),
+    ] {
+        let refused = app.core.copy_visible_field(id, field).unwrap_err();
+        assert_eq!(refused.code, "invalid_input", "{field}");
+        assert!(
+            refused.message.contains("always visible"),
+            "{}",
+            refused.message
+        );
+    }
+    // Nor the word count, another Kind's field, the title, or a name that is none at all.
+    for (id, field) in [
+        (&n.seed, "word_count"),
+        (&n.login, "service"),
+        (&n.text, "website"),
+        (&n.login, "title"),
+        (&n.login, ""),
+    ] {
+        assert_eq!(
+            code(app.core.copy_visible_field(id, field)),
+            "invalid_input",
+            "{field:?}"
+        );
+    }
+    // A visible field with nothing in it gets the same answer as an empty Hidden Field.
+    let refused = app.core.copy_visible_field(&n.api, "url").unwrap_err();
+    assert_eq!(
+        (refused.code, refused.message.as_str()),
+        ("not_found", "That field is empty.")
+    );
+    assert_eq!(
+        code(app.core.copy_field(&n.api, "secret", None)),
+        "not_found"
+    );
+    let no_such_note = "0".repeat(32);
+    assert_eq!(
+        code(app.core.copy_visible_field(&no_such_note, "username")),
+        "not_found"
+    );
+    // Refused while the Sharing Guard is up.
+    app.core.guard_update(&zoom());
+    assert_eq!(
+        code(app.core.copy_visible_field(&n.pk, "address")),
+        "sharing_guard_up"
+    );
+    app.core.guard_update(&[]);
+    // None of the refusals touched the clipboard.
+    assert_eq!(clipboard_changes(&app), before);
+    assert_eq!(app.clipboard().as_deref(), Some("site.example.test"));
+
+    // Refused while Locked.
+    app.core.lock();
+    assert_eq!(
+        code(app.core.copy_visible_field(&n.pk, "address")),
+        "locked"
+    );
+    assert!(nothing_copied(&app));
+}
+
+#[test]
+fn one_line_of_a_hidden_field_is_copied_without_its_line_ending() {
+    let mut app = App::new();
+    unlocked(&mut app);
+    let n = sample_notes(&mut app);
+
+    // Lines are counted from 0 over every line, the empty one included.
+    for (line, expected) in [
+        (0, "fake first line"),
+        (1, "fake second line"),
+        (3, "fake fourth line"),
+    ] {
+        app.core.copy_field_line(&n.text, "body", line).unwrap();
+        assert_eq!(app.clipboard().as_deref(), Some(expected), "line {line}");
+        assert_eq!(app.core.app_status().clipboard_clear_in_ms, Some(30_000));
+    }
+    // Line 0 of a value with one line is the whole value.
+    app.core.copy_field_line(&n.login, "password", 0).unwrap();
+    assert_eq!(app.clipboard().as_deref(), Some("fake-login-pass"));
+    // The lines go to the clipboard and nowhere else.
+    let status = serde_json::to_string(&app.core.app_status()).unwrap();
+    assert!(!status.contains("fake first line") && !status.contains("fake-login-pass"));
+    app.advance(29_999);
+    app.core.tick();
+    assert_eq!(app.clipboard().as_deref(), Some("fake-login-pass"));
+    app.advance(1);
+    app.core.tick();
+    assert!(nothing_copied(&app));
+
+    // An empty line, and the empty piece after the last line ending.
+    for line in [2, 4] {
+        let refused = app.core.copy_field_line(&n.text, "body", line).unwrap_err();
+        assert_eq!(
+            (refused.code, refused.message.as_str()),
+            ("not_found", "That line is empty."),
+            "line {line}"
+        );
+    }
+    // Past the end.
+    for line in [5, 6, usize::MAX] {
+        let refused = app.core.copy_field_line(&n.text, "body", line).unwrap_err();
+        assert_eq!(refused.code, "not_found", "line {line}");
+        assert!(
+            refused.message.contains("isn't there"),
+            "{}",
+            refused.message
+        );
+    }
+    assert_eq!(
+        code(app.core.copy_field_line(&n.login, "password", 1)),
+        "not_found"
+    );
+    // Wallet Kinds are copied whole and with the Master Password, never by the line.
+    for (id, field) in [(&n.pk, "key"), (&n.seed, "words"), (&n.seed, "passphrase")] {
+        let refused = app.core.copy_field_line(id, field, 0).unwrap_err();
+        assert_eq!(refused.code, "invalid_input", "{field}");
+        assert!(
+            refused.message.contains("copied whole"),
+            "{}",
+            refused.message
+        );
+    }
+    // A field the Kind doesn't have, a visible one, and a Hidden Field with no value.
+    assert_eq!(
+        code(app.core.copy_field_line(&n.text, "password", 0)),
+        "invalid_input"
+    );
+    assert_eq!(
+        code(app.core.copy_field_line(&n.login, "username", 0)),
+        "invalid_input"
+    );
+    assert_eq!(
+        code(app.core.copy_field_line(&n.api, "secret", 0)),
+        "not_found"
+    );
+    assert!(nothing_copied(&app));
+
+    app.core.guard_update(&zoom());
+    assert_eq!(
+        code(app.core.copy_field_line(&n.text, "body", 0)),
+        "sharing_guard_up"
+    );
+    app.core.guard_update(&[]);
+    assert!(nothing_copied(&app));
+    app.core.lock();
+    assert_eq!(code(app.core.copy_field_line(&n.text, "body", 0)), "locked");
+    assert!(nothing_copied(&app));
+}
+
+#[test]
+fn an_api_key_is_copied_as_a_name_equals_value_line() {
+    let mut app = App::new();
+    unlocked(&mut app);
+    let api_key = |app: &mut App, visible: Value, hidden: Value| {
+        app.core
+            .create_note(input("api_key", "Fake API key", visible, hidden), None)
+            .unwrap()
+    };
+    let named = json!({"service": "svc.example.test", "env_var": "FAKE_DEPLOY_KEY"});
+
+    // (the key, the line that is copied)
+    let copied = [
+        // Only letters, digits and _ @ % + = : , . / - : written as it is.
+        ("fake-key_0000", "FAKE_DEPLOY_KEY=fake-key_0000"),
+        ("Fake09_@%+=:,./-", "FAKE_DEPLOY_KEY=Fake09_@%+=:,./-"),
+        // Anything else on one line: inside single quotes.
+        (
+            "fake key with spaces",
+            "FAKE_DEPLOY_KEY='fake key with spaces'",
+        ),
+        (
+            "fake$HOME;`x`\"y\"\\z*",
+            "FAKE_DEPLOY_KEY='fake$HOME;`x`\"y\"\\z*'",
+        ),
+        ("fake#key", "FAKE_DEPLOY_KEY='fake#key'"),
+        ("fake~key!", "FAKE_DEPLOY_KEY='fake~key!'"),
+        ("fake\ttab", "FAKE_DEPLOY_KEY='fake\ttab'"),
+        ("fak\u{e9}-key", "FAKE_DEPLOY_KEY='fak\u{e9}-key'"),
+    ];
+    for (key, line) in copied {
+        let id = api_key(&mut app, named.clone(), json!({ "key": key }));
+        app.core.copy_field_env(&id).unwrap();
+        assert_eq!(app.clipboard().as_deref(), Some(line));
+        assert_eq!(app.core.app_status().clipboard_clear_in_ms, Some(30_000));
+    }
+    app.advance(30_000);
+    app.core.tick();
+    assert!(nothing_copied(&app));
+
+    // A key with a single quote or a line break can't be written on one quoted line.
+    for key in [
+        "fake'key",
+        "fake\nkey",
+        "fake line one\r\nfake line two\r\n",
+        "fake\u{2028}key",
+    ] {
+        let id = api_key(&mut app, named.clone(), json!({ "key": key }));
+        let refused = app.core.copy_field_env(&id).unwrap_err();
+        assert_eq!(refused.code, "invalid_input", "{key:?}");
+        assert!(
+            refused.message.contains("NAME=value"),
+            "{}",
+            refused.message
+        );
+        assert!(!refused.message.contains(key), "{}", refused.message);
+        assert!(!refused.message.contains("fake"), "{}", refused.message);
+        // The key by itself can still be copied.
+        app.core.copy_field(&id, "key", None).unwrap();
+        assert_eq!(app.clipboard().as_deref(), Some(key));
+        app.core.lock();
+        app.core.unlock(password(PASSWORD)).unwrap();
+        assert!(nothing_copied(&app));
+    }
+
+    // No variable name, no key, another Kind, no such Note.
+    let unnamed = api_key(
+        &mut app,
+        json!({"service": "svc.example.test"}),
+        json!({"key": "fake-key_0000"}),
+    );
+    let refused = app.core.copy_field_env(&unnamed).unwrap_err();
+    assert_eq!(refused.code, "invalid_input");
+    assert!(
+        refused.message.contains("variable name"),
+        "{}",
+        refused.message
+    );
+    let no_key = api_key(&mut app, named.clone(), json!({"secret": "fake-secret"}));
+    let refused = app.core.copy_field_env(&no_key).unwrap_err();
+    assert_eq!(
+        (refused.code, refused.message.as_str()),
+        ("not_found", "That field is empty.")
+    );
+    let login = app
+        .core
+        .create_note(
+            input("login", "Fake", json!({}), json!({"password": "fake-pass"})),
+            None,
+        )
+        .unwrap();
+    assert_eq!(code(app.core.copy_field_env(&login)), "invalid_input");
+    assert_eq!(code(app.core.copy_field_env(&"0".repeat(32))), "not_found");
+    assert!(nothing_copied(&app));
+
+    let id = api_key(&mut app, named, json!({"key": "fake-key_0000"}));
+    app.core.guard_update(&zoom());
+    assert_eq!(code(app.core.copy_field_env(&id)), "sharing_guard_up");
+    app.core.guard_update(&[]);
+    assert!(nothing_copied(&app));
+    app.core.lock();
+    assert_eq!(code(app.core.copy_field_env(&id)), "locked");
+    assert!(nothing_copied(&app));
+}
+
+#[test]
+fn text_is_added_to_the_end_of_a_text_note_without_showing_it() {
+    let mut app = App::new();
+    unlocked(&mut app);
+    let text = app
+        .core
+        .create_note(
+            input(
+                "text",
+                "Fake log",
+                json!({}),
+                json!({"body": "fake line one"}),
+            ),
+            None,
+        )
+        .unwrap();
+    let empty = app
+        .core
+        .create_note(input("text", "Fake empty", json!({}), json!({})), None)
+        .unwrap();
+    let login = app
+        .core
+        .create_note(
+            input("login", "Fake", json!({}), json!({"password": "fake-pass"})),
+            None,
+        )
+        .unwrap();
+    let backup = app.temp.path().join("fake-backup.enote");
+    app.core.set_backup_destination(backup).unwrap();
+    app.core.write_backup().unwrap();
+    let created = app.core.get_note(&text).unwrap().updated_at;
+
+    app.advance(5_000);
+    app.core
+        .append_text(&text, pw("fake line two\nfake line three"))
+        .unwrap();
+    app.core.append_text(&empty, pw("fake only line")).unwrap();
+    // Nothing was shown or copied to do it, and it was saved as a change.
+    let status = app.core.app_status();
+    assert_eq!(status.reveal, None);
+    assert!(nothing_copied(&app));
+    assert!(status.backup.unbacked_changes);
+    assert!(app.core.get_note(&text).unwrap().updated_at > created);
+
+    // Another Kind has no body to add to; an empty addition is nothing to add.
+    assert_eq!(
+        code(app.core.append_text(&login, pw("fake line"))),
+        "invalid_input"
+    );
+    let refused = app.core.append_text(&text, pw("")).unwrap_err();
+    assert_eq!(
+        (refused.code, refused.message.as_str()),
+        ("invalid_input", "Type the text to add first.")
+    );
+    assert_eq!(
+        code(app.core.append_text(&"0".repeat(32), pw("fake line"))),
+        "not_found"
+    );
+
+    let mut app = app.restart();
+    assert_eq!(code(app.core.append_text(&text, pw("fake line"))), "locked");
+    app.core.unlock(password(PASSWORD)).unwrap();
+    assert_eq!(
+        app.core.show_field(&text, "body").unwrap().as_str(),
+        "fake line one\nfake line two\nfake line three"
+    );
+    assert_eq!(
+        app.core.show_field(&empty, "body").unwrap().as_str(),
+        "fake only line"
+    );
+    assert_eq!(
+        app.core.show_field(&login, "password").unwrap().as_str(),
+        "fake-pass"
+    );
+}
+
+#[test]
+fn a_wallet_kind_value_is_shown_and_copied_with_one_master_password_entry() {
+    let mut app = App::new();
+    unlocked(&mut app);
+    // The longer clipboard time is chosen; a Wallet Kind copy still gets 30 s.
+    app.core
+        .set_settings(settings(json!({
+            "idle_minutes": 5,
+            "lock_on_app_switch": false,
+            "clipboard_clear_seconds": 60,
+        })))
+        .unwrap();
+    let n = sample_notes(&mut app);
+
+    let shown = app
+        .core
+        .show_and_copy_wallet_field(&n.pk, "key", pw(PASSWORD))
+        .unwrap();
+    assert_eq!(shown.as_str(), "fake-private-key");
+    assert_eq!(app.clipboard().as_deref(), Some("fake-private-key"));
+    let status = app.core.app_status();
+    assert_eq!(status.clipboard_clear_in_ms, Some(30_000));
+    assert_eq!(
+        serde_json::to_value(status.reveal).unwrap(),
+        json!({
+            "note_id": n.pk,
+            "field": "key",
+            "expires_in_ms": 20_000,
+            "can_extend": true,
+            "extensions_left": 3,
+        })
+    );
+    // A timed reveal, never a held one: it ends by itself after 20 s, the copy after 30.
+    app.advance(19_999);
+    app.core.tick();
+    assert!(app.core.app_status().reveal.is_some());
+    app.advance(1);
+    app.core.tick();
+    assert_eq!(app.core.app_status().reveal, None);
+    assert_eq!(app.clipboard().as_deref(), Some("fake-private-key"));
+    app.advance(10_000);
+    app.core.tick();
+    assert!(nothing_copied(&app));
+
+    // The Wallet Key was used for that one action and dropped: the next one asks again.
+    assert_eq!(
+        code(app.core.copy_field(&n.pk, "key", None)),
+        "invalid_input"
+    );
+    assert!(nothing_copied(&app));
+
+    // A wrong password neither shows nor copies, and is one wrong attempt, not two.
+    let refused = app
+        .core
+        .show_and_copy_wallet_field(&n.pk, "key", pw(WRONG_PASSWORD))
+        .unwrap_err();
+    assert_eq!(refused.code, "wrong_credential");
+    let status = app.core.app_status();
+    assert_eq!(status.reveal, None);
+    assert_eq!(status.failed_attempts, 1);
+    assert!(nothing_copied(&app));
+
+    // Only Wallet Kinds, and only their Hidden Fields.
+    assert_eq!(
+        code(
+            app.core
+                .show_and_copy_wallet_field(&n.text, "body", pw(PASSWORD))
+        ),
+        "invalid_input"
+    );
+    assert_eq!(
+        code(
+            app.core
+                .show_and_copy_wallet_field(&n.pk, "address", pw(PASSWORD))
+        ),
+        "invalid_input"
+    );
+    assert_eq!(app.core.app_status().reveal, None);
+    assert!(nothing_copied(&app));
+
+    // The Sharing Guard blocks it like any Show or Copy.
+    app.core.guard_update(&zoom());
+    assert_eq!(
+        code(
+            app.core
+                .show_and_copy_wallet_field(&n.pk, "key", pw(PASSWORD))
+        ),
+        "sharing_guard_up"
+    );
+    app.core.guard_update(&[]);
+    assert_eq!(app.core.app_status().reveal, None);
+    assert!(nothing_copied(&app));
+
+    // A Seed Phrase the same way; then Locked.
+    let words = app
+        .core
+        .show_and_copy_wallet_field(&n.seed, "words", pw(PASSWORD))
+        .unwrap();
+    assert_eq!(app.clipboard().as_deref(), Some(words.as_str()));
+    app.core.lock();
+    assert!(nothing_copied(&app));
+    assert_eq!(
+        code(
+            app.core
+                .show_and_copy_wallet_field(&n.pk, "key", pw(PASSWORD))
+        ),
+        "locked"
+    );
+}
+
+#[test]
+fn a_refused_reveal_leaves_nothing_on_the_clipboard() {
+    let mut app = App::new();
+    unlocked(&mut app);
+    let n = sample_notes(&mut app);
+    let logins: Vec<String> = (0..8)
+        .map(|i| {
+            let note = input(
+                "login",
+                &format!("Fake {i}"),
+                json!({}),
+                json!({"password": format!("fake-value-{i}")}),
+            );
+            app.core.create_note(note, None).unwrap()
+        })
+        .collect();
+
+    // Seven different Hidden Fields are shown; the Private Key is the eighth, and counts.
+    for id in &logins[..7] {
+        app.core.show_field(id, "password").unwrap();
+        app.advance(1_000);
+    }
+    app.core
+        .show_and_copy_wallet_field(&n.pk, "key", pw(PASSWORD))
+        .unwrap();
+    assert_eq!(
+        code(app.core.show_field(&logins[7], "password")),
+        "too_many"
+    );
+    // Showing the same one again costs nothing.
+    app.core
+        .show_and_copy_wallet_field(&n.pk, "key", pw(PASSWORD))
+        .unwrap();
+
+    // Locking empties the clipboard but hands out no new allowance: a ninth field is refused,
+    // and with the reveal refused nothing is copied either.
+    app.core.lock();
+    app.core.unlock(password(PASSWORD)).unwrap();
+    assert!(nothing_copied(&app));
+    let refused = app
+        .core
+        .show_and_copy_wallet_field(&n.seed, "words", pw(PASSWORD))
+        .unwrap_err();
+    assert_eq!(refused.code, "too_many");
+    assert_eq!(app.core.app_status().reveal, None);
+    assert!(nothing_copied(&app));
+
+    // Once the minute has passed it is shown and copied.
+    app.advance(60_000);
+    app.core.activity();
+    app.core
+        .show_and_copy_wallet_field(&n.seed, "words", pw(PASSWORD))
+        .unwrap();
+    assert_eq!(
+        app.clipboard().as_deref(),
+        Some(["zoo"; 12].join(" ").as_str())
+    );
+}
+
+#[test]
+fn a_wallet_kind_value_is_not_handed_over_when_the_clipboard_refuses_the_copy() {
+    let mut app = App::new();
+    unlocked(&mut app);
+    let n = sample_notes(&mut app);
+
+    app.board.lock().unwrap().write_failures = 1;
+    let refused = app
+        .core
+        .show_and_copy_wallet_field(&n.pk, "key", pw(PASSWORD))
+        .unwrap_err();
+    assert_eq!(refused.code, "io");
+    assert!(!refused.message.contains("fake-private-key"));
+    // Neither half happened: nothing is shown, nothing is copied, no clear is waiting.
+    let status = app.core.app_status();
+    assert_eq!(status.reveal, None);
+    assert!(nothing_copied(&app));
+    assert_eq!(code(app.core.extend_reveal()), "not_found");
+    // The Master Password was right, so this is not a wrong attempt, and the next try works.
+    assert_eq!(status.failed_attempts, 0);
+    let shown = app
+        .core
+        .show_and_copy_wallet_field(&n.pk, "key", pw(PASSWORD))
+        .unwrap();
+    assert_eq!(shown.as_str(), "fake-private-key");
+    assert_eq!(app.clipboard().as_deref(), Some("fake-private-key"));
+    assert!(app.core.app_status().reveal.is_some());
+}
+
+// ---------- key convenience: more time, settings, previews ----------
+
+#[test]
+fn a_shown_value_can_be_given_more_time() {
+    let mut app = App::new();
+    unlocked(&mut app);
+    let n = sample_notes(&mut app);
+
+    // Nothing is shown yet.
+    assert_eq!(code(app.core.extend_reveal()), "not_found");
+
+    // An ordinary Kind: another 30 s from the moment of asking, as often as asked.
+    app.core.show_field(&n.login, "password").unwrap();
+    assert_eq!(
+        serde_json::to_value(app.core.app_status().reveal).unwrap(),
+        json!({
+            "note_id": n.login,
+            "field": "password",
+            "expires_in_ms": 30_000,
+            "can_extend": true,
+            "extensions_left": null,
+        })
+    );
+    for _ in 0..6 {
+        app.advance(25_000);
+        app.core.activity();
+        app.core.extend_reveal().unwrap();
+        let reveal = app.core.app_status().reveal.unwrap();
+        assert_eq!(
+            (reveal.expires_in_ms, reveal.can_extend),
+            (Some(30_000), true)
+        );
+    }
+    app.advance(29_999);
+    app.core.tick();
+    assert!(app.core.app_status().reveal.is_some());
+    app.advance(1);
+    app.core.tick();
+    assert_eq!(app.core.app_status().reveal, None);
+    // Once it has ended, asking for more time does not bring it back.
+    let refused = app.core.extend_reveal().unwrap_err();
+    assert_eq!(refused.code, "not_found");
+    assert_eq!(app.core.app_status().reveal, None);
+
+    // A Wallet Kind value shown for 20 s: another 20 s, three times.
+    app.core.activity();
+    app.core
+        .show_wallet_field(&n.pk, "key", pw(PASSWORD), ShowMode::Accessible)
+        .unwrap();
+    for left in [2, 1, 0] {
+        app.advance(15_000);
+        app.core.extend_reveal().unwrap();
+        let reveal = app.core.app_status().reveal.unwrap();
+        assert_eq!(
+            (
+                reveal.expires_in_ms,
+                reveal.extensions_left,
+                reveal.can_extend
+            ),
+            (Some(20_000), Some(left), left > 0)
+        );
+    }
+    app.advance(15_000);
+    let refused = app.core.extend_reveal().unwrap_err();
+    assert_eq!(refused.code, "invalid_input");
+    assert!(
+        refused.message.contains("Master Password"),
+        "{}",
+        refused.message
+    );
+    // It still ends 20 s after the third time.
+    assert_eq!(
+        app.core.app_status().reveal.unwrap().expires_in_ms,
+        Some(5_000)
+    );
+    app.advance(5_000);
+    app.core.tick();
+    assert_eq!(app.core.app_status().reveal, None);
+    // Shown again with the Master Password, it can be given more time again.
+    app.core
+        .show_and_copy_wallet_field(&n.pk, "key", pw(PASSWORD))
+        .unwrap();
+    assert_eq!(
+        app.core.app_status().reveal.unwrap().extensions_left,
+        Some(3)
+    );
+    app.core.extend_reveal().unwrap();
+    app.core.hide_field();
+    assert_eq!(code(app.core.extend_reveal()), "not_found");
+
+    // A value shown while held has no timer to extend, and stays as it was.
+    app.core
+        .show_wallet_field(&n.pk, "key", pw(PASSWORD), ShowMode::Held)
+        .unwrap();
+    assert!(!app.core.app_status().reveal.unwrap().can_extend);
+    assert_eq!(code(app.core.extend_reveal()), "invalid_input");
+    assert_eq!(app.core.app_status().reveal.unwrap().expires_in_ms, None);
+
+    // Hidden by the Sharing Guard, or by a lock: not brought back.
+    app.core.guard_update(&zoom());
+    assert_eq!(code(app.core.extend_reveal()), "sharing_guard_up");
+    app.core.guard_update(&[]);
+    assert_eq!(code(app.core.extend_reveal()), "not_found");
+    app.core.show_field(&n.login, "password").unwrap();
+    app.core.lock();
+    assert_eq!(code(app.core.extend_reveal()), "locked");
+    app.core.unlock(password(PASSWORD)).unwrap();
+    assert_eq!(code(app.core.extend_reveal()), "not_found");
+    assert_eq!(app.core.app_status().reveal, None);
+}
+
+#[test]
+fn copies_stay_for_the_chosen_30_or_60_seconds_and_wallet_kind_values_always_for_30() {
+    let mut app = App::new();
+    unlocked(&mut app);
+    let n = sample_notes(&mut app);
+    let clear_in = |app: &App| app.core.app_status().clipboard_clear_in_ms;
+    let chosen = |app: &App| app.core.app_status().settings.clipboard_clear_seconds;
+    assert_eq!(chosen(&app), 30);
+
+    app.core
+        .set_settings(settings(json!({
+            "idle_minutes": 5,
+            "lock_on_app_switch": false,
+            "clipboard_clear_seconds": 60,
+        })))
+        .unwrap();
+    assert_eq!(chosen(&app), 60);
+
+    // Every ordinary copy: a Hidden Field, a visible field, one line, NAME=value.
+    app.core.copy_field(&n.login, "password", None).unwrap();
+    assert_eq!(clear_in(&app), Some(60_000));
+    app.advance(59_999);
+    app.core.tick();
+    assert_eq!(app.clipboard().as_deref(), Some("fake-login-pass"));
+    app.advance(1);
+    app.core.tick();
+    assert!(nothing_copied(&app));
+    app.core.copy_visible_field(&n.login, "username").unwrap();
+    assert_eq!(clear_in(&app), Some(60_000));
+    app.core.copy_field_line(&n.text, "body", 1).unwrap();
+    assert_eq!(clear_in(&app), Some(60_000));
+    app.core.copy_field_env(&n.api).unwrap();
+    assert_eq!(clear_in(&app), Some(60_000));
+    // A Wallet Kind's visible field is an ordinary copy too.
+    app.core.copy_visible_field(&n.pk, "address").unwrap();
+    assert_eq!(clear_in(&app), Some(60_000));
+
+    // A Wallet Kind value: 30 s, by either way of copying it.
+    app.core
+        .copy_field(&n.pk, "key", Some(pw(PASSWORD)))
+        .unwrap();
+    assert_eq!(clear_in(&app), Some(30_000));
+    app.advance(29_999);
+    app.core.tick();
+    assert_eq!(app.clipboard().as_deref(), Some("fake-private-key"));
+    app.advance(1);
+    app.core.tick();
+    assert!(nothing_copied(&app));
+    app.core
+        .show_and_copy_wallet_field(&n.seed, "passphrase", pw(PASSWORD))
+        .unwrap();
+    assert_eq!(clear_in(&app), Some(30_000));
+    app.core.hide_field();
+
+    // The lock rule sent alone, as the Settings screen has always sent it, keeps the choice.
+    app.core
+        .set_settings(settings(
+            json!({"idle_minutes": 10, "lock_on_app_switch": false}),
+        ))
+        .unwrap();
+    let view = app.core.app_status().settings;
+    assert_eq!((view.idle_minutes, view.clipboard_clear_seconds), (10, 60));
+
+    // The choice survives a restart.
+    app.core.lock();
+    let mut app = app.restart();
+    assert_eq!(chosen(&app), 60);
+    app.core.unlock(password(PASSWORD)).unwrap();
+
+    // Anything that is not one of the two choices becomes 30.
+    for other in [0, 45, 61, 3_600] {
+        app.core
+            .set_settings(settings(json!({
+                "idle_minutes": 10,
+                "lock_on_app_switch": false,
+                "clipboard_clear_seconds": 60,
+            })))
+            .unwrap();
+        app.core
+            .set_settings(settings(json!({
+                "idle_minutes": 10,
+                "lock_on_app_switch": false,
+                "clipboard_clear_seconds": other,
+            })))
+            .unwrap();
+        assert_eq!(chosen(&app), 30, "{other}");
+    }
+    app.core.copy_field(&n.login, "password", None).unwrap();
+    assert_eq!(clear_in(&app), Some(30_000));
+}
+
+#[test]
+fn the_status_counts_each_copy_and_a_clear_that_is_tried_again_is_not_one() {
+    let mut app = App::new();
+    unlocked(&mut app);
+    app.core
+        .set_settings(settings(json!({
+            "idle_minutes": 5,
+            "lock_on_app_switch": false,
+            "clipboard_clear_seconds": 60,
+        })))
+        .unwrap();
+    let n = sample_notes(&mut app);
+    // The copies so far, and the milliseconds until the clipboard is cleared.
+    let seen = |app: &App| {
+        let status = app.core.app_status();
+        (status.copies, status.clipboard_clear_in_ms)
+    };
+    assert_eq!(seen(&app), (0, None));
+
+    app.core.copy_visible_field(&n.login, "username").unwrap();
+    assert_eq!(seen(&app), (1, Some(60_000)));
+    // A Wallet Kind value copied while that one waits has less time than is left on it, and
+    // is a copy all the same: the time left alone would not say so.
+    app.advance(10_000);
+    app.core
+        .copy_field(&n.pk, "key", Some(pw(PASSWORD)))
+        .unwrap();
+    assert_eq!(seen(&app), (2, Some(30_000)));
+    // So is the same value copied once more in the same moment, with the very same time.
+    app.core
+        .copy_field(&n.pk, "key", Some(pw(PASSWORD)))
+        .unwrap();
+    assert_eq!(seen(&app), (3, Some(30_000)));
+
+    // A copy that was refused is not one: no Master Password, or the clipboard said no.
+    assert_eq!(
+        code(app.core.copy_field(&n.pk, "key", None)),
+        "invalid_input"
+    );
+    app.board.lock().unwrap().write_failures = 1;
+    assert_eq!(code(app.core.copy_field(&n.login, "password", None)), "io");
+    assert_eq!(seen(&app).0, 3);
+
+    // A clear that has to be tried again has time left once more, and is not a copy.
+    app.core.copy_field(&n.login, "password", None).unwrap();
+    assert_eq!(seen(&app), (4, Some(60_000)));
+    app.board.lock().unwrap().clear_failures = 2;
+    app.advance(60_000);
+    app.core.tick();
+    assert_eq!(seen(&app), (4, Some(250)));
+    app.advance(100);
+    assert_eq!(seen(&app), (4, Some(150)));
+    app.advance(150);
+    app.core.tick();
+    assert_eq!(seen(&app), (4, Some(250)));
+    app.advance(250);
+    app.core.tick();
+    assert_eq!(seen(&app), (4, None));
+    assert!(nothing_copied(&app));
+
+    // The count belongs to this run of the app, not to one unlock: the screens that come back
+    // after a lock compare with it.
+    app.core.lock();
+    app.core.unlock(password(PASSWORD)).unwrap();
+    assert_eq!(seen(&app), (4, None));
+    app.core.copy_visible_field(&n.login, "username").unwrap();
+    assert_eq!(seen(&app), (5, Some(60_000)));
+}
+
+#[test]
+fn locking_on_app_switch_leaves_a_60_second_copy_long_enough_to_paste_it() {
+    let mut app = App::new();
+    unlocked(&mut app);
+    app.core
+        .set_settings(settings(json!({
+            "idle_minutes": 5,
+            "lock_on_app_switch": true,
+            "clipboard_clear_seconds": 60,
+        })))
+        .unwrap();
+    let n = sample_notes(&mut app);
+
+    app.core.copy_field(&n.login, "password", None).unwrap();
+    app.advance(1_000);
+    app.core.os_event(OsEvent::FocusLost);
+    assert_eq!(app.phase(), "locked");
+    assert_eq!(app.clipboard().as_deref(), Some("fake-login-pass"));
+    app.advance(58_999);
+    app.core.tick();
+    assert_eq!(app.clipboard().as_deref(), Some("fake-login-pass"));
+    app.advance(1);
+    app.core.tick();
+    assert!(nothing_copied(&app));
+
+    // A Wallet Kind value keeps its 30 s through the same lock.
+    app.core.unlock(password(PASSWORD)).unwrap();
+    app.core
+        .copy_field(&n.pk, "key", Some(pw(PASSWORD)))
+        .unwrap();
+    app.advance(1_000);
+    app.core.os_event(OsEvent::FocusLost);
+    assert_eq!(app.phase(), "locked");
+    app.advance(28_999);
+    app.core.tick();
+    assert_eq!(app.clipboard().as_deref(), Some("fake-private-key"));
+    app.advance(1);
+    app.core.tick();
+    assert!(nothing_copied(&app));
+
+    // Every other lock still clears a copy at once.
+    for event in [OsEvent::Sleep, OsEvent::ScreenLocked, OsEvent::UserSwitched] {
+        app.core.unlock(password(PASSWORD)).unwrap();
+        app.core.copy_field(&n.login, "password", None).unwrap();
+        app.core.os_event(event);
+        assert_eq!(app.phase(), "locked", "{event:?}");
+        assert!(nothing_copied(&app), "{event:?}");
+    }
+    app.core.unlock(password(PASSWORD)).unwrap();
+    app.core.copy_visible_field(&n.login, "username").unwrap();
+    app.core.lock();
+    assert!(nothing_copied(&app));
+}
+
+#[test]
+fn counting_activity_anywhere_keeps_the_app_unlocked_but_never_past_60_minutes() {
+    const MINUTE: u64 = 60_000;
+    let mut app = App::new();
+    unlocked(&mut app);
+    let view = app.core.app_status().settings;
+    assert!(!view.count_activity_anywhere && view.count_activity_anywhere_supported);
+
+    // Off unless the owner turns it on: input elsewhere changes nothing.
+    assert!(!app.core.counts_activity_anywhere());
+    app.advance(4 * MINUTE);
+    app.core.activity_elsewhere(0);
+    assert_eq!(app.core.app_status().lock_in_ms, Some(MINUTE));
+    app.advance(MINUTE);
+    app.core.tick();
+    assert_eq!(app.phase(), "locked");
+
+    app.core.unlock(password(PASSWORD)).unwrap();
+    app.core
+        .set_settings(settings(json!({
+            "idle_minutes": 5,
+            "lock_on_app_switch": false,
+            "count_activity_anywhere": true,
+        })))
+        .unwrap();
+    assert!(app.core.app_status().settings.count_activity_anywhere);
+    assert!(app.core.counts_activity_anywhere());
+
+    // The owner works in another app for an hour and never touches this one: the OS last saw
+    // input a second ago, every time it is asked.
+    for half_minutes in 1..120 {
+        app.advance(MINUTE / 2);
+        app.core.activity_elsewhere(1_000);
+        app.core.tick();
+        assert_eq!(app.phase(), "unlocked", "after {half_minutes} half minutes");
+        // The countdown is the real one: the idle time, or what is left of the hour.
+        let left_of_the_hour = 60 * MINUTE - half_minutes * (MINUTE / 2);
+        assert_eq!(
+            app.core.app_status().lock_in_ms,
+            Some((5 * MINUTE - 1_000).min(left_of_the_hour)),
+            "after {half_minutes} half minutes"
+        );
+    }
+    // Sixty minutes after the last activity inside the window it locks all the same.
+    app.advance(MINUTE / 2);
+    app.core.activity_elsewhere(0);
+    app.core.tick();
+    assert_eq!(app.phase(), "locked");
+    assert!(!app.core.counts_activity_anywhere());
+
+    // Activity inside the window is what starts the hour again: touched once, 45 minutes in,
+    // the app stays Unlocked past the first hour and locks 60 minutes after that touch.
+    app.core.unlock(password(PASSWORD)).unwrap();
+    for minutes in 1..=105 {
+        app.advance(MINUTE);
+        app.core.activity_elsewhere(0);
+        if minutes == 45 {
+            app.core.activity();
+        }
+        app.core.tick();
+        let expected = if minutes < 105 { "unlocked" } else { "locked" };
+        assert_eq!(app.phase(), expected, "after {minutes} minutes");
+    }
+
+    // Sleep, screen lock and a user switch lock at once, whatever was just typed elsewhere.
+    for event in [OsEvent::Sleep, OsEvent::ScreenLocked, OsEvent::UserSwitched] {
+        app.core.unlock(password(PASSWORD)).unwrap();
+        app.core.activity_elsewhere(0);
+        app.core.os_event(event);
+        assert_eq!(app.phase(), "locked", "{event:?}");
+    }
+
+    // The choice is kept across a restart, and the old lock-rule-only input keeps it too.
+    let mut app = app.restart();
+    assert!(app.core.app_status().settings.count_activity_anywhere);
+    app.core.unlock(password(PASSWORD)).unwrap();
+    app.core.set_settings(lock_rule(5, false)).unwrap();
+    assert!(app.core.app_status().settings.count_activity_anywhere);
+    app.core.lock();
+
+    // Read on a computer where the OS can't say when input was last seen, the same settings
+    // file leaves it off.
+    app.activity_anywhere_supported = false;
+    let mut app = app.restart();
+    let view = app.core.app_status().settings;
+    assert!(!view.count_activity_anywhere && !view.count_activity_anywhere_supported);
+    app.core.unlock(password(PASSWORD)).unwrap();
+    assert!(!app.core.counts_activity_anywhere());
+    app.advance(4 * MINUTE);
+    app.core.activity_elsewhere(0);
+    app.advance(MINUTE);
+    app.core.tick();
+    assert_eq!(app.phase(), "locked");
+}
+
+#[test]
+fn activity_anywhere_cannot_be_turned_on_where_the_computer_does_not_support_it() {
+    let mut app = App::on_a_computer(false);
+    unlocked(&mut app);
+    app.core
+        .set_settings(settings(json!({
+            "idle_minutes": 5,
+            "lock_on_app_switch": false,
+            "count_activity_anywhere": true,
+        })))
+        .unwrap();
+    let view = app.core.app_status().settings;
+    assert!(!view.count_activity_anywhere && !view.count_activity_anywhere_supported);
+    assert!(!app.core.counts_activity_anywhere());
+    // Nor did it get into the settings file.
+    let mut app = app.restart();
+    app.activity_anywhere_supported = true;
+    let app = app.restart();
+    assert!(!app.core.app_status().settings.count_activity_anywhere);
+}
+
+#[test]
+fn a_preview_says_what_this_computer_has_that_the_copy_lacks() {
+    let mut app = App::new();
+    unlocked(&mut app);
+    let note = |app: &mut App, title: &str| {
+        app.core
+            .create_note(input("text", title, json!({}), json!({})), None)
+            .unwrap()
+    };
+    note(&mut app, "Fake kept");
+    let trashed_later = note(&mut app, "Fake trashed later");
+    let restored_later = note(&mut app, "Fake restored later");
+    app.core.trash_note(&restored_later, None).unwrap();
+    let backup = app.temp.path().join("fake-earlier.enote");
+    app.core.set_backup_destination(backup.clone()).unwrap();
+    app.core.write_backup().unwrap();
+
+    // Since that Backup: two new Notes, one Note moved to Trash, one brought back from it.
+    app.advance(5_000);
+    note(&mut app, "Fake new one");
+    note(&mut app, "Fake new two");
+    app.core.trash_note(&trashed_later, None).unwrap();
+    app.core.restore_note(&restored_later).unwrap();
+    let changed_at = app.core.unix_secs();
+    app.advance(5_000);
+
+    app.core.set_backup_to_open(backup.clone()).unwrap();
+    let preview = app.core.inspect_backup(password(PASSWORD)).unwrap();
+    assert_eq!(
+        (preview.note_count, preview.older_than_current),
+        (2, Some(true))
+    );
+    // Here, not in Trash: the kept one, the restored one and the two new ones.
+    assert_eq!(preview.current_note_count, Some(4));
+    assert_eq!(preview.current_changed_at, Some(changed_at));
+    // Only the two new Notes are missing from the copy. The restored one is in the copy's
+    // Trash, and the one in Trash here is not counted.
+    assert_eq!(preview.only_here, Some(2));
+    // Numbers and dates only: no titles.
+    let shape = serde_json::to_value(&preview).unwrap();
+    let mut keys: Vec<&str> = shape
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        [
+            "changed_at",
+            "current_changed_at",
+            "current_note_count",
+            "note_count",
+            "older_than_current",
+            "only_here",
+            "replaces_vault",
+        ]
+    );
+    assert!(!shape.to_string().contains("Fake"));
+    app.core.discard_inspection();
+
+    // Safety Copies of this Vault are compared the same way. The newest is the Vault as it
+    // was before the last change (the restore): it holds every Note that is here.
+    let copies = app.core.list_safety_copies().unwrap();
+    let preview = app
+        .core
+        .inspect_safety_copy(&copies[0].id, password(PASSWORD))
+        .unwrap();
+    assert_eq!(
+        (
+            preview.note_count,
+            preview.current_note_count,
+            preview.only_here
+        ),
+        (3, Some(4), Some(0))
+    );
+    // The oldest is the Vault before its first Note.
+    let oldest = &copies[copies.len() - 1];
+    let preview = app
+        .core
+        .inspect_safety_copy(&oldest.id, password(PASSWORD))
+        .unwrap();
+    assert_eq!(
+        (
+            preview.note_count,
+            preview.current_note_count,
+            preview.current_changed_at,
+            preview.only_here
+        ),
+        (0, Some(4), Some(changed_at), Some(4))
+    );
+    app.core.discard_inspection();
+
+    // A copy of another Vault: its Notes are not compared with the ones here.
+    let (_source, foreign) = a_backup();
+    app.core.set_backup_to_open(foreign.clone()).unwrap();
+    let preview = app.core.inspect_backup(password(PASSWORD)).unwrap();
+    assert!(preview.replaces_vault);
+    assert_eq!(
+        (
+            preview.current_note_count,
+            preview.current_changed_at,
+            preview.only_here
+        ),
+        (None, None, None)
+    );
+
+    // While the Vault here is Locked, nothing about it is told, although the same Master
+    // Password lets the app say that the Backup is older.
+    app.core.lock();
+    app.core.set_backup_to_open(backup).unwrap();
+    let preview = app.core.inspect_backup(password(PASSWORD)).unwrap();
+    assert_eq!(preview.older_than_current, Some(true));
+    assert_eq!(
+        (
+            preview.current_note_count,
+            preview.current_changed_at,
+            preview.only_here
+        ),
+        (None, None, None)
+    );
+
+    // On a computer with no Vault there is nothing to compare.
+    let mut fresh = App::new();
+    fresh.core.set_backup_to_open(foreign).unwrap();
+    let preview = fresh.core.inspect_backup(password(PASSWORD)).unwrap();
+    assert_eq!(
+        serde_json::to_value(&preview).unwrap()["only_here"],
+        Value::Null
+    );
+    assert_eq!(
+        (preview.current_note_count, preview.current_changed_at),
+        (None, None)
+    );
+}
+
+#[test]
+fn the_vault_location_can_be_read_in_every_phase() {
+    let mut app = App::new();
+    let folder = app.data_dir().display().to_string();
+    assert!(folder.ends_with("Vault.noindex"));
+    assert_eq!(app.phase(), "no_vault");
+    assert_eq!(app.core.vault_location(), folder);
+
+    let key = app
+        .core
+        .create_vault(pw(PASSWORD), KdfParams::TESTING)
+        .unwrap()
+        .recovery_key
+        .unwrap();
+    assert_eq!(app.phase(), "confirm_recovery_kit");
+    assert_eq!(app.core.vault_location(), folder);
+    app.core.confirm_recovery_kit(&last_groups(&key)).unwrap();
+    assert_eq!(app.phase(), "unlocked");
+    assert_eq!(app.core.vault_location(), folder);
+    app.core.lock();
+    assert_eq!(app.phase(), "locked");
+    assert_eq!(app.core.vault_location(), folder);
+    app.core.unlock(recovery(&key)).unwrap();
+    assert_eq!(app.phase(), "needs_new_password");
+    assert_eq!(app.core.vault_location(), folder);
+}
+
+#[test]
+fn a_private_key_is_checked_under_whatever_chain_name_the_note_has() {
+    let mut app = App::new();
+    unlocked(&mut app);
+    let not_a_key = "fake-not-a-key";
+    let hint = |app: &App, chain: &str, key: &str| app.core.check_private_key(chain, key).unwrap();
+
+    assert!(hint(&app, "evm", not_a_key).unwrap().contains("Ethereum"));
+    assert!(hint(&app, "solana", not_a_key).unwrap().contains("Solana"));
+    assert!(
+        hint(&app, "bitcoin", not_a_key)
+            .unwrap()
+            .contains("Bitcoin")
+    );
+    // A name of a chain the app knows is found whatever its case or the spaces around it.
+    assert!(hint(&app, " EVM ", not_a_key).is_some());
+    assert_eq!(hint(&app, "evm", &"ab".repeat(32)), None);
+    // Any other name, typed by the owner, is no check at all, and never a failed call.
+    for chain in ["other", "Fake Chain", "fake-l2", "", "   ", "evm\nfake"] {
+        assert_eq!(hint(&app, chain, not_a_key), None, "{chain:?}");
+    }
+
+    app.core.lock();
+    assert_eq!(code(app.core.check_private_key("evm", not_a_key)), "locked");
+    assert_eq!(
+        code(app.core.check_private_key("Fake Chain", not_a_key)),
+        "locked"
+    );
 }

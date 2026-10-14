@@ -1,11 +1,16 @@
 // One Note: the detail view (Show / Copy of Hidden Fields) and the editor for every Kind.
 
-import { Fragment, useEffect, useId, useRef, useState, type ClipboardEvent as PasteEvent, type FormEvent, type KeyboardEvent as KeyEvent } from "react";
+import { Fragment, useEffect, useId, useRef, useState, type ClipboardEvent as PasteEvent, type FormEvent } from "react";
 import {
+  appendText,
   checkPrivateKey,
   checkSeed,
   copyField,
+  copyFieldEnv,
+  copyFieldLine,
+  copyVisibleField,
   createNote,
+  extendReveal,
   getNote,
   hideField,
   isApiError,
@@ -13,6 +18,7 @@ import {
   markSeedExplainerSeen,
   seedWordlist,
   setFavorite,
+  showAndCopyWalletField,
   showField,
   showWalletField,
   trashNote,
@@ -22,7 +28,7 @@ import {
   type Kind,
   type NoteView,
 } from "./api";
-import { Choice, cmdKey, Confirm, ErrorLine, Field, formatDate, mac, Modal, noAssist, PasswordModal, SecretInput, seconds, useAction } from "./components";
+import { Choice, cmdKey, Confirm, ErrorLine, expiry, Field, formatDate, mac, Modal, noAssist, PasswordModal, SecretInput, seconds, useAction } from "./components";
 import { Icon, KindBadge } from "./icons";
 import { strings as s } from "./strings";
 
@@ -42,6 +48,19 @@ const MAIN: Partial<Record<Kind, string>> = { private_key: "key", login: "passwo
 const TITLE_FROM: Partial<Record<Kind, string>> = { login: "website", api_key: "service" };
 // Not carried into a duplicate: it is another wallet, with its own address and word count.
 const NOT_DUPLICATED = ["address", "word_count"];
+// Visible fields without a Copy button: the chain is shown by another name than the one stored,
+// and the word count is a number the app worked out.
+const NOT_COPIED = ["chain", "word_count"];
+// The optional fields older versions of the app and of the Emergency Reader can't read: a Vault
+// with a value in one of them opens only in current ones (notes::Kind::schema_2_fields).
+const NEWER: Partial<Record<Kind, string[]>> = {
+  seed_phrase: ["address", "derivation_path"],
+  login: ["purpose"],
+  api_key: ["key_id", "purpose", "url", "expires", "env_var", "secret"],
+};
+// A copied Seed Phrase or Private Key is cleared after this long, whatever Settings says.
+const WALLET_COPY_SECONDS = 30;
+const TEXT_MODES = [["replace", s.replaceTheText], ["add", s.addToTheEnd]] as const;
 const CHAINS = Object.entries(s.chains) as [Chain, string][];
 // The chains whose keys the core can check. Any other chain is the owner's own text in the file.
 const PRESETS: readonly string[] = ["evm", "solana", "bitcoin"];
@@ -87,6 +106,8 @@ export interface Draft {
    *  comes back with it. */
   hidden: Record<string, string>;
   clear: Record<string, boolean>;
+  /** A Text: what was typed is to be added to the end of its text, not to replace it. */
+  adding: boolean;
   wordCount: number;
   /** Wallet Kinds: the Hidden Fields that held something and were not kept. Their names only. */
   again: string[];
@@ -141,19 +162,47 @@ function useShown(noteId: string, status: AppStatus) {
   };
 }
 
-const Value = ({ field, value }: { field: string; value: string }) =>
-  field === "words" ? (
-    <ol className="words">
-      {value.split(" ").map((word, i) => (
-        <li key={i}>
-          <span>{i + 1}</span>
-          {word}
-        </li>
-      ))}
-    </ol>
-  ) : (
-    <div className="value">{value}</div>
+/** A shown value. With `lines` (never a Wallet Kind), a value of several lines is drawn line by
+ *  line, and each line that holds something has its own Copy button. The lines are numbered as
+ *  Rust numbers them: from 0, split at every line feed, empty lines counted too. `lines.name`:
+ *  the field's label, for what those buttons are called. */
+function Value({ field, value, lines }: {
+  field: string;
+  value: string;
+  lines?: { name: string; copy: (line: number) => void } | undefined;
+}) {
+  if (field === "words")
+    return (
+      <ol className="words">
+        {value.split(" ").map((word, i) => (
+          <li key={i}>
+            <span>{i + 1}</span>
+            {word}
+          </li>
+        ))}
+      </ol>
+    );
+  const split = lines ? value.split("\n") : [];
+  if (!lines || split.length < 2) return <div className="value">{value}</div>;
+  return (
+    <div className="value lines">
+      {split.map((line, i) => {
+        // As Rust takes the line: without the carriage return of a Windows line ending.
+        const text = line.endsWith("\r") ? line.slice(0, -1) : line;
+        return (
+          <div key={i}>
+            <span>{text}</span>
+            {text && (
+              <button className="plain" aria-label={s.copyLine(i + 1, lines.name)} onClick={() => lines.copy(i)}>
+                <Icon name="copy" />
+              </button>
+            )}
+          </div>
+        );
+      })}
+    </div>
   );
+}
 
 export function Detail(
   props: {
@@ -180,16 +229,22 @@ export function Detail(
   const { shown, keep, hide, version } = useShown(id, status);
   const [modal, setModal] = useState<{ field: string; step: "show" | "confirm-copy" | "copy" | "trash" } | null>(null);
   const { error, run } = useAction();
-  // Once a shown value is gone (Hide, the 30 seconds, a lock), its Show button gives up the
-  // keyboard: left there, a stray Space or Enter later would show the value again.
-  const wasShown = useRef(false);
-  useEffect(() => {
-    const at = document.activeElement;
-    if (wasShown.current && !shown && at instanceof HTMLElement && at.classList.contains("toggle")) at.blur();
-    wasShown.current = !!shown;
-  }, [shown]);
   // One Show request at a time: the answer to an earlier one would hide what a later one shows.
-  const showing = useRef(false);
+  // The field it is for, while it is on its way.
+  const showing = useRef<string | null>(null);
+  // Once a shown value is gone (Hide, the 30 seconds, a lock), its Show button gives up the
+  // keyboard: left there, a stray Space or Enter later would show the value again. One button
+  // keeps the keyboard: the Show of another field, pressed a moment ago and still waiting for its
+  // answer. Pressing it is why the old value went (that one is dropped at once).
+  const wasShown = useRef<string | null>(null);
+  useEffect(() => {
+    const was = wasShown.current;
+    wasShown.current = shown?.field ?? null;
+    const at = document.activeElement;
+    if (!was || shown || !(at instanceof HTMLElement) || !at.classList.contains("toggle")) return;
+    const pressed = showing.current;
+    if (pressed === null || pressed === was || at.dataset.field !== pressed) at.blur();
+  }, [shown]);
   useEffect(
     () =>
       void run(async () => {
@@ -203,13 +258,16 @@ export function Detail(
     [id],
   );
   // Cmd/Ctrl+Shift+C copies the first Hidden Field that has a value, as its Copy button does. Not
-  // plain Cmd/Ctrl+C, and not under a dialog or while typing in a box. The handler is set up once.
+  // plain Cmd/Ctrl+C, and not under a dialog or while typing in a box. Two things are not that:
+  // a radio or checkbox, and the Home search box, where the keyboard still is after Enter opened
+  // this Note from it (Home marks it). The handler is set up once.
   const copyFirst = useRef(() => {});
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (!cmdKey(e) || !e.shiftKey || e.repeat || e.key.toLowerCase() !== "c") return;
       const at = document.activeElement as HTMLElement | null;
-      if (document.querySelector("[role=dialog]") || at?.matches("input, textarea") || at?.isContentEditable) return;
+      const typing = at?.matches("textarea, input:not([type=radio]):not([type=checkbox]):not([data-search])") || at?.isContentEditable;
+      if (document.querySelector("[role=dialog]") || typing) return;
       e.preventDefault();
       copyFirst.current();
     };
@@ -223,16 +281,15 @@ export function Detail(
   const wallet = isWalletKind(note.kind);
   const expires = status.reveal?.expires_in_ms;
   const isShown = (field: string) => shown?.field === field && status.reveal?.note_id === id && status.reveal.field === field;
-  // Also "Reset to 30 s" on a value already shown: the same request, under the same protections.
   const show = (field: string) => {
     if (wallet) return setModal({ field, step: "show" });
-    if (showing.current) return;
-    showing.current = true;
+    if (showing.current !== null) return;
+    showing.current = field;
     void run(async () => {
       const requestedAt = version();
       keep(field, await showField(id, field), requestedAt);
     }).finally(() => {
-      showing.current = false;
+      showing.current = null;
     });
   };
   const copy = (field: string) =>
@@ -281,15 +338,38 @@ export function Detail(
       <dl className="card fields rows">
         {FORM[note.kind]
           .filter((f) => !HIDDEN.includes(f) && note.visible[f])
-          .map((f) => (
-            <div key={f}>
-              <dt>{label(note.kind, f)}</dt>
-              <dd>{f === "chain" ? chainLabel(note.visible[f] ?? "") : note.visible[f]}</dd>
-            </div>
-          ))}
+          .map((f) => {
+            const name = label(note.kind, f);
+            const value = note.visible[f] ?? "";
+            const due = f === "expires" ? expiry(value) : null;
+            return (
+              <div key={f}>
+                <dt>{name}</dt>
+                {NOT_COPIED.includes(f) ? (
+                  <dd>{f === "chain" ? chainLabel(value) : value}</dd>
+                ) : (
+                  // Rust writes the clipboard and clears it, as for a Hidden Field. No Master
+                  // Password, for a Wallet Kind either: this part of the Note is in plain sight.
+                  <dd className="copyable">
+                    <span>
+                      {value}
+                      {due && " · "}
+                      {due && <span className={due.past ? "expiry past" : "expiry"}>{due.text}</span>}
+                    </span>
+                    <button className="small" aria-label={s.fieldAction(s.copy, name)} onClick={() => run(() => copyVisibleField(id, f))}>
+                      <Icon name="copy" />
+                      {s.copy}
+                    </button>
+                  </dd>
+                )}
+              </div>
+            );
+          })}
         {note.hidden.map(([f, has]) => {
           const name = label(note.kind, f);
           const on = isShown(f);
+          // An API Key with a variable name: its key can also be copied as NAME=value.
+          const envVar = note.kind === "api_key" && f === "key" ? note.visible.env_var : undefined;
           return (
             <div key={f}>
               <dt>{name}</dt>
@@ -300,7 +380,8 @@ export function Detail(
                   <div className="actions">
                     {has && (
                       <>
-                        <button className="small toggle" aria-label={s.fieldAction(on ? s.hide : s.show, name)} onClick={on ? hide : () => show(f)}>
+                        {/* data-field: the field's name, for the rule above about which button keeps the keyboard. */}
+                        <button className="small toggle" data-field={f} aria-label={s.fieldAction(on ? s.hide : s.show, name)} onClick={on ? hide : () => show(f)}>
                           <Icon name={on ? "eyeSlash" : "eye"} />
                           {on ? s.hide : s.show}
                         </button>
@@ -324,18 +405,43 @@ export function Detail(
                     )}
                   </div>
                 )}
+                {/* Under Copy, on a line of its own: the name can be long. The line is built and
+                    copied in Rust, and a refusal (a key that can't be written that way) shows as
+                    it comes. */}
+                {has && envVar && (
+                  <div className="actions env">
+                    <button className="small" onClick={() => run(() => copyFieldEnv(id))}>
+                      <Icon name="copy" />
+                      <span>{s.copyAsEnv(envVar)}</span>
+                    </button>
+                  </div>
+                )}
                 {on && (
                   <div className="shown">
                     <div className="actions">
                       {expires != null && <span className="hint">{s.hidesIn(seconds(expires))}</span>}
                       {/* Never a Wallet Kind: those are shown only in their own prompt (ADR-0004). */}
+                      {/* A key held down must not keep the value on screen: repeats are ignored, and
+                          once pressed the button gives up the keyboard. More time is asked of the
+                          core; the value itself doesn't come again. */}
                       {!wallet && (
-                        <button className="small" aria-label={s.resetTimerFor(name)} onClick={() => show(f)}>
+                        <button
+                          className="small"
+                          aria-label={s.resetTimerFor(name)}
+                          disabled={status.reveal?.can_extend === false}
+                          onKeyDown={(e) => e.repeat && e.preventDefault()}
+                          onClick={(e) => {
+                            e.currentTarget.blur();
+                            run(extendReveal);
+                          }}
+                        >
                           {s.resetTimer}
                         </button>
                       )}
                     </div>
-                    <Value field={f} value={shown!.value} />
+                    {/* A line is copied in Rust, by its number: the shown text is only what the
+                        owner picks from. */}
+                    <Value field={f} value={shown!.value} lines={wallet ? undefined : { name, copy: (line) => run(() => copyFieldLine(id, f, line)) }} />
                   </div>
                 )}
               </dd>
@@ -375,7 +481,7 @@ export function Detail(
       {modal?.step === "copy" && (
         <PasswordModal
           title={s.copyTitle(label(note.kind, modal.field))}
-          text={s.copyText}
+          text={s.copyText(WALLET_COPY_SECONDS)}
           submitLabel={s.copy}
           onSubmit={(password) => copyField(id, modal.field, password)}
           onClose={() => setModal(null)}
@@ -407,22 +513,34 @@ function WalletShow(props: { id: string; field: string; name: string; status: Ap
   const holding = useRef(false);
   // The right password, but the button was let go before the check finished: said once idle.
   const [letGo, setLetGo] = useState(false);
+  // Show and copy of a Seed Phrase's words asks first, as Copy does.
+  const [confirmCopy, setConfirmCopy] = useState(false);
+  // More time: a request on its way (a second click must not use up another of the three), and
+  // the core's refusal of one.
+  const [asking, setAsking] = useState(false);
+  const [moreError, setMoreError] = useState<string | null>(null);
+  // Ties "2 times left" to the button, so a screen reader says both.
+  const timesLeft = useId();
   const input = useRef<HTMLInputElement>(null);
   const { busy, error, run } = useAction();
-  const expires = props.status.reveal?.expires_in_ms;
   const isShown = shown && props.status.reveal?.note_id === id && props.status.reveal.field === field;
+  // The reveal on screen. Its time (and with it "more time") is there only for a timed reveal:
+  // a value shown while held has neither.
+  const reveal = isShown ? props.status.reveal : null;
   // After three wrong passwords the core refuses every attempt for a while, the right one too.
   const wait = props.status.retry_in_ms ? seconds(props.status.retry_in_ms) : 0;
 
-  const show = (mode: "held" | "accessible") => {
+  // "copy": shown for 20 seconds and copied, with the one password entry. Never while held.
+  const show = (mode: "held" | "accessible" | "copy") => {
     if (wait > 0) return; // it would be thrown away unchecked: what was typed stays in the box
     const p = password;
     const requestedAt = version();
     setPassword("");
     setLetGo(false);
+    setMoreError(null);
     run(async () => {
-      const value = await showWalletField(id, field, p, mode);
-      if (mode === "accessible" || holding.current) keep(field, value, requestedAt);
+      const value = mode === "copy" ? await showAndCopyWalletField(id, field, p) : await showWalletField(id, field, p, mode);
+      if (mode !== "held" || holding.current) keep(field, value, requestedAt);
       else {
         // let go before the password check finished
         setLetGo(true);
@@ -441,6 +559,15 @@ function WalletShow(props: { id: string; field: string; name: string; status: Ap
     if (!holding.current) return;
     holding.current = false;
     hide();
+  };
+  // More time for a value shown for 20 seconds: its 20 seconds start again, counted from now.
+  // The core allows it three times.
+  const more = () => {
+    setMoreError(null);
+    setAsking(true);
+    extendReveal()
+      .catch((e) => setMoreError(isApiError(e) ? e.message : s.somethingWentWrong))
+      .finally(() => setAsking(false));
   };
   useEffect(() => {
     // A release the button never hears of must still hide the value. On a Mac the key-up for
@@ -469,64 +596,117 @@ function WalletShow(props: { id: string; field: string; name: string; status: Ap
     const at = document.activeElement;
     if (!at || at === document.body || (at as HTMLButtonElement).disabled) input.current?.focus();
   }, [busy, !!shown]);
+  // The question in front of Show and copy leaves the keyboard on the sheet itself when it
+  // closes: the password box takes it, as when this prompt opened.
+  useEffect(() => {
+    if (!confirmCopy) input.current?.focus();
+  }, [confirmCopy]);
 
   return (
-    <Modal title={s.showWalletTitle(props.name)} onClose={props.onClose}>
-      {isShown ? <Value field={field} value={shown.value} /> : <p className="hint">{s.holdHint}</p>}
-      {isShown && expires != null && <p className="hint">{s.hidesIn(seconds(expires))}</p>}
-      {/* Enter shows for 20 seconds. */}
-      <form
-        className="stack"
-        onSubmit={(e) => {
-          e.preventDefault();
-          show("accessible");
-        }}
-      >
-        <Field label={s.masterPassword}>
-          <SecretInput
-            ref={input}
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            // Space may still be held down from the button when the keyboard comes back here.
-            onKeyDown={(e) => e.key === " " && e.repeat && e.preventDefault()}
-            autoFocus
-          />
-        </Field>
-        <ErrorLine error={error} />
-        {wait > 0 && <p className="hint">{s.tryAgainIn(wait)}</p>}
-        {letGo && !busy && !shown && (
-          <p className="hint" role="status">
-            {s.keepHolding}
-          </p>
+    <>
+      <Modal title={s.showWalletTitle(props.name)} onClose={props.onClose}>
+        {isShown ? <Value field={field} value={shown.value} /> : <p className="hint">{s.holdHint}</p>}
+        {reveal && reveal.expires_in_ms != null && (
+          <div className="actions start">
+            <span className="hint">{s.hidesIn(seconds(reveal.expires_in_ms))}</span>
+            {/* Never given the keyboard by the page, and it gives it up once pressed: a key held
+                down (its repeats are ignored too) must not keep the value on screen. */}
+            {reveal.extensions_left != null && (
+              <>
+                <button
+                  type="button"
+                  className="small"
+                  aria-describedby={timesLeft}
+                  disabled={!reveal.can_extend || asking}
+                  onKeyDown={(e) => e.repeat && e.preventDefault()}
+                  onClick={(e) => {
+                    e.currentTarget.blur();
+                    more();
+                  }}
+                >
+                  {s.resetTimer20}
+                </button>
+                <span id={timesLeft} className="hint">
+                  {s.moreTimesLeft(reveal.extensions_left)}
+                </span>
+              </>
+            )}
+          </div>
         )}
-        <div className="actions">
-          <button
-            type="button"
-            className="primary big"
-            disabled={!busy && !shown && (!password || wait > 0)}
-            onPointerDown={(e) => {
-              e.currentTarget.setPointerCapture(e.pointerId);
-              hold();
-            }}
-            onPointerUp={release}
-            onPointerCancel={release}
-            onKeyDown={(e) => {
-              if (e.key !== " ") return;
-              e.preventDefault();
-              if (!e.repeat) hold();
-            }}
-            onKeyUp={(e) => e.key === " " && release()}
-            onBlur={release}
-          >
-            {busy ? s.checking : s.holdToShow}
-          </button>
-          <button disabled={busy || !password || wait > 0}>{s.showFor20}</button>
-          <button type="button" onClick={props.onClose}>
-            {s.close}
-          </button>
-        </div>
-      </form>
-    </Modal>
+        {/* Enter shows for 20 seconds. */}
+        <form
+          className="stack"
+          onSubmit={(e) => {
+            e.preventDefault();
+            show("accessible");
+          }}
+        >
+          <Field label={s.masterPassword}>
+            <SecretInput
+              ref={input}
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              // Space may still be held down from the button when the keyboard comes back here.
+              onKeyDown={(e) => e.key === " " && e.repeat && e.preventDefault()}
+              autoFocus
+            />
+          </Field>
+          <ErrorLine error={error ?? moreError} />
+          {wait > 0 && <p className="hint">{s.tryAgainIn(wait)}</p>}
+          {/* The line is there before its text, so that the text is read out when it comes. */}
+          <p className="hint" role="status">
+            {letGo && !busy && !shown && s.keepHolding}
+          </p>
+          <div className="actions">
+            <button
+              type="button"
+              className="primary big"
+              disabled={!busy && !shown && (!password || wait > 0)}
+              onPointerDown={(e) => {
+                e.currentTarget.setPointerCapture(e.pointerId);
+                hold();
+              }}
+              onPointerUp={release}
+              onPointerCancel={release}
+              onKeyDown={(e) => {
+                if (e.key !== " ") return;
+                e.preventDefault();
+                if (!e.repeat) hold();
+              }}
+              onKeyUp={(e) => e.key === " " && release()}
+              onBlur={release}
+            >
+              {busy ? s.checking : s.holdToShow}
+            </button>
+            <button disabled={busy || !password || wait > 0}>{s.showFor20}</button>
+            {/* One password entry for both. A Seed Phrase's words are asked about first, as
+                when they are copied from the Note. */}
+            <button
+              type="button"
+              disabled={busy || !password || wait > 0}
+              onClick={() => (field === "words" ? setConfirmCopy(true) : show("copy"))}
+            >
+              {s.showFor20AndCopy}
+            </button>
+            <button type="button" onClick={props.onClose}>
+              {s.close}
+            </button>
+          </div>
+        </form>
+      </Modal>
+      {confirmCopy && (
+        <Confirm
+          title={s.copySeedTitle}
+          text={s.copySeedText}
+          confirmLabel={s.copyAnyway}
+          onConfirm={() => {
+            setConfirmCopy(false);
+            show("copy");
+          }}
+          onClose={() => setConfirmCopy(false)}
+        />
+      )}
+    </>
   );
 }
 
@@ -586,6 +766,14 @@ export function Editor(props: {
   const { busy, error, run } = useAction();
 
   const filled = (f: string) => !!note?.hidden.some(([name, has]) => name === f && has);
+  // A Text that has text in it can be added to instead of replaced: what is typed then goes after
+  // what is there. Rust joins the two, so the text that is there never comes to this Editor.
+  // That is how it starts, because nothing can be lost that way, unless Replace on the text is
+  // what opened the Editor.
+  const canAdd = kind === "text" && filled("body");
+  const [adding, setAdding] = useState(draft ? draft.adding : canAdd && props.focusField !== "body");
+  const add = canAdd && adding;
+  const newer = NEWER[kind];
   const phrase = words.every((w) => w.trim()) ? words.map((w) => w.trim()).join(" ") : "";
   // Always one of the four the core knows: it refuses any other name.
   const chain = visible.chain as Chain;
@@ -622,10 +810,11 @@ export function Editor(props: {
       chainName,
       hidden: wallet ? {} : hidden,
       clear,
+      adding,
       wordCount: words.length,
       again: wallet ? FORM[kind].filter((f) => HIDDEN.includes(f) && (typed(f) || again.includes(f))) : [],
     });
-  }, [title, visible, chainName, hidden, clear, words]);
+  }, [title, visible, chainName, hidden, clear, adding, words]);
 
   // The box a multi-line key was pasted into is gone, and the keyboard with it: the chip takes
   // it, so Tab and the save keys carry on from there.
@@ -673,6 +862,13 @@ export function Editor(props: {
   }, [phrase, privateKey, chain]);
 
   async function save(password?: string) {
+    if (note && add) {
+      // Only what was typed is sent. The title goes first: saved a second time after a failure
+      // it changes nothing, where text added a second time would be there twice.
+      if (title !== note.title) await updateNote(note.id, { title, visible: {}, hidden: {} });
+      if (hidden.body) await appendText(note.id, hidden.body);
+      return props.onSaved(note.id);
+    }
     const input = { title, visible: {} as Record<string, string>, hidden: {} as Record<string, string> };
     for (const f of FORM[kind]) {
       if (f === "words") {
@@ -705,12 +901,23 @@ export function Editor(props: {
   }
   // Cmd/Ctrl+S and Cmd/Ctrl+Enter save, as the Save button does (in a Text body Enter is a new
   // line). The keys do nothing else here, also while Save is off: never the browser's own Save.
-  const onKey = (e: KeyEvent<HTMLFormElement>) => {
-    if (!cmdKey(e) || e.shiftKey || (e.key.toLowerCase() !== "s" && e.key !== "Enter")) return;
-    if (document.querySelector("[role=dialog]")) return;
-    e.preventDefault();
-    if (canSave && !e.repeat) e.currentTarget.requestSubmit();
+  // Heard on the window for as long as the Editor is there, not on the form: the keyboard is not
+  // always inside it (after a click on blank space, or on a checkbox or radio in WebKit). The
+  // handler is set up once and reads what the Editor holds now through the ref.
+  const saveNow = useRef(() => {});
+  saveNow.current = () => {
+    if (canSave) begin(false);
   };
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!cmdKey(e) || e.shiftKey || (e.key.toLowerCase() !== "s" && e.key !== "Enter")) return;
+      if (document.querySelector("[role=dialog]")) return;
+      e.preventDefault();
+      if (!e.repeat) saveNow.current();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
   // A pasted PEM, SSH or PGP key: a one-line box would drop its line breaks, so the text is kept
   // exactly as pasted and a chip stands in for the box.
   const pasteKey = (field: string, e: PasteEvent<HTMLInputElement>) => {
@@ -744,7 +951,7 @@ export function Editor(props: {
 
   return (
     <>
-      <form onSubmit={submit} onChange={props.onDirty} onKeyDown={onKey} className="stack">
+      <form onSubmit={submit} onChange={props.onDirty} className="stack">
         <header className="detail-head">
           <KindBadge kind={kind} size="large" />
           <div>
@@ -768,7 +975,9 @@ export function Editor(props: {
         )}
         <div className="card stack">
           <Field label={s.title} check={slip("title", title)}>
-            <input value={title} onChange={(e) => setTitle(e.target.value)} autoFocus={!props.focusField} {...noAssist} />
+            {/* Not when a draft comes back from under the Sharing Guard shield: the owner may have
+                been typing in a Hidden Field, and would carry on in this box, in plain sight. */}
+            <input value={title} onChange={(e) => setTitle(e.target.value)} autoFocus={!props.focusField && !draft} {...noAssist} />
           </Field>
           {FORM[kind].map((f) => {
             const name = OPTIONAL.includes(f) ? `${label(kind, f)} ${s.optional}` : label(kind, f);
@@ -819,9 +1028,10 @@ export function Editor(props: {
               );
             if (!HIDDEN.includes(f))
               return (
-                <Field key={f} label={name} check={slip(f, visible[f] ?? "")} hint={f === "expires" ? s.expiryDateHint : f === "env_var" ? s.variableNameHint : undefined}>
+                <Field key={f} label={name} check={slip(f, visible[f] ?? "")} hint={s.hints[kind][f]}>
                   <input
                     value={visible[f] ?? ""}
+                    placeholder={f === "expires" ? s.expiryPlaceholder : undefined}
                     onChange={(e) => setVisible({ ...visible, [f]: e.target.value })}
                     onBlur={f === TITLE_FROM[kind] ? () => titleFrom(visible[f] ?? "") : undefined}
                     {...noAssist}
@@ -830,18 +1040,32 @@ export function Editor(props: {
               );
             const value = hidden[f] ?? "";
             const had = filled(f);
+            // The text of a Text, in Add mode: what is typed joins what is there, so there is
+            // nothing to keep by leaving the box blank and nothing to remove.
+            const adds = f === "body" && add;
             const edgeSpace = /^\s|\s$/.test(value);
             const inputProps = {
               value,
               // Only a field that has a value has one to keep.
-              placeholder: had && !clear[f] ? s.leaveBlankToKeep : "",
-              disabled: !!clear[f],
+              placeholder: adds ? s.typeToAdd : had && !clear[f] ? s.leaveBlankToKeep : "",
+              disabled: !!clear[f] && !adds,
               onChange: (e: { target: { value: string } }) => setHidden({ ...hidden, [f]: e.target.value }),
               autoFocus: f === props.focusField || f === clearedField,
             };
             return (
               // Field is a label, and so is the checkbox: they sit one under the other in a plain box.
               <div key={f} className="field">
+                {f === "body" && canAdd && (
+                  <Choice
+                    label={s.textMode}
+                    options={TEXT_MODES}
+                    value={add ? "add" : "replace"}
+                    onChange={(mode) => {
+                      setAdding(mode === "add");
+                      if (mode === "add") setClear({ ...clear, body: false });
+                    }}
+                  />
+                )}
                 {(f === "key" || f === "secret") && lineCount(value) > 1 ? (
                   // A group, not a Field: a click on a label's text would press the button in it.
                   <div className="field" role="group" aria-labelledby={`${keyLabel}-${f}`}>
@@ -867,13 +1091,13 @@ export function Editor(props: {
                 ) : (
                   <Field
                     label={name}
-                    hint={f === "passphrase" ? s.passphraseTip : undefined}
+                    hint={s.hints[kind][f]}
                     // The length and the ends are all that is said about what was typed.
                     check={
                       value && (
                         <>
                           <span className={edgeSpace ? "hint warn" : "hint"}>{s.typedCount([...value].length, edgeSpace, f === "body")}</span>
-                          {f === "body" && had && <span className="warn">{s.replacesText}</span>}
+                          {f === "body" && had && (adds ? <span className="hint">{s.addsText}</span> : <span className="warn">{s.replacesText}</span>)}
                         </>
                       )
                     }
@@ -885,7 +1109,7 @@ export function Editor(props: {
                     )}
                   </Field>
                 )}
-                {had && (
+                {had && !adds && (
                   <label className="check">
                     <input
                       type="checkbox"
@@ -902,6 +1126,9 @@ export function Editor(props: {
               </div>
             );
           })}
+          {/* What is in plain sight, and what an older app can't open: said once, by label. */}
+          <p className="hint">{s.notHidden(FORM[kind].filter((f) => HIDDEN.includes(f)).map((f) => label(kind, f)))}</p>
+          {newer && <p className="hint">{s.needsCurrentApp(newer.map((f) => label(kind, f)))}</p>}
         </div>
         {warning && <p className="warn">{warning}</p>}
         {pasteOverflow && <p className="warn">{s.seedPasteTooMany}</p>}
@@ -948,7 +1175,10 @@ export function Editor(props: {
   );
 }
 
-/** One password-type box per word (OS secure input), with in-page BIP39 suggestions. */
+/** One password-type box per word (OS secure input). Nothing that is typed is echoed anywhere:
+ *  there is no list of matching words (it would put the word on screen, and in front of anything
+ *  that reads the page for accessibility). Enter still finishes a word once its start fits only
+ *  one, silently. */
 function SeedGrid(props: {
   /** The Seed Phrase word list (empty until it has loaded). */
   list: string[];
@@ -963,15 +1193,12 @@ function SeedGrid(props: {
 }) {
   const { list } = props;
   const [focus, setFocus] = useState<number | null>(null);
-  const [active, setActive] = useState(0);
   const boxes = useRef<(HTMLInputElement | null)[]>([]);
   const listId = useId();
 
-  // Suggestions are on screen, so they must not give the word away: none for a finished word,
-  // and none once the typed start fits only one word (Enter still completes it).
+  // The words the typed start could still become. Used for Enter only, never drawn.
   const prefix = focus === null ? "" : (props.words[focus] ?? "").trim().toLowerCase();
   const matches = prefix && !list.includes(prefix) ? list.filter((w) => w.startsWith(prefix)) : [];
-  const suggestions = matches.length > 1 ? matches.slice(0, 6) : [];
   // Typing or pasting several words fills the following boxes and moves on; so does a trailing
   // space. A pasted 24-word phrase switches a 12-word grid to 24.
   const set = (i: number, value: string): void => {
@@ -990,7 +1217,6 @@ function SeedGrid(props: {
     }
     props.onAccepted();
     props.onDirty();
-    setActive(0);
     props.setWords((ws) =>
       Array.from({ length: end > ws.length ? 24 : ws.length }, (_, j) => (j >= i && j < end ? (parts[j - i] ?? "") : (ws[j] ?? ""))),
     );
@@ -1019,9 +1245,6 @@ function SeedGrid(props: {
               }}
               autoFocus={props.autoFocus && i === 0}
               aria-label={s.wordN(i + 1)}
-              aria-autocomplete="list"
-              aria-controls={listId}
-              aria-activedescendant={focus === i && suggestions.length ? `${listId}-${active}` : undefined}
               value={word}
               onChange={(e) => set(i, e.target.value)}
               // Password inputs remove pasted line breaks before onChange. Read the original
@@ -1033,48 +1256,22 @@ function SeedGrid(props: {
                 e.preventDefault();
                 set(i, text);
               }}
-              onFocus={() => {
-                setFocus(i);
-                setActive(0);
-              }}
+              onFocus={() => setFocus(i)}
               onBlur={() => setFocus(null)}
               onKeyDown={(e) => {
-                if ((e.key === "ArrowDown" || e.key === "ArrowUp") && suggestions.length) {
-                  e.preventDefault();
-                  const step = e.key === "ArrowDown" ? 1 : suggestions.length - 1;
-                  setActive((a) => (a + step) % suggestions.length);
-                } else if (e.key === "Enter" && !cmdKey(e)) {
-                  // (With Cmd/Ctrl it saves: see the Editor.)
-                  e.preventDefault();
-                  const next = suggestions[active] ?? matches[0];
-                  if (next) pick(next);
-                  else boxes.current[i + 1]?.focus();
-                }
+                if (e.key !== "Enter" || cmdKey(e)) return; // (with Cmd/Ctrl it saves: see the Editor)
+                e.preventDefault();
+                // One possible word: finish it. A whole word, or one that isn't in the list: go on
+                // to the next box. Several still possible: stay, and keep typing.
+                if (matches.length === 1) pick(matches[0]!);
+                else if (!matches.length) boxes.current[i + 1]?.focus();
               }}
             />
           </li>
         ))}
       </ol>
-      {matches.length === 1 ? (
-        <p className="suggestions hint">{s.enterToFinish}</p>
-      ) : (
-        <div className="suggestions" role="listbox" id={listId} aria-label={s.suggestions}>
-          {suggestions.map((w, k) => (
-            <button
-              type="button"
-              role="option"
-              id={`${listId}-${k}`}
-              aria-selected={k === active}
-              tabIndex={-1}
-              key={w}
-              onPointerDown={(e) => e.preventDefault()}
-              onClick={() => pick(w)}
-            >
-              {w}
-            </button>
-          ))}
-        </div>
-      )}
+      {/* Always the same words, whatever has been typed. */}
+      <p className="hint">{s.enterToFinish}</p>
     </div>
   );
 }

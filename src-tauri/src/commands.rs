@@ -13,7 +13,6 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
-use notes::keys::Chain;
 use notes::seed::SeedCheck;
 use notes::{Filter, NoteSummary, NoteView};
 use session::OsEvent;
@@ -236,6 +235,11 @@ pub fn set_favorite(app: AppHandle, id: String, favorite: bool) -> Result<(), Ap
     with_core(&app, |core| core.set_favorite(&id, favorite))
 }
 
+#[tauri::command(async)]
+pub fn append_text(app: AppHandle, id: String, text: Zeroizing<String>) -> Result<(), ApiError> {
+    with_core(&app, |core| core.append_text(&id, text))
+}
+
 // ---------- showing & copying ----------
 
 #[tauri::command(async)]
@@ -261,9 +265,27 @@ pub async fn show_wallet_field(
     .await
 }
 
+#[tauri::command]
+pub async fn show_and_copy_wallet_field(
+    app: AppHandle,
+    id: String,
+    field: String,
+    master_password: Zeroizing<String>,
+) -> Result<Zeroizing<String>, ApiError> {
+    blocking(app, move |core| {
+        core.show_and_copy_wallet_field(&id, &field, master_password)
+    })
+    .await
+}
+
 #[tauri::command(async)]
 pub fn hide_field(app: AppHandle) {
     with_core(&app, AppCore::hide_field);
+}
+
+#[tauri::command(async)]
+pub fn extend_reveal(app: AppHandle) -> Result<(), ApiError> {
+    with_core(&app, AppCore::extend_reveal)
 }
 
 #[tauri::command]
@@ -279,6 +301,28 @@ pub async fn copy_field(
     .await
 }
 
+#[tauri::command(async)]
+pub fn copy_visible_field(app: AppHandle, id: String, field: String) -> Result<(), ApiError> {
+    with_core(&app, |core| core.copy_visible_field(&id, &field))
+}
+
+#[tauri::command(async)]
+pub fn copy_field_line(
+    app: AppHandle,
+    id: String,
+    field: String,
+    line: u32,
+) -> Result<(), ApiError> {
+    // A line number too large for this computer's `usize` is past the end of any value.
+    let line = usize::try_from(line).unwrap_or(usize::MAX);
+    with_core(&app, |core| core.copy_field_line(&id, &field, line))
+}
+
+#[tauri::command(async)]
+pub fn copy_field_env(app: AppHandle, id: String) -> Result<(), ApiError> {
+    with_core(&app, |core| core.copy_field_env(&id))
+}
+
 // ---------- checks ----------
 
 #[tauri::command(async)]
@@ -291,13 +335,14 @@ pub fn check_seed(app: AppHandle, phrase: Zeroizing<String>) -> Result<SeedCheck
     core(&app).check_seed(&phrase)
 }
 
+/// `chain` is free text (the Note's chain field): a name the app doesn't know means no check.
 #[tauri::command(async)]
 pub fn check_private_key(
     app: AppHandle,
-    chain: Chain,
+    chain: String,
     key: Zeroizing<String>,
 ) -> Result<Option<&'static str>, ApiError> {
-    core(&app).check_private_key(chain, &key)
+    core(&app).check_private_key(&chain, &key)
 }
 
 // ---------- Backups & Safety Copies ----------
@@ -404,6 +449,12 @@ pub fn set_settings(app: AppHandle, settings: SettingsInput) -> Result<(), ApiEr
 #[tauri::command(async)]
 pub fn mark_seed_explainer_seen(app: AppHandle) -> Result<(), ApiError> {
     with_core(&app, AppCore::mark_seed_explainer_seen)
+}
+
+/// Where this computer's Vault is kept, as text to show. Read-only, in any phase.
+#[tauri::command(async)]
+pub fn vault_location(app: AppHandle) -> String {
+    core(&app).vault_location()
 }
 
 #[tauri::command(async)]

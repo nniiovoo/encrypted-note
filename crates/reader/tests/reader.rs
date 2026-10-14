@@ -1260,6 +1260,8 @@ fn help_prints_usage_and_exits_0() {
     assert!(run.stdout.contains("--allow-non-terminal"));
     assert!(run.stdout.contains("--recovery-key"));
     assert!(run.stdout.contains("--note <number>"));
+    // Both ways of writing it that the reader accepts are shown.
+    assert!(run.stdout.contains("--note=<number>"));
     // Every exit code is listed, the one for a number no Note has included.
     assert!(run.stdout.contains("4 no Note has the number"));
 }

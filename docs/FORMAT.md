@@ -267,6 +267,13 @@ see [Schema versions](#schema-versions).
 | `updated_at` | integer | Unix time in seconds |
 | `deleted_at` | integer or `null` | non-null means the Note is in **Trash** since that time; the app removes it for good 30 days (2,592,000 s) later (optional; defaults to `null`) |
 
+An edit that changes nothing is not a change. Saving a Note with the title and the visible
+values it already has, and with no new value for a Hidden Field, leaves that Note's
+`updated_at` and the document's `changed_at` and `change_counter` exactly as they were. The
+same goes for moving a Note to Trash when it is already there, restoring one that isn't in
+Trash, and setting Favorite to what it already is. A new value for a Hidden Field always counts
+as a change, even when it equals the stored one: telling would mean opening the stored one.
+
 ### Fields by Kind
 
 | Kind | `kind` | Visible fields | Hidden Fields | Hidden values are in |
@@ -289,6 +296,10 @@ see [Schema versions](#schema-versions).
   or Private Key) or `secret` that is a single line, before storing it; a key of several lines
   (a PEM block, say) and every other Hidden Field (`password`, `passphrase`, `body`) are stored
   exactly as entered.
+* Older builds stored visible values as typed, so a body can hold one with whitespace around
+  it. When an edit sends a visible value back exactly as it is stored, byte for byte, the app
+  keeps it as it is and does not trim it; the value is trimmed the first time the owner
+  changes that field.
 
 ### The fields schema 2 added
 
@@ -307,14 +318,20 @@ All of them are optional, and a Note that has none of them looks exactly as it d
 | Seed Phrase | `derivation_path` | `visible` | the derivation path that address is found at, such as `m/44'/60'/0'/0/0` | one line |
 
 * **One line** means the value has no control characters (Unicode category Cc), which rules
-  out line breaks and tabs.
+  out line breaks and tabs, and neither of the two other characters that end a line: the line
+  separator U+2028 and the paragraph separator U+2029.
 * **Characters** are counted as Unicode code points, not bytes.
 * **`expires`** is exactly ten ASCII characters: four digits, `-`, two digits, `-`, two digits.
   The month is `01` to `12` and the day must exist in that month of the Gregorian calendar
   (`29` February only in a leap year). It carries no time of day and no time zone.
-* The rules are checked when the owner enters a value and again whenever a body is read. They
-  apply to these fields only: the fields schema 1 already had, a Private Key's `address`
-  among them, take any non-empty text, as they always did.
+* The rules are checked when the owner enters a value and again whenever a body is read, with
+  the compatibility exception below. They apply to these fields only: the fields schema 1
+  already had, a Private Key's `address` among them, take any non-empty text, as they always did.
+* The first build with these fields (12 October 2026) did not yet rule out U+2028 and U+2029.
+  Stored values containing either separator remain readable and are preserved exactly when
+  the body is saved. Sending a visible value back byte for byte as stored keeps it unchanged,
+  including during an edit of another field. New or changed values must follow the stricter
+  one-line rule; no stored value is silently rewritten or removed.
 * `secret` is an ordinary Hidden Field, stored as plain text under `hidden` beside `key`. No
   Wallet Kind gained a Hidden Field, so section 7 is unchanged: the sealed field names are
   still only `words`, `passphrase` and `key`.

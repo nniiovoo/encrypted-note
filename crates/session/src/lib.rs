@@ -9,6 +9,12 @@
 //! Rules (each one has tests):
 //! * Auto-lock: Unlocked -> Locked when `now - last_activity >= idle_minutes`. Activity is any
 //!   owner interaction the screens report.
+//! * Activity anywhere (`count_activity_anywhere`, off unless the owner turns it on): hardware
+//!   input elsewhere on the computer, which the app reads from the OS, keeps Auto-lock away
+//!   too. The idle time then runs from the last activity of either kind, but the app locks no
+//!   later than 60 minutes after the last activity inside its own window. Activity elsewhere
+//!   never moves that limit, and no activity report of either kind revives a session whose
+//!   lock is already due.
 //! * Always lock on `Sleep`, `ScreenLocked`, `UserSwitched`, `Quit`; also on `FocusLost` when
 //!   `lock_on_app_switch` is on.
 //! * Wrong credential delays: attempts 1-3 have no delay; after the 3rd consecutive failure the
@@ -20,9 +26,15 @@
 //!   is hidden on: lock, opening another Note, `FocusLost`, or the Sharing Guard going up. While
 //!   the guard is up or the app is Locked, a new reveal is refused. So is a 9th different field
 //!   within a minute: the screens never ask for that, so something else is asking.
-//! * Clipboard: a copy is cleared after 30 s, on lock, and on quit, but only if the clipboard's
-//!   change counter still equals the value right after our copy. A lock caused by switching apps
-//!   (`lock_on_app_switch`) leaves the 30 s running, so the copy can still be pasted.
+//! * More time: a value that is still shown can be given its time again, counted from the
+//!   moment of asking. `Timed` gets another 30 s as often as asked. `Accessible` gets another
+//!   20 s at most three times; after that the value has to be shown again, which takes the
+//!   Master Password. `Held` has no timer and is refused. A reveal that has ended is never
+//!   brought back.
+//! * Clipboard: a copy is cleared after 30 s (or 60 s if the owner chose that; a Wallet Kind
+//!   value always after 30 s), on lock, and on quit, but only if the clipboard's change counter
+//!   still equals the value right after our copy. A lock caused by switching apps
+//!   (`lock_on_app_switch`) leaves that timer running, so the copy can still be pasted.
 //! * Backup reminder: due when the oldest change not yet in a Backup is 7+ days old.
 
 #![forbid(unsafe_code)]
@@ -37,17 +49,31 @@ pub const HELD_REVEAL_MAX_MS: Millis = 120_000;
 /// At most [`MAX_FIELDS_PER_WINDOW`] different Hidden Fields may be shown within this long.
 pub const REVEAL_WINDOW_MS: Millis = 60_000;
 pub const MAX_FIELDS_PER_WINDOW: usize = 8;
+/// How many times one `Accessible` reveal can be given another 20 s.
+pub const MAX_ACCESSIBLE_EXTENSIONS: u32 = 3;
+/// How long a copy stays on the clipboard by default, and always for a Wallet Kind value.
 pub const CLIPBOARD_CLEAR_MS: Millis = 30_000;
+/// Clipboard clear choices offered in Settings, in seconds; default 30.
+pub const CLIPBOARD_CLEAR_SECOND_CHOICES: [u32; 2] = [30, 60];
+pub const DEFAULT_CLIPBOARD_CLEAR_SECONDS: u32 = 30;
 pub const BACKUP_REMINDER_MS: Millis = 7 * 24 * 60 * 60 * 1000;
 /// Idle choices offered in Settings; default 5.
 pub const IDLE_MINUTE_CHOICES: [u32; 7] = [1, 2, 5, 10, 15, 30, 60];
 pub const DEFAULT_IDLE_MINUTES: u32 = 5;
+/// With `count_activity_anywhere` on, the app still locks this long after the last activity
+/// inside its own window, whatever is happening elsewhere on the computer.
+pub const ACTIVITY_ANYWHERE_CAP_MS: Millis = 60 * 60_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LockSettings {
     /// One of [`IDLE_MINUTE_CHOICES`].
     pub idle_minutes: u32,
     pub lock_on_app_switch: bool,
+    /// One of [`CLIPBOARD_CLEAR_SECOND_CHOICES`]. Not used for a Wallet Kind value.
+    pub clipboard_clear_seconds: u32,
+    /// Hardware input elsewhere on the computer also keeps Auto-lock away, up to
+    /// [`ACTIVITY_ANYWHERE_CAP_MS`] after the last activity inside the app's window.
+    pub count_activity_anywhere: bool,
 }
 
 impl Default for LockSettings {
@@ -55,6 +81,8 @@ impl Default for LockSettings {
         LockSettings {
             idle_minutes: DEFAULT_IDLE_MINUTES,
             lock_on_app_switch: false,
+            clipboard_clear_seconds: DEFAULT_CLIPBOARD_CLEAR_SECONDS,
+            count_activity_anywhere: false,
         }
     }
 }
@@ -86,6 +114,28 @@ pub struct Reveal {
     pub mode: RevealMode,
     /// `None` for `Held` (which still ends after [`HELD_REVEAL_MAX_MS`]).
     pub expires_at: Option<Millis>,
+    /// How many times this reveal was given more time ([`Session::extend_reveal`]). A value
+    /// that is shown again starts from 0.
+    pub extensions: u32,
+}
+
+impl Reveal {
+    /// Whether [`Session::extend_reveal`] would still give this reveal more time: always for
+    /// `Timed`, up to [`MAX_ACCESSIBLE_EXTENSIONS`] times for `Accessible`, never for `Held`.
+    pub fn can_extend(&self) -> bool {
+        match self.mode {
+            RevealMode::Timed => true,
+            RevealMode::Accessible => self.extensions < MAX_ACCESSIBLE_EXTENSIONS,
+            RevealMode::Held => false,
+        }
+    }
+
+    /// How many more times an `Accessible` reveal can be given more time. `None` for the other
+    /// modes: `Timed` has no limit and `Held` can't be extended at all.
+    pub fn extensions_left(&self) -> Option<u32> {
+        matches!(self.mode, RevealMode::Accessible)
+            .then(|| MAX_ACCESSIBLE_EXTENSIONS.saturating_sub(self.extensions))
+    }
 }
 
 /// Things the app must do now.
@@ -107,6 +157,17 @@ pub enum RevealRefused {
     TooMany(Millis),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExtendRefused {
+    /// Nothing is shown: no value was, or it has ended (or is due to end right now).
+    NothingShown,
+    /// A `Held` reveal lasts while the button is held; it has no timer to extend.
+    Held,
+    /// This `Accessible` reveal already had [`MAX_ACCESSIBLE_EXTENSIONS`] extensions. Showing
+    /// the value again takes the Master Password.
+    LimitReached,
+}
+
 /// Delays after the 4th, 5th, 6th, 7th and every later consecutive failure.
 const FAILURE_DELAYS_MS: [Millis; 5] = [1_000, 2_000, 5_000, 10_000, 30_000];
 /// Consecutive failures allowed without any delay.
@@ -119,8 +180,11 @@ struct PendingClear {
 
 pub struct Session {
     settings: LockSettings,
-    /// `Some(last_activity)` while Unlocked.
+    /// `Some(last_activity)` while Unlocked: the last activity inside the app's own window.
     last_activity: Option<Millis>,
+    /// The last hardware input seen elsewhere on the computer since the last unlock. Only ever
+    /// set while `count_activity_anywhere` is on, and never mixed into `last_activity`.
+    last_elsewhere: Option<Millis>,
     failures: u32,
     last_failure_at: Millis,
     reveal: Option<Reveal>,
@@ -134,7 +198,8 @@ pub struct Session {
 }
 
 /// Keeps `idle_minutes` within the offered choices by snapping to the nearest one
-/// (the shorter one on a tie, which is the safer side).
+/// (the shorter one on a tie, which is the safer side), and `clipboard_clear_seconds` within
+/// its two: anything else becomes the default, which is the shorter one.
 fn sanitize(settings: LockSettings) -> LockSettings {
     let wanted = settings.idle_minutes;
     let idle_minutes = IDLE_MINUTE_CHOICES
@@ -142,8 +207,15 @@ fn sanitize(settings: LockSettings) -> LockSettings {
         .copied()
         .min_by_key(|choice| choice.abs_diff(wanted))
         .unwrap_or(DEFAULT_IDLE_MINUTES);
+    let clipboard_clear_seconds =
+        if CLIPBOARD_CLEAR_SECOND_CHOICES.contains(&settings.clipboard_clear_seconds) {
+            settings.clipboard_clear_seconds
+        } else {
+            DEFAULT_CLIPBOARD_CLEAR_SECONDS
+        };
     LockSettings {
         idle_minutes,
+        clipboard_clear_seconds,
         ..settings
     }
 }
@@ -154,6 +226,7 @@ impl Session {
         Session {
             settings: sanitize(settings),
             last_activity: None,
+            last_elsewhere: None,
             failures: 0,
             last_failure_at: 0,
             reveal: None,
@@ -169,6 +242,9 @@ impl Session {
     }
     pub fn set_settings(&mut self, settings: LockSettings) {
         self.settings = sanitize(settings);
+        if !self.settings.count_activity_anywhere {
+            self.last_elsewhere = None;
+        }
     }
 
     pub fn is_unlocked(&self) -> bool {
@@ -178,6 +254,7 @@ impl Session {
     /// Credential accepted: become Unlocked, reset failures, start the idle timer.
     pub fn unlocked(&mut self, now: Millis) {
         self.last_activity = Some(now);
+        self.last_elsewhere = None;
         self.failures = 0;
     }
 
@@ -188,7 +265,7 @@ impl Session {
         if let Some(pending) = self.clipboard.take() {
             effects.push(Effect::ClearClipboardIfUnchanged(pending.change_count));
         }
-        effects.extend(self.last_activity.take().map(|_| Effect::Lock));
+        effects.extend(self.become_locked());
         effects
     }
 
@@ -198,6 +275,23 @@ impl Session {
         if !self.auto_lock_due(now) {
             self.last_activity = self.last_activity.map(|last| last.max(now));
         }
+    }
+
+    /// Hardware input was seen somewhere on this computer at `at` (the app asks the OS; the
+    /// screens have no way to report this). Counts only while `count_activity_anywhere` is on
+    /// and the app is Unlocked.
+    ///
+    /// It is kept apart from the activity inside the window: it can move the idle time, never
+    /// the [`ACTIVITY_ANYWHERE_CAP_MS`] limit, which is counted from the last activity inside
+    /// the window alone. Like [`Session::activity`] it does not revive a session whose lock is
+    /// already due at `now`, and an `at` later than `now` counts as `now`.
+    pub fn activity_elsewhere(&mut self, at: Millis, now: Millis) {
+        if !self.settings.count_activity_anywhere || !self.is_unlocked() || self.auto_lock_due(now)
+        {
+            return;
+        }
+        let at = at.min(now);
+        self.last_elsewhere = Some(self.last_elsewhere.map_or(at, |last| last.max(at)));
     }
 
     /// Call about once a second. Returns due effects (idle lock, reveal expiry, clipboard clear).
@@ -225,11 +319,11 @@ impl Session {
             OsEvent::Sleep | OsEvent::ScreenLocked | OsEvent::UserSwitched | OsEvent::Quit => {
                 self.lock()
             }
-            // Lock, but leave a pending clipboard clear on its 30 s timer (`tick` carries it out
+            // Lock, but leave a pending clipboard clear on its timer (`tick` carries it out
             // while Locked too): the owner most likely switched apps to paste what they copied.
             OsEvent::FocusLost if self.settings.lock_on_app_switch => {
                 let mut effects = self.end_reveal();
-                effects.extend(self.last_activity.take().map(|_| Effect::Lock));
+                effects.extend(self.become_locked());
                 effects
             }
             OsEvent::FocusLost => self.end_reveal(),
@@ -238,9 +332,19 @@ impl Session {
     }
 
     /// When the app will auto-lock if nothing else happens (for the countdown). `None` if Locked.
+    ///
+    /// The idle time after the last activity inside the window. With `count_activity_anywhere`
+    /// on, activity elsewhere counts for the idle time too, but the deadline is never later than
+    /// [`ACTIVITY_ANYWHERE_CAP_MS`] after the last activity inside the window.
     pub fn lock_deadline(&self) -> Option<Millis> {
         let idle_ms = Millis::from(self.settings.idle_minutes) * 60_000;
-        self.last_activity.map(|last| last.saturating_add(idle_ms))
+        let inside = self.last_activity?;
+        if !self.settings.count_activity_anywhere {
+            return Some(inside.saturating_add(idle_ms));
+        }
+        let latest = self.last_elsewhere.map_or(inside, |at| at.max(inside));
+        let cap = inside.saturating_add(ACTIVITY_ANYWHERE_CAP_MS);
+        Some(latest.saturating_add(idle_ms).min(cap))
     }
 
     /// `Err(wait_ms)` if the owner must wait before trying another credential.
@@ -324,9 +428,43 @@ impl Session {
             field: field.to_owned(),
             mode,
             expires_at,
+            extensions: 0,
         });
         Ok(())
     }
+
+    /// The owner asked for more time for the value that is shown. On `Ok` its time starts again
+    /// from `now`: 30 s for `Timed`, 20 s for `Accessible`.
+    ///
+    /// Only a reveal that is still shown at `now` is extended. One that has ended, in any of the
+    /// ways a reveal ends, is not brought back, and neither is one whose time is up at `now`
+    /// although the tick that hides it has not run yet. `Timed` can be extended as often as
+    /// asked; `Accessible` [`MAX_ACCESSIBLE_EXTENSIONS`] times, counted in the reveal, so
+    /// showing the value again (with the Master Password) starts a new count; `Held` never.
+    pub fn extend_reveal(&mut self, now: Millis) -> Result<(), ExtendRefused> {
+        if self.auto_lock_due(now) {
+            return Err(ExtendRefused::NothingShown);
+        }
+        let Some(reveal) = self.reveal.as_mut() else {
+            return Err(ExtendRefused::NothingShown);
+        };
+        let length = match reveal.mode {
+            RevealMode::Held => return Err(ExtendRefused::Held),
+            RevealMode::Timed => TIMED_REVEAL_MS,
+            RevealMode::Accessible => ACCESSIBLE_REVEAL_MS,
+        };
+        let Some(expires_at) = reveal.expires_at.filter(|at| now < *at) else {
+            return Err(ExtendRefused::NothingShown);
+        };
+        if !reveal.can_extend() {
+            return Err(ExtendRefused::LimitReached);
+        }
+        reveal.extensions = reveal.extensions.saturating_add(1);
+        // Never earlier than it already was: asking for more time can't take time away.
+        reveal.expires_at = Some(expires_at.max(now.saturating_add(length)));
+        Ok(())
+    }
+
     /// Held button released (or owner clicked Hide). `HideReveal` if a value was shown.
     pub fn end_reveal(&mut self) -> Vec<Effect> {
         Vec::from_iter(self.reveal.take().map(|_| Effect::HideReveal))
@@ -358,7 +496,19 @@ impl Session {
     }
 
     /// We just wrote to the clipboard; `change_count` is the clipboard's counter after our write.
+    /// Cleared after the time the owner chose (`clipboard_clear_seconds`). A Wallet Kind value
+    /// is reported with [`Session::copied_wallet_value`] instead.
     pub fn copied(&mut self, change_count: u64, now: Millis) {
+        let clear_ms = Millis::from(self.settings.clipboard_clear_seconds) * 1000;
+        self.clipboard = Some(PendingClear {
+            change_count,
+            due_at: now.saturating_add(clear_ms),
+        });
+    }
+
+    /// We just wrote a Wallet Kind value to the clipboard: cleared after [`CLIPBOARD_CLEAR_MS`],
+    /// whatever `clipboard_clear_seconds` says.
+    pub fn copied_wallet_value(&mut self, change_count: u64, now: Millis) {
         self.clipboard = Some(PendingClear {
             change_count,
             due_at: now.saturating_add(CLIPBOARD_CLEAR_MS),
@@ -386,6 +536,12 @@ impl Session {
 
     fn auto_lock_due(&self, now: Millis) -> bool {
         self.lock_deadline().is_some_and(|deadline| now >= deadline)
+    }
+
+    /// Forget when the owner was last active, here and elsewhere. `Lock` if the app was Unlocked.
+    fn become_locked(&mut self) -> Option<Effect> {
+        self.last_elsewhere = None;
+        self.last_activity.take().map(|_| Effect::Lock)
     }
 }
 

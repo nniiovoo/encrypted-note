@@ -209,8 +209,9 @@ pub struct NewNote {
     pub hidden: BTreeMap<String, Zeroizing<String>>,
 }
 
-/// An edit. `None`/absent means "keep". An empty visible value removes the field, and so does
-/// one that is only whitespace. For Hidden Fields, an empty new value clears the field.
+/// An edit. `None`/absent means "keep", and so does a visible value that is exactly the stored
+/// one. An empty visible value removes the field, and so does one that is only whitespace. For
+/// Hidden Fields, an empty new value clears the field.
 #[derive(Default)]
 pub struct NoteEdit {
     pub title: Option<String>,
@@ -281,8 +282,10 @@ impl Document {
     }
 
     /// Parse a decrypted body. Schema 1 and 2 are read; any other version is
-    /// `UnsupportedSchema`. Rejects Kind/field mismatches, values that break the rule for
-    /// their field, and a body that says schema 1 but uses a field schema 2 added.
+    /// `UnsupportedSchema`. Rejects Kind/field mismatches, values that break the original
+    /// stored rules for their field, and a body that says schema 1 but uses a field schema 2
+    /// added. Legacy Unicode line and paragraph separators in visible values are preserved;
+    /// new or changed values must exclude them.
     pub fn from_json(bytes: &[u8]) -> Result<Document, NotesError> {
         // The version is read on its own first, so a body from another schema gets a clear
         // "unsupported schema" error instead of failing somewhere inside the Notes.
@@ -412,6 +415,12 @@ impl Document {
     /// Hidden Field changes nothing: `updated_at`, `changed_at` and the change counter stay.
     /// A supplied Hidden Field value always counts as a change, even one equal to the stored
     /// value (telling would mean opening the stored one).
+    ///
+    /// A visible value sent back byte for byte as it is stored means "keep", and is set aside
+    /// before anything is trimmed. Builds from before visible values were trimmed stored them
+    /// as typed, and an Editor saved untouched sends such a value back as it is: trimming it
+    /// first would make that save look like an edit. A value that differs from the stored one
+    /// in any way is a real edit of that field: it is trimmed, checked and counted.
     pub fn update(
         &mut self,
         id: &str,
@@ -422,7 +431,9 @@ impl Document {
         let note = self.find(id)?;
         let kind = note.kind;
         let title = edit.title.map(|t| checked_title(&t)).transpose()?;
-        let visible = checked_visible(kind, edit.visible)?;
+        let mut supplied = edit.visible;
+        supplied.retain(|name, value| note.visible.get(name) != Some(&*value));
+        let visible = checked_visible(kind, supplied)?;
         let (hidden, word_count) = checked_hidden(kind, edit.hidden)?;
         if kind.is_wallet() && cipher.is_none() && !hidden.is_empty() {
             return Err(NotesError::NeedsWalletKey);

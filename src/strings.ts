@@ -7,6 +7,9 @@ import type { Chain, CloudProvider, Kind } from "./api";
 const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
 // The same with the thousands marked ("1,704 characters"), for lengths.
 const counted = (n: number, one: string, many: string) => `${n.toLocaleString("en-US")} ${n === 1 ? one : many}`;
+// "A, B and C", for a list of field names inside a sentence.
+const listed = (items: string[], last: "and" | "or") =>
+  items.length < 2 ? items.join("") : `${items.slice(0, -1).join(", ")} ${last} ${items[items.length - 1]}`;
 const cloudNames: Record<Exclude<CloudProvider, "mac_desktop_or_documents">, string> = {
   i_cloud_drive: "iCloud Drive",
   one_drive: "OneDrive",
@@ -17,7 +20,9 @@ const cloudNames: Record<Exclude<CloudProvider, "mac_desktop_or_documents">, str
 export const strings = {
   appName: "encrypted-note",
   statusLine: "Encrypted · Stored only on this computer · Never connects to the internet",
-  locksIn: (time: string) => `Locks in ${time}`,
+  // `anywhere`: the owner chose in Settings to count activity anywhere on this computer.
+  locksIn: (time: string, anywhere: boolean) =>
+    `Locks in ${time}${anywhere ? ", counting activity anywhere on this computer" : ""}`,
   lastBackup: (date: string) => `Last backup ${date}`,
   neverBackedUp: "No Backup yet",
   lastBackupUnbacked: (date: string) => `Last backup ${date}, newer changes not backed up`,
@@ -135,14 +140,29 @@ export const strings = {
   sortRecent: "Recent",
   sortAZ: "A to Z",
   copyFrom: (field: string, title: string) => `Copy ${field} of ${title}`,
+  // What a screen reader says for the row the arrow keys are on while typing in the search box.
+  markedRow: (title: string, kind: string) => `${title}, ${kind}`,
   backupReminder: "Your latest changes haven't been backed up for over a week.",
   backUpNow: "Back up now",
   goToBackups: "Go to Backups",
+  // An API Key's expiry date, set against today's date on this computer.
+  expired: "Expired",
+  expiresIn: (days: number) => (days === 0 ? "Expires today" : days === 1 ? "Expires tomorrow" : `Expires in ${days} days`),
+  // `past`: API Keys whose date has gone by; `soon`: those within `days` days of it.
+  expiryBanner: (past: number, soon: number, days: number) =>
+    past && soon
+      ? `${plural(past, "API Key is past its expiry date", "API Keys are past their expiry date")}, and ${soon} more ${soon === 1 ? "expires" : "expire"} within ${days} days.`
+      : past
+        ? `${plural(past, "API Key is past its expiry date", "API Keys are past their expiry date")}.`
+        : `${plural(soon, "API Key expires", "API Keys expire")} within ${days} days.`,
+  showApiKeys: "Show API Keys",
   captureOn: (mac: boolean) => (mac ? "Screen-capture protection: on (best-effort on Mac)" : "Screen-capture protection: on"),
   captureOff: "Screen-capture protection is off. Avoid sharing your screen while this app is open.",
   captureUnknown: "Screen-capture protection: can't check on this computer",
   copied: (s: number) => `Copied. The clipboard clears in ${s} s.`,
-  copiedAnnounce: "Copied. The clipboard clears in 30 seconds.",
+  // Said once per copy, with the time that copy has: 30 or 60 seconds as chosen in Settings, and
+  // always 30 for a Seed Phrase or Private Key.
+  copiedAnnounce: (s: number) => `Copied. The clipboard clears in ${plural(s, "second", "seconds")}.`,
 
   // Note detail
   created: (date: string) => `Created ${date}`,
@@ -155,6 +175,10 @@ export const strings = {
   add: "Add",
   // What a screen reader says for a button repeated on every row, e.g. "Copy Password".
   fieldAction: (action: string, field: string) => `${action} ${field}`,
+  // One line of a shown value of several lines. `line` counts from 1; never what the line holds.
+  copyLine: (line: number, field: string) => `Copy line ${line} of ${field}`,
+  // An API Key with a variable name: the name is a visible part of the Note, the key is not shown.
+  copyAsEnv: (name: string) => `Copy as ${name}=value`,
   edit: "Edit",
   duplicate: "Duplicate",
   duplicateTitle: (title: string) => `${title} copy`,
@@ -168,7 +192,7 @@ export const strings = {
   movedToTrash: "Moved to Trash. It's kept there for 30 days.",
   empty: "Empty",
   hidesIn: (s: number) => `Hides in ${s} s`,
-  // Showing again starts the 30 seconds afresh; it doesn't add 30 to what is left.
+  // More time starts the 30 seconds afresh; it doesn't add 30 to what is left.
   resetTimer: "Reset to 30 s",
   resetTimerFor: (field: string) => `Reset to 30 s for ${field}`,
   keepHolding: "Released before it appeared. Keep holding until it shows.",
@@ -177,14 +201,19 @@ export const strings = {
     "Type your Master Password, then press Enter to show it for 20 seconds, or press and hold the button to show it only while you hold (keyboard: Tab to the button, then hold Space).",
   holdToShow: "Hold to show",
   showFor20: "Show for 20 seconds",
+  showFor20AndCopy: "Show for 20 seconds and copy",
+  // A Seed Phrase or Private Key shown for 20 seconds: more time starts the 20 seconds afresh,
+  // like the 30 above, three times at most.
+  resetTimer20: "Reset to 20 s",
+  moreTimesLeft: (n: number) =>
+    n > 0 ? `${plural(n, "time", "times")} left` : "No more time can be added. Enter your Master Password to show it again.",
   copyTitle: (field: string) => `Copy ${field}`,
-  copyText: "Enter your Master Password to copy. The clipboard clears after 30 seconds.",
+  copyText: (s: number) => `Enter your Master Password to copy. The clipboard clears after ${s} seconds.`,
   copySeedTitle: "Copy this Seed Phrase?",
   copySeedText: "Seed phrases are safest typed by hand. Copy anyway?",
   copyAnyway: "Copy anyway",
   wordN: (n: number) => `Word ${n}`,
-  suggestions: "Word suggestions",
-  enterToFinish: "Press Enter to finish this word.",
+  enterToFinish: "Type the first letters of a word, then press Enter: once they fit only one word, it is finished for you.",
 
   // Editor
   newTitle: (kind: string) => `New ${kind}`,
@@ -201,9 +230,39 @@ export const strings = {
   words: (n: number) => `${n} words`,
   leaveBlankToKeep: "Leave blank to keep the current value",
   leaveBlankToKeepWords: "Leave every word blank to keep the current words.",
-  passphraseTip: "Only if your wallet uses one. Write it on paper too: without it the words alone won't restore the wallet.",
-  expiryDateHint: "Use YYYY-MM-DD, for example 2027-01-31.",
-  variableNameHint: "Use letters, digits and underscores, starting with a letter or underscore; at most 128 characters.",
+  // What a field is for, under its box. Only where the label alone doesn't say it.
+  hints: {
+    seed_phrase: {
+      address: "One of this wallet's public addresses, so you can tell which wallet this is.",
+      derivation_path: "Where that address is found in the wallet, for example m/44'/60'/0'/0/0.",
+      passphrase: "Only if your wallet uses one. Write it on paper too: without it the words alone won't restore the wallet.",
+    },
+    private_key: {},
+    login: { purpose: "One line, up to 200 characters, saying what this Login is for." },
+    api_key: {
+      key_id: "The half that isn't hidden, such as an access key ID.",
+      purpose: "One line, up to 200 characters, saying what this key is for.",
+      url: "Where you manage this key. It is kept as text you can copy; the app never opens it.",
+      expires: "Use YYYY-MM-DD, for example 2027-01-31. The list marks this key when the day is near.",
+      env_var:
+        "The name your programs read this key from. Use letters, digits and underscores, starting with a letter or underscore; at most 128 characters. With a name, the key can be copied as NAME=value.",
+      secret: "Only if the service gives you a second hidden part. It is hidden like the key.",
+    },
+    text: {},
+  } as Record<Kind, Record<string, string>>,
+  expiryPlaceholder: "YYYY-MM-DD",
+  // Under the fields of the Editor. `hidden`: the Kind's Hidden Fields, by label.
+  notHidden: (hidden: string[]) =>
+    `Hidden: ${listed(hidden, "and")}. Everything else in this Note is always visible: shown without Show, and found by search.`,
+  // `fields`: the optional parts that older versions of the app can't read, by label.
+  needsCurrentApp: (fields: string[]) =>
+    `Once ${listed(fields, "or")} is filled in, this Vault needs a current encrypted-note on every computer that opens it, and a current Emergency Reader. Update those first, before you move the Vault there.`,
+  // Editing a Text that has text in it: two ways to save what is typed.
+  textMode: "With what you type",
+  replaceTheText: "Replace the text",
+  addToTheEnd: "Add to the end",
+  typeToAdd: "Type what to add. The text already there stays hidden.",
+  addsText: "Saving adds this after the current text, on a new line.",
   unknownWords: (positions: number[]) =>
     `${positions.length === 1 ? "Word" : "Words"} ${positions.join(", ")} ${positions.length === 1 ? "isn't" : "aren't"} in the standard word list. You can still save.`,
   checksumFailed: "These words don't pass the standard checksum, so one may be mistyped. You can still save.",
@@ -259,11 +318,24 @@ export const strings = {
   autoLockAfter: "Lock after this long without use",
   minutes: (m: number) => `${m} min`,
   lockOnSwitch: "Lock when I switch to another app",
+  lockOnSwitchHint: "A copy made just before you switch stays on the clipboard for its normal time, so you can still paste it.",
+  // Offered only where the computer can tell when it was last used (the Mac, for now).
+  // `locksOnSwitch`: the switch above is on, which this one doesn't change.
+  countActivityAnywhere: "Count my activity anywhere on this computer",
+  countActivityAnywhereHint: (locksOnSwitch: boolean) =>
+    `With this on, using the keyboard or mouse in any app counts as use, so the app stays Unlocked while this computer is in use. It still locks after 60 minutes without activity in its own window, and at once when the computer sleeps, the screen locks or you switch users.${
+      locksOnSwitch ? " It also still locks when you switch to another app, as chosen above." : ""
+    }`,
   alwaysLocks: "It always locks when your computer sleeps, the screen locks, the lid closes or you switch users.",
+  clipboardClearAfter: "Clear a copy from the clipboard after",
+  clipboardSeconds: (n: number) => `${n} seconds`,
+  walletCopiesClearAfter30: "Copies of Seed Phrases and Private Keys always clear after 30 seconds.",
   backupsTitle: "Backups",
   backingUp: "Backing up…",
   backupDone: (n: number) => `Backup saved and checked: ${plural(n, "Note", "Notes")}.`,
   exfatTip: "Tip: format your USB stick as exFAT so both Mac and Windows can read it.",
+  // The folder's path ends the line: a full stop after it could be read as part of it.
+  vaultFolder: (folder: string) => `Your Vault and its Safety Copies are kept on this computer in: ${folder}`,
   // Desktop/Documents only *may* be synced (iCloud setting), so it gets "may" wording.
   cloudTitle: (cloud: CloudProvider) =>
     cloud === "mac_desktop_or_documents" ? "This folder may go to the internet" : "This folder goes to the internet",
@@ -281,6 +353,16 @@ export const strings = {
   openIt: "Open",
   previewNotes: (n: number) => `It holds ${plural(n, "Note", "Notes")}.`,
   previewChanged: (date: string) => `Last changed ${date}.`,
+  // The same two facts with this computer's Vault beside the copy, where the two can be compared.
+  compareCopy: (safetyCopy: boolean) => (safetyCopy ? "This Safety Copy" : "This Backup"),
+  compareHere: "This computer's Vault",
+  compareNotes: "Notes",
+  compareChanged: "Last changed",
+  // `n`: Notes here, not in Trash, that the copy doesn't hold at all. A number only, never a title.
+  onlyHereWarning: (n: number, safetyCopy: boolean) =>
+    `${plural(n, "Note exists", "Notes exist")} only on this computer: this ${safetyCopy ? "Safety Copy" : "Backup"} doesn't hold ${
+      n === 1 ? "it" : "them"
+    }. After you open it, ${n === 1 ? "that Note" : "those Notes"} will remain only in a Safety Copy on this computer.`,
   olderWarning: (safetyCopy: boolean) =>
     `This ${safetyCopy ? "Safety Copy" : "Backup"} doesn't have every change that is in the Vault on this computer: it is older, or the two were changed separately. Opening it replaces those changes (they're kept as a Safety Copy).`,
   cannotCompareWarning:

@@ -29,10 +29,16 @@
     "allow-delete-forever",
     "allow-empty-trash",
     "allow-set-favorite",
+    "allow-append-text",
     "allow-show-field",
     "allow-show-wallet-field",
+    "allow-show-and-copy-wallet-field",
     "allow-hide-field",
+    "allow-extend-reveal",
     "allow-copy-field",
+    "allow-copy-visible-field",
+    "allow-copy-field-line",
+    "allow-copy-field-env",
     "allow-seed-wordlist",
     "allow-check-seed",
     "allow-check-private-key",
@@ -49,6 +55,7 @@
     "allow-change-password",
     "allow-set-settings",
     "allow-mark-seed-explainer-seen",
+    "allow-vault-location",
     "allow-dismiss-sharing-guard"
   ]
 }
