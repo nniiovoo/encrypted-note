@@ -21,9 +21,18 @@ export function App() {
   // only, and gone on any lock. A ref: nothing here is drawn from it, and typing in the Editor
   // must not redraw the whole window.
   const draft = useRef<Draft | null>(null);
+  // Counts the outcomes reported from outside Home (see below). Home is keyed by it, so a Home
+  // that is already drawn starts again instead of keeping the place it was given.
+  const [restarts, setRestarts] = useState(0);
   const lockedOnPurpose = useRef(false);
   const phase = status?.phase;
   const forgetPlace = () => setPlace((p) => ({ ...START, sort: p.sort }));
+  // A Backup or Safety Copy was installed, or the password changed: start afresh.
+  const outcome = (message: string) => {
+    forgetPlace();
+    draft.current = null;
+    setOperationOutcome(message);
+  };
   // The Lock button and the Lock shortcut: the owner chose to leave, so the place is not kept.
   const lockNow = () => {
     lockedOnPurpose.current = true;
@@ -44,9 +53,11 @@ export function App() {
     };
     poll();
     const timer = setInterval(poll, 1000);
-    // Activity for Auto-lock, at most once per 5 s.
+    // Activity for Auto-lock, at most once per 5 s. A key that is merely held down (auto-repeat)
+    // is not someone using the app: a stuck or leaned-on key must not keep Auto-lock away.
     let last = 0;
-    const onActivity = () => {
+    const onActivity = (e: Event) => {
+      if (e instanceof KeyboardEvent && e.repeat) return;
       if (Date.now() - last < 5000) return;
       last = Date.now();
       activity().catch(() => {});
@@ -100,16 +111,21 @@ export function App() {
           setKit={setKit}
           place={place}
           onPlace={setPlace}
-          draft={draft.current}
+          restarts={restarts}
+          // A reader, not the draft itself: a prop would go on holding the draft after a lock
+          // has emptied the ref.
+          readDraft={() => draft.current}
           onDraft={(now) => {
             draft.current = now;
           }}
           onLock={lockNow}
-          onOperationOutcome={(message) => {
-            // A Backup or Safety Copy was installed, or the password changed: start afresh.
-            forgetPlace();
-            draft.current = null;
-            setOperationOutcome(message);
+          onOperationOutcome={outcome}
+          // The status that unlocks can arrive before the outcome does, and then Home is already
+          // drawn from the place it was given: it starts again. Not for an outcome from Settings,
+          // which is inside Home and would be closed by that.
+          onOutcomeOutside={(message) => {
+            outcome(message);
+            setRestarts((n) => n + 1);
           }}
         />
       )}
@@ -117,17 +133,22 @@ export function App() {
   );
 }
 
-function Screen({ status, kit, setKit, place, onPlace, draft, onDraft, onLock, onOperationOutcome }: {
+function Screen({ status, kit, setKit, place, onPlace, restarts, readDraft, onDraft, onLock, onOperationOutcome, onOutcomeOutside }: {
   status: AppStatus;
   kit: Kit | null;
   setKit: (kit: Kit) => void;
   place: Place;
   onPlace: (place: Place) => void;
-  /** Read by Home when it appears; see Home. */
-  draft: Draft | null;
+  /** Keys Home: when it changes, Home starts again from `place`. */
+  restarts: number;
+  /** Read by Home once, when it appears; see Home. */
+  readDraft: () => Draft | null;
   onDraft: (draft: Draft | null) => void;
   onLock: () => void;
+  /** Reported from Settings, inside Home. */
   onOperationOutcome: (message: string) => void;
+  /** Reported from the Locked or first-run screen. */
+  onOutcomeOutside: (message: string) => void;
 }) {
   // The first-run screen can show a suggested Master Password in plain text.
   const sensitive = status.phase !== "locked";
@@ -139,20 +160,21 @@ function Screen({ status, kit, setKit, place, onPlace, draft, onDraft, onLock, o
   if (shield) return <Shield apps={status.sharing_guard.apps} afterUnlock={seen.before === "locked"} />;
   switch (status.phase) {
     case "no_vault":
-      return <NoVault onKit={(key) => setKit({ key, rotation: false })} onOperationOutcome={onOperationOutcome} />;
+      return <NoVault onKit={(key) => setKit({ key, rotation: false })} onOperationOutcome={onOutcomeOutside} />;
     case "confirm_recovery_kit":
       return kit ? <RecoveryKit kit={kit} /> : <KitLost />;
     case "locked":
-      return <Locked status={status} onOperationOutcome={onOperationOutcome} />;
+      return <Locked status={status} onOperationOutcome={onOutcomeOutside} />;
     case "needs_new_password":
       return <NewPasswordScreen />;
     case "unlocked":
       return (
         <Home
+          key={restarts}
           status={status}
           place={place}
           onPlace={onPlace}
-          draft={draft}
+          readDraft={readDraft}
           onDraft={onDraft}
           onLock={onLock}
           onKit={(key) => setKit({ key, rotation: true })}

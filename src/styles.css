@@ -281,6 +281,16 @@ textarea:focus-visible {
   margin: 0;
   flex: none;
 }
+/* A setting with the line that explains it: closer together than two settings are. */
+.setting {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+/* A folder's path as text: it breaks wherever the line ends, never wider than its box. */
+.path {
+  overflow-wrap: anywhere;
+}
 
 /* Choice: a segmented control. */
 .choice {
@@ -289,6 +299,10 @@ textarea:focus-visible {
   align-items: flex-start;
   gap: 5px;
   min-width: 0;
+}
+/* A Choice about the box under it (Replace the text, or Add to the end): set a little apart. */
+.field > .choice {
+  margin-bottom: 7px;
 }
 /* A Choice with a button beside it, level with the control (Clear all words). */
 .choice-row {
@@ -388,6 +402,11 @@ textarea:focus-visible {
 .stack > button:not(.big),
 .center > button:not(.big) {
   align-self: flex-start;
+}
+/* A status line that is there before its text (so that the text is read out when it comes)
+   takes no room until then, not even the stack's gap. */
+.stack > [role="status"]:empty {
+  position: absolute;
 }
 .actions {
   display: flex;
@@ -501,6 +520,26 @@ details.card ul {
 }
 .modal > form > .actions {
   margin-top: 4px;
+}
+/* The time a shown value has left, with the button for more: under the value, where it starts. */
+.modal .actions.start {
+  justify-content: flex-start;
+  margin-top: 0;
+}
+/* A copy set beside this computer's Vault, before it replaces it: a small table without lines. */
+.compare {
+  align-self: flex-start;
+  border-collapse: collapse;
+}
+.compare th,
+.compare td {
+  padding: 2px 20px 2px 0;
+  text-align: left;
+  vertical-align: top;
+  font-weight: 400;
+}
+.compare th {
+  color: var(--muted);
 }
 /* A short question (Confirm): centered, with the app icon, like a Mac alert. */
 .modal.alert {
@@ -947,6 +986,17 @@ li:has(:focus-visible) > .row-copy {
 .row.on .fav {
   color: #ffffff;
 }
+/* An API Key's expiry date, once it is near or past: in a list row, and beside the date. */
+.expiry {
+  color: var(--warn);
+  font-weight: 600;
+}
+.expiry.past {
+  color: var(--danger);
+}
+.row.on .expiry {
+  color: #ffffff;
+}
 .list-pane > .hint {
   padding: 12px 8px;
   text-align: center;
@@ -1080,13 +1130,18 @@ li:has(:focus-visible) > .row-copy {
 }
 
 /* Note detail */
+/* In a narrow pane (the smallest window) the title block keeps a readable width and the buttons
+   go to a line of their own, at the right. Where everything fits on one line, the title block
+   takes what is left, as before. */
 .detail-head {
   display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   align-items: center;
-  gap: 14px;
+  gap: 8px 14px;
 }
 .detail-head > div {
-  flex: 1;
+  flex: 1 1 160px;
   min-width: 0;
 }
 .detail-head h1 {
@@ -1129,6 +1184,19 @@ li:has(:focus-visible) > .row-copy {
   padding-top: 3px;
   overflow-wrap: anywhere;
 }
+/* A visible field with its Copy button, which stays at the top right however long the value is.
+   In a pane too narrow for both beside the label, the field goes under its label. */
+.fields dd.copyable {
+  flex-basis: 200px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 8px 12px;
+  padding-top: 0;
+}
+.copyable > span {
+  padding-top: 3px;
+}
 /* A Hidden Field: the dots give way to the buttons, whose line is the same whether the value is
    shown or not, so Show and Hide never move. The shown value goes underneath. In a pane too
    narrow for the buttons beside the label, the whole field goes under its label. */
@@ -1147,6 +1215,21 @@ li:has(:focus-visible) > .row-copy {
 /* Show and Hide are the same button; it keeps one width. */
 .secret .toggle {
   min-width: 74px;
+}
+/* Copy as NAME=value, on a line of its own under the buttons. A variable name longer than the
+   pane is wide is cut short here; it is whole in its own row. */
+.secret > .env {
+  grid-column: 1 / -1;
+  min-width: 0;
+}
+.secret > .env > button {
+  max-width: 100%;
+}
+.secret > .env span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .secret > .shown {
   grid-column: 1 / -1;
@@ -1169,6 +1252,27 @@ li:has(:focus-visible) > .row-copy {
   padding: 7px 10px;
   border-radius: 7px;
   background: var(--fill);
+}
+/* A shown value of several lines: one row a line, with a Copy button for each line that holds
+   something. An empty line keeps its height. */
+.value.lines > div {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 8px;
+  min-height: 22px;
+}
+.value.lines > div > span {
+  padding-top: 2px;
+}
+.value.lines button {
+  min-height: 22px;
+  padding: 2px 5px;
+  color: var(--muted);
+}
+.value.lines .icon {
+  width: 14px;
+  height: 14px;
 }
 
 .seed {
@@ -1196,20 +1300,6 @@ li:has(:focus-visible) > .row-copy {
   text-align: right;
   color: var(--muted);
   font-size: 11px;
-}
-.suggestions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  min-height: 28px;
-}
-.suggestions button {
-  font-family: var(--mono);
-  min-height: 24px;
-  padding: 2px 10px;
-}
-.suggestions [aria-selected="true"] {
-  box-shadow: 0 0 0 2px var(--accent);
 }
 .sr-only {
   /* fixed, not absolute: an absolutely placed element at the page end made the app scrollable */

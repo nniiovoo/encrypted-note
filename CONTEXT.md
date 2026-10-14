@@ -41,7 +41,7 @@ The two states of an open app: **Unlocked** means the **Vault** can be read; **L
 _Avoid_: logged in / logged out, open / closed
 
 **Auto-lock**:
-The owner-chosen rule for when an **Unlocked** app becomes **Locked** by itself (default: 5 minutes idle, and instantly on sleep, screen lock or lid close).
+The owner-chosen rule for when an **Unlocked** app becomes **Locked** by itself (default: 5 minutes idle, and instantly on sleep, screen lock or lid close). Idle means no use of the app's own window. On a Mac the owner can choose to count keyboard and mouse use anywhere on the computer as well; the app then still becomes **Locked** no later than 60 minutes after its own window was last used.
 _Avoid_: timeout, session expiry
 
 **Quick Unlock**:
@@ -73,7 +73,7 @@ The shape of a **Note**, which decides its form and how it's displayed: Seed Phr
 _Avoid_: type, category, template
 
 **Hidden Field**:
-A part of a **Note** shown as dots or blur until the owner clicks Show; it hides again after 30 seconds or when another **Note** is opened (**Wallet Kinds** are stricter: see there).
+A part of a **Note** shown as dots or blur until the owner clicks Show; it hides again after 30 seconds, or another 30 each time the owner asks for more time while it is shown, or when another **Note** is opened (**Wallet Kinds** are stricter: see there).
 _Avoid_: secret field, masked field, protected field
 
 **Seed Phrase**:
@@ -88,7 +88,7 @@ _Avoid_: using "passphrase" for the **Master Password**
 A **Kind** of **Note** holding one wallet/account private key, with the chain it belongs to and its public address.
 
 **Wallet Kinds**:
-**Seed Phrase** and **Private Key**, the **Kinds** that can move funds directly. Their **Hidden Fields** stay encrypted even while the app is **Unlocked**. Showing, adding or editing them needs the **Master Password** again. Shown values stay visible while the Show button or Space key is held, or for 20 seconds when the timed reveal option is chosen.
+**Seed Phrase** and **Private Key**, the **Kinds** that can move funds directly. Their **Hidden Fields** stay encrypted even while the app is **Unlocked**. Showing, adding or editing them needs the **Master Password** again. Shown values stay visible while the Show button or Space key is held, or for 20 seconds when the timed reveal option is chosen; those 20 seconds can be given again three times, after which showing the value takes the **Master Password** once more.
 _Avoid_: sensitive kinds, crypto notes
 
 **Login**:
@@ -121,13 +121,16 @@ _Avoid_: pinned, bookmarked, starred item
 - A **Vault** holds zero or more **Notes**; each **Note** has exactly one **Kind**.
 - Every **Note** has a title, which is never a **Hidden Field**.
 - **Hidden Fields** by **Kind**: the words and **Passphrase** of a **Seed Phrase** (wallet name, address and derivation path stay visible); the key of a **Private Key** (chain and address stay visible); the password of a **Login** (website, username and purpose stay visible); the key and the secret of an **API Key** (service name, key ID, purpose, where it is managed, expiry date and variable name stay visible); the whole body of a **Text**.
+- A **Text** can have text added to its end without showing what is already there.
 - While the **Sharing Guard** is up, no **Hidden Field** can be shown, and the window shows only the shield (no titles either).
+- A copied value is cleared from the clipboard after 30 seconds, or 60 if the owner chooses that; a **Wallet Kind** value always after 30. The visible parts of a **Note** can be copied too, and that never needs the **Master Password**.
 - **Capture Hiding** is always on; the **Sharing Guard** exists because **Capture Hiding** alone can't be trusted on Mac.
 - Search matches only the visible parts of a **Note** (title, website, username, purpose, wallet name, chain, address, derivation path, service name, key ID, where it is managed, expiry date, variable name), never its **Hidden Fields**. Several words can be typed: a **Note** is found when each word is somewhere in those parts, in any order, and a **Private Key** is also found by the name of its chain (such as "ethereum").
 - A **Vault** opens with either its **Master Password** or its **Recovery Key**; nothing else can open it.
 - A **Vault** has exactly one **Recovery Key**, shown to the owner once, at setup, to write onto their **Recovery Kit**.
 - **Safety Copies** stay on this computer; a **Backup** is the owner's copy somewhere else. Both are complete **Vaults**.
 - The **Emergency Reader** never writes **Notes** to disk; it only shows them.
+- A **Vault** that uses any of the newer optional parts of a **Note** (the address or derivation path of a **Seed Phrase**; the purpose of a **Login**; the key ID, secret, purpose, where it is managed, expiry date or variable name of an **API Key**), even on a **Note** in **Trash**, opens only in a current app and a current **Emergency Reader**. Older ones refuse the whole file, and some of them call it damaged, so the app on the other computer and any saved **Emergency Reader** must be updated first, before such a **Vault** is moved there.
 - A **Note** in **Trash** is still inside the **Vault** (still encrypted); "Delete forever" removes it from this copy only; older copies still contain it.
 - Removing a **Wallet Kind** needs the **Master Password**, like every other change to one: moving it to **Trash**, "Delete forever", and emptying a **Trash** that holds one.
 - Changing the **Master Password** changes it only in the copy of the **Vault** where it was changed; older copies still open with the old **Master Password** and old **Recovery Key**.

@@ -23,3 +23,6 @@ agentdb.rvf.lock
 
 # macOS metadata sidecars on exFAT/FAT drives (e.g. a portable disk)
 ._*
+
+# temporary command-tool download archives
+/archive-*/gk_*.zip

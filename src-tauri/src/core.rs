@@ -15,7 +15,7 @@
 //! it and parse the document, then rename over the Vault (store crate).
 
 use std::cell::Cell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use notes::keys::Chain;
@@ -25,7 +25,7 @@ use notes::{
 };
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
-use session::{Effect, LockSettings, OsEvent, RevealMode, RevealRefused, Session};
+use session::{Effect, ExtendRefused, LockSettings, OsEvent, RevealMode, RevealRefused, Session};
 use store::{CloudProvider, SafetyKind, StoreError, VaultDir};
 use vault_format::{Credential, KdfParams, Limits, RecoveryKey, UnlockedVault, WalletKey};
 use zeroize::Zeroizing;
@@ -56,6 +56,10 @@ pub struct Config {
     pub limits: Limits,
     pub clock: Box<dyn Clock>,
     pub clipboard: Box<dyn Clipboard>,
+    /// Whether the app can ask the OS when hardware input was last seen anywhere on this
+    /// computer (`platform::ms_since_last_input`). Where it can't, "count activity anywhere"
+    /// stays off whatever the settings say.
+    pub activity_anywhere_supported: bool,
 }
 
 // ---------- API shapes (src/api.ts) ----------
@@ -101,10 +105,16 @@ pub enum ShowMode {
     Accessible,
 }
 
+/// The two newer settings are optional: left out, each keeps the value it has.
 #[derive(Clone, Copy, Debug, Deserialize)]
 pub struct SettingsInput {
     pub idle_minutes: u32,
     pub lock_on_app_switch: bool,
+    /// 30 or 60; anything else becomes 30.
+    #[serde(default)]
+    pub clipboard_clear_seconds: Option<u32>,
+    #[serde(default)]
+    pub count_activity_anywhere: Option<bool>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -117,6 +127,10 @@ pub struct AppStatus {
     pub sharing_guard: GuardView,
     pub lock_in_ms: Option<u64>,
     pub clipboard_clear_in_ms: Option<u64>,
+    /// How many copies this run of the app has put on the clipboard: a count only, never what
+    /// was copied. The screens tell a new copy by it; the time left can't say (a Wallet Kind
+    /// copy may have less than the copy before it, and a clear that is tried again has more).
+    pub copies: u64,
     pub reveal: Option<RevealView>,
     pub failed_attempts: u32,
     pub retry_in_ms: Option<u64>,
@@ -140,6 +154,11 @@ pub struct RevealView {
     pub note_id: String,
     pub field: String,
     pub expires_in_ms: Option<u64>,
+    /// Whether `extend_reveal` would give this value more time right now.
+    pub can_extend: bool,
+    /// For a Wallet Kind value shown for 20 s: how many more times it can be given more time.
+    /// `None` where there is no such count (an ordinary Kind, or a value shown while held).
+    pub extensions_left: Option<u32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -154,6 +173,11 @@ pub struct SettingsView {
     pub idle_minutes: u32,
     pub lock_on_app_switch: bool,
     pub seed_explainer_seen: bool,
+    /// 30 or 60. A copied Wallet Kind value is cleared after 30 s either way.
+    pub clipboard_clear_seconds: u32,
+    pub count_activity_anywhere: bool,
+    /// False where the app can't see input outside its own window: the setting then stays off.
+    pub count_activity_anywhere_supported: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -194,6 +218,17 @@ pub struct VaultPreview {
     pub older_than_current: Option<bool>,
     /// Installing this copy replaces a Vault that exists on this computer.
     pub replaces_vault: bool,
+    // The next three say what this computer's Vault holds, so the owner can be told what the
+    // copy would replace. All three are `Some` only when the Vault here is Unlocked and the
+    // copy is a copy of that same Vault. Otherwise all three are `None`: there is nothing to
+    // compare, or the Vault here is Locked.
+    /// Notes in this computer's Vault that are not in Trash.
+    pub current_note_count: Option<usize>,
+    /// When this computer's Vault was last changed.
+    pub current_changed_at: Option<i64>,
+    /// How many Notes here (not in Trash) the copy doesn't hold at all, its Trash included.
+    /// A number only, never titles.
+    pub only_here: Option<usize>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -259,6 +294,10 @@ struct StoredSettings {
     failed_attempts: u32,
     /// When an unlock first found Notes whose 30 days in Trash were over (see `purge_trash`).
     trash_expiry_seen_at: Option<i64>,
+    /// How long a copy stays on the clipboard: 30 or 60 (the session crate keeps it to those).
+    clipboard_clear_seconds: u32,
+    /// The owner's choice to count hardware input anywhere on the computer as activity.
+    count_activity_anywhere: bool,
 }
 
 impl Default for StoredSettings {
@@ -271,17 +310,22 @@ impl Default for StoredSettings {
             oldest_unbacked_change_at: None,
             failed_attempts: 0,
             trash_expiry_seen_at: None,
+            clipboard_clear_seconds: session::DEFAULT_CLIPBOARD_CLEAR_SECONDS,
+            count_activity_anywhere: false,
         }
     }
 }
 
 impl StoredSettings {
     /// For a settings file that is there but can't be read: the strictest lock rules, not the
-    /// defaults, so damaging the file can only make the app lock sooner.
+    /// defaults, so damaging the file can only make the app lock sooner (and clear a copy
+    /// sooner, and count nothing but activity inside its own window).
     fn strictest() -> Self {
         StoredSettings {
             idle_minutes: session::IDLE_MINUTE_CHOICES[0],
             lock_on_app_switch: true,
+            clipboard_clear_seconds: session::CLIPBOARD_CLEAR_SECOND_CHOICES[0],
+            count_activity_anywhere: false,
             ..StoredSettings::default()
         }
     }
@@ -358,6 +402,8 @@ pub struct AppCore {
     limits: Limits,
     clock: Box<dyn Clock>,
     clipboard: Box<dyn Clipboard>,
+    /// Copies written to the clipboard since the app started (`AppStatus::copies`).
+    copies: u64,
     session: Session,
     guard: guard::GuardState,
     detected: Vec<&'static str>,
@@ -365,6 +411,7 @@ pub struct AppCore {
     phase: Phase,
     settings: StoredSettings,
     settings_unreadable: bool,
+    activity_anywhere_supported: bool,
     backup_destination: Option<BackupDestination>,
     backup_to_open: Option<PathBuf>,
     inspected: Option<Inspected>,
@@ -385,9 +432,13 @@ impl AppCore {
         };
         let settings_unreadable = stored.is_none();
         let settings = stored.unwrap_or_else(StoredSettings::strictest);
+        let activity_anywhere_supported = config.activity_anywhere_supported;
         let mut session = Session::new(LockSettings {
             idle_minutes: settings.idle_minutes,
             lock_on_app_switch: settings.lock_on_app_switch,
+            clipboard_clear_seconds: settings.clipboard_clear_seconds,
+            count_activity_anywhere: settings.count_activity_anywhere
+                && activity_anywhere_supported,
         });
         if settings.failed_attempts > 0 {
             session.restore_failures(settings.failed_attempts, config.clock.now_ms());
@@ -403,6 +454,7 @@ impl AppCore {
             limits: config.limits,
             clock: config.clock,
             clipboard: config.clipboard,
+            copies: 0,
             session,
             guard: guard::GuardState::new(),
             detected: Vec::new(),
@@ -410,6 +462,7 @@ impl AppCore {
             phase,
             settings,
             settings_unreadable,
+            activity_anywhere_supported,
             backup_destination: None,
             backup_to_open: None,
             inspected: None,
@@ -447,10 +500,14 @@ impl AppCore {
                 .session
                 .clipboard_clear_at()
                 .map(|at| at.saturating_sub(now)),
+            copies: self.copies,
             reveal: self.session.current_reveal().map(|r| RevealView {
                 note_id: r.note_id.clone(),
                 field: r.field.clone(),
                 expires_in_ms: r.expires_at.map(|at| at.saturating_sub(now)),
+                // Not for one whose time is up although the tick that hides it hasn't run.
+                can_extend: r.can_extend() && r.expires_at.is_some_and(|at| now < at),
+                extensions_left: r.extensions_left(),
             }),
             failed_attempts: self.session.failed_attempts(),
             retry_in_ms: self.session.attempt_allowed(now).err(),
@@ -470,6 +527,9 @@ impl AppCore {
                 idle_minutes: lock.idle_minutes,
                 lock_on_app_switch: lock.lock_on_app_switch,
                 seed_explainer_seen: self.settings.seed_explainer_seen,
+                clipboard_clear_seconds: lock.clipboard_clear_seconds,
+                count_activity_anywhere: lock.count_activity_anywhere,
+                count_activity_anywhere_supported: self.activity_anywhere_supported,
             },
         }
     }
@@ -487,6 +547,22 @@ impl AppCore {
     /// Owner activity (keeps Auto-lock away).
     pub fn activity(&mut self) {
         self.session.activity(self.clock.now_ms());
+    }
+
+    /// Whether the app should be asking the OS about input outside its window at all: the owner
+    /// turned "count activity anywhere" on, this computer supports it, and a Vault is open.
+    pub fn counts_activity_anywhere(&self) -> bool {
+        self.session.settings().count_activity_anywhere && self.session.is_unlocked()
+    }
+
+    /// The OS saw hardware input somewhere on this computer `ago_ms` milliseconds ago. Only the
+    /// app's own background loop reports this; the screens have no command for it. Whether and
+    /// how far it keeps Auto-lock away is the session crate's rule: only with "count activity
+    /// anywhere" on, and never past 60 minutes after the last activity inside the window.
+    pub fn activity_elsewhere(&mut self, ago_ms: u64) {
+        let now = self.clock.now_ms();
+        self.session
+            .activity_elsewhere(now.saturating_sub(ago_ms), now);
     }
 
     /// Carry out whatever is due: Auto-lock, reveal expiry, clipboard clear. Called about twice a
@@ -827,6 +903,14 @@ impl AppCore {
         self.mutate(|doc, now| doc.set_favorite(id, favorite, now))
     }
 
+    /// Adds `text` to the end of a Text Note's body, on a new line. The screens send only the
+    /// new text: the body is joined inside the notes crate and never leaves Rust, so adding a
+    /// line doesn't mean showing the Note first. Saved like any other edit; nothing is returned.
+    pub fn append_text(&mut self, id: &str, text: Zeroizing<String>) -> Result<(), ApiError> {
+        self.tick();
+        self.mutate(|doc, now| doc.append_text(id, &text, now))
+    }
+
     // ---------- showing & copying ----------
 
     /// Non-wallet Kinds: the value, shown for 30 s.
@@ -872,12 +956,63 @@ impl AppCore {
         Ok(value)
     }
 
+    /// Wallet Kinds: show the value for 20 s and copy it, with one Master Password entry and
+    /// one Wallet Key derivation. Never a held reveal: there is no button being held.
+    ///
+    /// The reveal comes first and counts toward the 8 different fields a minute like any
+    /// other. Only once it has started is the clipboard written, so a refused reveal copies
+    /// nothing. The copy is cleared after 30 s, as every Wallet Kind copy is.
+    pub fn show_and_copy_wallet_field(
+        &mut self,
+        id: &str,
+        field: &str,
+        master_password: Zeroizing<String>,
+    ) -> Result<Zeroizing<String>, ApiError> {
+        self.tick();
+        self.open()?;
+        self.guard_check()?;
+        if !self.note_kind(id)?.is_wallet() {
+            return Err(err("invalid_input", MSG_NOT_WALLET));
+        }
+        let wallet = self.wallet(Some(master_password))?;
+        let value = self
+            .open()?
+            .doc
+            .reveal_wallet(id, field, &wallet)
+            .map_err(notes_error)?;
+        drop(wallet);
+        self.session
+            .start_reveal(id, field, RevealMode::Accessible, self.clock.now_ms())
+            .map_err(reveal_refused)?;
+        if let Err(e) = self.copy_out(&value, true) {
+            // Nothing was copied, and the value is not handed over either: nothing is shown.
+            let effects = self.session.end_reveal();
+            self.apply(effects);
+            return Err(e);
+        }
+        Ok(value)
+    }
+
     pub fn hide_field(&mut self) {
         let effects = self.session.end_reveal();
         self.apply(effects);
     }
 
-    /// Writes the value straight to the clipboard (never returned); cleared after 30 s if unchanged.
+    /// More time for the value that is shown now: another 30 s for an ordinary Kind, as often
+    /// as asked; another 20 s for a Wallet Kind value, three times at most, after which it has
+    /// to be shown again with the Master Password. A value shown while held has no timer, and
+    /// one that is no longer shown is not brought back.
+    pub fn extend_reveal(&mut self) -> Result<(), ApiError> {
+        self.tick();
+        self.open()?;
+        self.guard_check()?;
+        self.session
+            .extend_reveal(self.clock.now_ms())
+            .map_err(extend_refused)
+    }
+
+    /// Writes the value straight to the clipboard (never returned); cleared after the time the
+    /// owner chose if unchanged, a Wallet Kind value always after 30 s.
     pub fn copy_field(
         &mut self,
         id: &str,
@@ -887,16 +1022,84 @@ impl AppCore {
         self.tick();
         self.open()?;
         self.guard_check()?;
-        let value = if self.note_kind(id)?.is_wallet() {
+        let wallet_kind = self.note_kind(id)?.is_wallet();
+        let value = if wallet_kind {
             let wallet = self.wallet(master_password)?;
             self.open()?.doc.reveal_wallet(id, field, &wallet)
         } else {
             self.open()?.doc.reveal(id, field)
         }
         .map_err(notes_error)?;
-        let change_count = self.clipboard.write(&value)?;
-        self.session.copied(change_count, self.clock.now_ms());
-        Ok(())
+        self.copy_out(&value, wallet_kind)
+    }
+
+    /// Writes one visible field (a username, website, service, public address...) to the
+    /// clipboard, privately and with the same timed clear as a Hidden Field.
+    ///
+    /// No Master Password, for a Wallet Kind either: its visible parts can be read by anyone at
+    /// the Unlocked app. `word_count` is not copied: the app worked that number out, nobody
+    /// entered it. A Hidden Field name is refused here; those go through [`AppCore::copy_field`].
+    pub fn copy_visible_field(&mut self, id: &str, field: &str) -> Result<(), ApiError> {
+        self.tick();
+        self.open()?;
+        self.guard_check()?;
+        let view = self.open()?.doc.get(id).ok_or_else(note_not_found)?;
+        if field == notes::field::WORD_COUNT || !view.kind.visible_fields().contains(&field) {
+            return Err(err("invalid_input", MSG_NOT_VISIBLE));
+        }
+        let value = view
+            .visible
+            .get(field)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| notes_error(NotesError::EmptyField))?;
+        self.copy_out(value, false)
+    }
+
+    /// Writes one line of a Hidden Field to the clipboard, never returning it: line `line`,
+    /// counted from 0 over every line of the value (split at each line feed, the way the
+    /// screens split a shown value), without its line ending. Not for Wallet Kinds, whose
+    /// values are copied whole and with the Master Password.
+    pub fn copy_field_line(&mut self, id: &str, field: &str, line: usize) -> Result<(), ApiError> {
+        self.tick();
+        self.open()?;
+        self.guard_check()?;
+        if self.note_kind(id)?.is_wallet() {
+            return Err(err("invalid_input", MSG_LINE_NOT_WALLET));
+        }
+        let value = self.open()?.doc.reveal(id, field).map_err(notes_error)?;
+        let chosen = value
+            .split('\n')
+            .nth(line)
+            .ok_or_else(|| err("not_found", MSG_NO_SUCH_LINE))?;
+        let chosen = chosen.strip_suffix('\r').unwrap_or(chosen);
+        if chosen.is_empty() {
+            return Err(err("not_found", MSG_EMPTY_LINE));
+        }
+        self.copy_out(chosen, false)
+    }
+
+    /// Writes `NAME=value` to the clipboard for an API Key that has a variable name and a key:
+    /// the line a shell or an environment file takes. The key is never returned.
+    pub fn copy_field_env(&mut self, id: &str) -> Result<(), ApiError> {
+        self.tick();
+        self.open()?;
+        self.guard_check()?;
+        let view = self.open()?.doc.get(id).ok_or_else(note_not_found)?;
+        if view.kind != Kind::ApiKey {
+            return Err(err("invalid_input", MSG_ENV_NOT_API_KEY));
+        }
+        let name = view
+            .visible
+            .get(notes::field::ENV_VAR)
+            .filter(|name| !name.is_empty())
+            .ok_or_else(|| err("invalid_input", MSG_ENV_NO_NAME))?;
+        let key = self
+            .open()?
+            .doc
+            .reveal(id, notes::field::KEY)
+            .map_err(notes_error)?;
+        let line = env_line(name, &key)?;
+        self.copy_out(&line, false)
     }
 
     // ---------- checks ----------
@@ -910,13 +1113,15 @@ impl AppCore {
         Ok(notes::seed::check(phrase))
     }
 
+    /// `chain` is whatever the Note's chain field holds, which is free text: a name the app
+    /// doesn't know is checked as "other", which means no check and no hint.
     pub fn check_private_key(
         &self,
-        chain: Chain,
+        chain: &str,
         key: &str,
     ) -> Result<Option<&'static str>, ApiError> {
         self.open()?;
-        Ok(notes::keys::check_private_key(chain, key))
+        Ok(notes::keys::check_private_key(Chain::for_check(chain), key))
     }
 
     // ---------- Backups & Safety Copies ----------
@@ -1128,17 +1333,35 @@ impl AppCore {
         })
     }
 
+    /// A setting the input leaves out keeps its value. "Count activity anywhere" can only be
+    /// turned on where the app can see input outside its window.
     pub fn set_settings(&mut self, settings: SettingsInput) -> Result<(), ApiError> {
         self.tick();
         self.open()?;
+        let current = self.session.settings();
         self.session.set_settings(LockSettings {
             idle_minutes: settings.idle_minutes,
             lock_on_app_switch: settings.lock_on_app_switch,
+            clipboard_clear_seconds: settings
+                .clipboard_clear_seconds
+                .unwrap_or(current.clipboard_clear_seconds),
+            count_activity_anywhere: settings
+                .count_activity_anywhere
+                .unwrap_or(current.count_activity_anywhere)
+                && self.activity_anywhere_supported,
         });
         let applied = self.session.settings();
         self.settings.idle_minutes = applied.idle_minutes;
         self.settings.lock_on_app_switch = applied.lock_on_app_switch;
+        self.settings.clipboard_clear_seconds = applied.clipboard_clear_seconds;
+        self.settings.count_activity_anywhere = applied.count_activity_anywhere;
         self.write_settings()
+    }
+
+    /// The folder this computer's Vault file and Safety Copies are kept in, as text to show.
+    /// Not a secret, and the same in every phase.
+    pub fn vault_location(&self) -> String {
+        self.dir.root().display().to_string()
     }
 
     pub fn mark_seed_explainer_seen(&mut self) -> Result<(), ApiError> {
@@ -1221,6 +1444,21 @@ impl AppCore {
         } else {
             Ok(())
         }
+    }
+
+    /// Put `text` on the clipboard privately and start the timer that clears it: the time the
+    /// owner chose, or always 30 s for a Wallet Kind value (`wallet_value`). Every copy that
+    /// reached the clipboard is counted for the status; a refused one is not.
+    fn copy_out(&mut self, text: &str, wallet_value: bool) -> Result<(), ApiError> {
+        let change_count = self.clipboard.write(text)?;
+        self.copies = self.copies.wrapping_add(1);
+        let now = self.clock.now_ms();
+        if wallet_value {
+            self.session.copied_wallet_value(change_count, now);
+        } else {
+            self.session.copied(change_count, now);
+        }
+        Ok(())
     }
 
     /// Backups are available in NoVault, Locked and Unlocked states. Every copy still takes its
@@ -1426,9 +1664,20 @@ impl AppCore {
         })?;
         let doc = Document::from_json(&body).map_err(notes_error)?;
         let copy = Open { vault, doc };
+        // What this computer has that the copy lacks can be told only while the Vault here is
+        // readable (Unlocked) and the copy is a copy of that same Vault.
+        let same_vault_here = match &self.phase {
+            Phase::Unlocked(current) if current.vault.vault_id() == copy.vault.vault_id() => {
+                Some(&current.doc)
+            }
+            _ => None,
+        };
         let preview = VaultPreview {
             note_count: copy.doc.count(),
             changed_at: copy.doc.changed_at(),
+            current_note_count: same_vault_here.map(Document::count),
+            current_changed_at: same_vault_here.map(Document::changed_at),
+            only_here: same_vault_here.map(|here| notes_only_in(here, &copy.doc)),
             older_than_current: match &self.phase {
                 Phase::Unlocked(current) => Some(lacks_changes_of(&copy, current)),
                 // The Vault here is Locked. The credential just given often opens it too (a
@@ -1533,6 +1782,53 @@ fn lacks_changes_of(copy: &Open, current: &Open) -> bool {
     } else {
         copy.doc.changed_at() < current.doc.changed_at()
     }
+}
+
+/// How many Notes of `here` that are not in Trash have an id `copy` doesn't hold anywhere, its
+/// Trash included: the Notes the owner would no longer have after replacing `here` with `copy`.
+fn notes_only_in(here: &Document, copy: &Document) -> usize {
+    let in_copy: BTreeSet<String> = [Filter::All, Filter::Trash]
+        .into_iter()
+        .flat_map(|filter| copy.list(filter, ""))
+        .map(|note| note.id)
+        .collect();
+    here.list(Filter::All, "")
+        .iter()
+        .filter(|note| !in_copy.contains(&note.id))
+        .count()
+}
+
+/// `NAME=value` for a shell or an environment file, built in one wiping buffer of exactly the
+/// size needed (a growing one would leave shorter copies of the key behind as it grew).
+///
+/// A value made only of ASCII letters, digits and `_ @ % + = : , . / -` is written bare. Any
+/// other value goes inside single quotes, where a shell takes every character as it is. That
+/// leaves two things that can't be written: a single quote, which would end the quoting, and a
+/// line break, which would make it more than one line.
+fn env_line(name: &str, value: &str) -> Result<Zeroizing<String>, ApiError> {
+    let bare = value
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || "_@%+=:,./-".contains(c));
+    if !bare && value.chars().any(|c| c == '\'' || is_line_break(c)) {
+        return Err(err("invalid_input", MSG_ENV_CANNOT_QUOTE));
+    }
+    let quote = if bare { "" } else { "'" };
+    let mut line = Zeroizing::new(String::with_capacity(
+        name.len() + 1 + value.len() + 2 * quote.len(),
+    ));
+    for part in [name, "=", quote, value, quote] {
+        line.push_str(part);
+    }
+    Ok(line)
+}
+
+/// The characters that end a line: line feed, carriage return, vertical tab, form feed, next
+/// line, and the Unicode line and paragraph separators.
+fn is_line_break(c: char) -> bool {
+    matches!(
+        c,
+        '\n' | '\r' | '\u{0b}' | '\u{0c}' | '\u{85}' | '\u{2028}' | '\u{2029}'
+    )
 }
 
 /// Note count of a written file, if it reopens with `vault`'s keys and parses.
@@ -1664,7 +1960,28 @@ const MSG_BAD_ENV_VAR: &str = "A variable name can use letters, digits and under
 const MSG_BAD_PURPOSE: &str = "Keep the purpose to one line of up to 200 characters.";
 const MSG_ONE_LINE_ONLY: &str =
     "One of the fields has a line break or a tab in it. Keep each of them to one line.";
+const MSG_BAD_KEY_ID: &str = "The key ID has a line break or a tab in it. Keep it to one line.";
+const MSG_BAD_URL: &str =
+    "The management URL has a line break or a tab in it. Keep it to one line.";
+const MSG_BAD_ADDRESS: &str =
+    "The public address has a line break or a tab in it. Keep it to one line.";
+const MSG_BAD_DERIVATION_PATH: &str =
+    "The derivation path has a line break or a tab in it. Keep it to one line.";
 const MSG_NOTHING_TO_ADD: &str = "Type the text to add first.";
+const MSG_NOT_VISIBLE: &str =
+    "Only the parts of a Note that are always visible can be copied this way.";
+const MSG_LINE_NOT_WALLET: &str =
+    "A Seed Phrase or Private Key is copied whole, with your Master Password.";
+const MSG_NO_SUCH_LINE: &str = "That line isn't there any more. Show the value again, then copy.";
+const MSG_EMPTY_LINE: &str = "That line is empty.";
+const MSG_ENV_NOT_API_KEY: &str = "Only an API Key can be copied as NAME=value.";
+const MSG_ENV_NO_NAME: &str = "Add a variable name to this API Key first.";
+const MSG_ENV_CANNOT_QUOTE: &str = "This key has a line break or a single quote in it, so it can't be written as NAME=value. Copy the key by itself.";
+const MSG_NOTHING_SHOWN: &str = "That value isn't shown any more. Show it again.";
+const MSG_HELD_NO_TIMER: &str =
+    "A value shown while the button is held stays for as long as it is held.";
+const MSG_EXTEND_LIMIT: &str =
+    "This value has been given more time three times. Enter your Master Password to show it again.";
 const MSG_KIT_MISMATCH: &str =
     "That doesn't match the end of your Recovery Key. Check what you wrote down and try again.";
 const MSG_PICK_DESTINATION: &str = "Choose where to save the Backup first.";
@@ -1718,6 +2035,14 @@ fn reveal_refused(refused: RevealRefused) -> ApiError {
     }
 }
 
+fn extend_refused(refused: ExtendRefused) -> ApiError {
+    match refused {
+        ExtendRefused::NothingShown => err("not_found", MSG_NOTHING_SHOWN),
+        ExtendRefused::Held => err("invalid_input", MSG_HELD_NO_TIMER),
+        ExtendRefused::LimitReached => err("invalid_input", MSG_EXTEND_LIMIT),
+    }
+}
+
 fn format_error(e: vault_format::Error, kind: CredKind) -> ApiError {
     use vault_format::Error as E;
     match e {
@@ -1754,14 +2079,19 @@ fn notes_error(e: NotesError) -> ApiError {
     }
 }
 
-/// What to say when a value breaks the rule for its field. The notes crate reports the
-/// field's name only, so the value itself can never end up in the message.
+/// What to say when a value breaks the rule for its field, naming the field the way the
+/// Editor labels it. The notes crate reports the field's name only, so the value itself can
+/// never end up in the message.
 fn invalid_value_message(field_name: &str) -> &'static str {
     match field_name {
         notes::field::EXPIRES => MSG_BAD_EXPIRES,
         notes::field::ENV_VAR => MSG_BAD_ENV_VAR,
         notes::field::PURPOSE => MSG_BAD_PURPOSE,
         notes::field::BODY => MSG_NOTHING_TO_ADD,
+        notes::field::KEY_ID => MSG_BAD_KEY_ID,
+        notes::field::URL => MSG_BAD_URL,
+        notes::field::ADDRESS => MSG_BAD_ADDRESS,
+        notes::field::DERIVATION_PATH => MSG_BAD_DERIVATION_PATH,
         _ => MSG_ONE_LINE_ONLY,
     }
 }

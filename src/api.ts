@@ -5,8 +5,10 @@
 //
 // Trust rules the Rust side enforces:
 // * Listing returns visible fields only. A Hidden Field value is returned only by showField /
-//   showWalletField, one at a time, and the screens must drop it when told to hide.
-// * Copy never returns the value: Rust writes the clipboard itself.
+//   showWalletField / showAndCopyWalletField, one at a time, and the screens must drop it when
+//   told to hide.
+// * Copy never returns the value: Rust writes the clipboard itself. That goes for one line of a
+//   value and for NAME=value too. Text added to a Text Note is joined to its body in Rust.
 // * Passwords and Recovery Keys are sent once and the calling screen clears its input afterwards.
 
 import { invoke } from "@tauri-apps/api/core";
@@ -34,6 +36,12 @@ export interface NoteSummary {
   favorite: boolean;
   updated_at: number;
   deleted_at: number | null;
+  /** The expiry date of an API Key (YYYY-MM-DD). null for one without a date and for every
+   *  other Kind. Rust always sends it. */
+  expires?: string | null;
+  /** Whether the Kind's first Hidden Field has a value, so a row knows whether there is
+   *  anything to copy. Rust always sends it. */
+  has_hidden?: boolean;
 }
 
 export interface NoteView {
@@ -61,6 +69,27 @@ export interface Settings {
   idle_minutes: number;
   lock_on_app_switch: boolean;
   seed_explainer_seen: boolean;
+  /** How long a copy stays on the clipboard: 30 (default) or 60 seconds. A copied Wallet Kind
+   *  value is cleared after 30 either way. Rust always sends it. */
+  clipboard_clear_seconds?: number;
+  /** The owner's choice (off by default) to count keyboard and mouse use anywhere on this
+   *  computer as activity for Auto-lock. Even then the app locks no later than 60 minutes after
+   *  the last activity inside its own window; lock_in_ms is the real countdown. Rust always
+   *  sends it. */
+  count_activity_anywhere?: boolean;
+  /** Whether this computer can do that (the Mac only, for now). Where it is false the setting
+   *  stays off whatever is sent. Rust always sends it. */
+  count_activity_anywhere_supported?: boolean;
+}
+
+/** What setSettings takes. The lock rule is always sent. Each of the two newer settings may be
+ *  left out, which keeps the value it has. */
+export interface SettingsInput {
+  idle_minutes: number;
+  lock_on_app_switch: boolean;
+  /** 30 or 60; anything else becomes 30. */
+  clipboard_clear_seconds?: number;
+  count_activity_anywhere?: boolean;
 }
 
 export interface AppStatus {
@@ -75,8 +104,25 @@ export interface AppStatus {
   lock_in_ms: number | null;
   /** Milliseconds until the clipboard is cleared, null if nothing pending. */
   clipboard_clear_in_ms: number | null;
+  /** How many copies the app has put on the clipboard since it started: a count, never what
+   *  was copied. It goes up by one for every copy that worked, so a change means a new copy;
+   *  the time left can't tell (a Wallet Kind copy may have less than the one before it, and a
+   *  clear that is being tried again has more). A lock doesn't reset it. Rust always sends
+   *  it. */
+  copies?: number;
   /** The currently shown Hidden Field, if any (screens hide anything else). */
-  reveal: { note_id: string; field: string; expires_in_ms: number | null } | null;
+  reveal: {
+    note_id: string;
+    field: string;
+    expires_in_ms: number | null;
+    /** Whether extendReveal would give this value more time right now. Never for a value
+     *  shown while held. Rust always sends it. */
+    can_extend?: boolean;
+    /** For a Wallet Kind value shown for 20 s: how many more times it can be given more time
+     *  (3 at first). null where there is no such count: an ordinary Kind (no limit) or a held
+     *  value (never). Rust always sends it. */
+    extensions_left?: number | null;
+  } | null;
   failed_attempts: number;
   /** Milliseconds before another unlock attempt is allowed, null if allowed now. */
   retry_in_ms: number | null;
@@ -123,6 +169,17 @@ export interface VaultPreview {
   older_than_current: boolean | null;
   /** Installing this copy replaces a Vault that exists on this computer. */
   replaces_vault: boolean;
+  // What this computer's Vault holds, to say what installing the copy would replace. All three
+  // have a value only when the Vault here is Unlocked and the copy is a copy of that same
+  // Vault. Otherwise all three are null: there is nothing to compare, or the Vault here is
+  // Locked. Rust always sends them.
+  /** Notes in this computer's Vault that are not in Trash. */
+  current_note_count?: number | null;
+  /** When this computer's Vault was last changed (Unix seconds, like changed_at). */
+  current_changed_at?: number | null;
+  /** How many Notes here (not in Trash) the copy doesn't hold at all, its Trash included.
+   *  A number only: no titles are sent. */
+  only_here?: number | null;
 }
 
 export interface SafetyCopy {
@@ -211,6 +268,11 @@ export const deleteForever = (id: string, masterPassword?: string) =>
 export const emptyTrash = (masterPassword?: string) =>
   invoke<number>("empty_trash", { masterPassword: masterPassword ?? null });
 export const setFavorite = (id: string, favorite: boolean) => invoke<void>("set_favorite", { id, favorite });
+/** Adds text to the end of a Text Note's body, on a new line (none is added when the body is
+ *  empty or already ends with a line break). Only the new text is sent: Rust joins it to the
+ *  body and saves, and nothing comes back, so the Note need not be shown first. Text Notes
+ *  only; an empty text is refused. */
+export const appendText = (id: string, text: string) => invoke<void>("append_text", { id, text });
 
 // ---------- showing & copying ----------
 
@@ -219,16 +281,46 @@ export const showField = (id: string, field: string) => invoke<string>("show_fie
 /** Wallet Kinds: Master Password again; mode "held" (until hideField) or "accessible" (20 s). */
 export const showWalletField = (id: string, field: string, masterPassword: string, mode: "held" | "accessible") =>
   invoke<string>("show_wallet_field", { id, field, masterPassword, mode });
+/** Wallet Kinds: one Master Password entry shows the value for 20 s (never held) and copies it.
+ *  Returns the value to show, like showWalletField in "accessible" mode. If the reveal is
+ *  refused (code "too_many", "sharing_guard_up") nothing is copied either. The copy is cleared
+ *  after 30 s. */
+export const showAndCopyWalletField = (id: string, field: string, masterPassword: string) =>
+  invoke<string>("show_and_copy_wallet_field", { id, field, masterPassword });
 export const hideField = () => invoke<void>("hide_field");
-/** Rust writes the clipboard privately and clears it after 30 s. Wallet Kinds need the password. */
+/** More time for the value shown now, counted from this call: another 30 s for a non-wallet
+ *  Kind, as often as asked; another 20 s for a Wallet Kind value, three times at most
+ *  (status.reveal.extensions_left), then it must be shown again with the Master Password.
+ *  Rejects with "not_found" when nothing is shown any more (it is never brought back) and with
+ *  "invalid_input" for a held value or one that has had its three. status.reveal.can_extend
+ *  says beforehand whether this will work. */
+export const extendReveal = () => invoke<void>("extend_reveal");
+/** Rust writes the clipboard privately and clears it after the time chosen in Settings (30 or
+ *  60 s; a Wallet Kind value always after 30 s). Wallet Kinds need the password. */
 export const copyField = (id: string, field: string, masterPassword?: string) =>
   invoke<void>("copy_field", { id, field, masterPassword: masterPassword ?? null });
+/** Copies one visible field (username, website, service, public address, ...) the same private,
+ *  timed way. No Master Password, for Wallet Kinds either. `field` must be a visible field of
+ *  the Note's Kind other than word_count; an empty one is refused like an empty Hidden Field. */
+export const copyVisibleField = (id: string, field: string) => invoke<void>("copy_visible_field", { id, field });
+/** Copies one line of a Hidden Field without the value coming to the screens. `line` counts
+ *  from 0 over every line of the value, exactly as `value.split("\n")` numbers them; a trailing
+ *  "\r" is left off. An empty line and a line past the end are refused ("not_found").
+ *  Non-wallet Kinds only. */
+export const copyFieldLine = (id: string, field: string, line: number) =>
+  invoke<void>("copy_field_line", { id, field, line });
+/** For an API Key with a variable name (env_var) and a key: copies NAME=value, the value bare
+ *  or in single quotes as a shell needs. A key with a line break or a single quote in it is
+ *  refused ("invalid_input"); copyField still copies that key by itself. */
+export const copyFieldEnv = (id: string) => invoke<void>("copy_field_env", { id });
 
 // ---------- checks ----------
 
 export const seedWordlist = () => invoke<string[]>("seed_wordlist");
 export const checkSeed = (phrase: string) => invoke<SeedCheck>("check_seed", { phrase });
-export const checkPrivateKey = (chain: Chain, key: string) => invoke<string | null>("check_private_key", { chain, key });
+/** `chain` is the Note's chain field as it is, a Chain or any name the owner typed: a name the
+ *  app doesn't know is checked like "other" (no check, null). */
+export const checkPrivateKey = (chain: string, key: string) => invoke<string | null>("check_private_key", { chain, key });
 
 // ---------- Backups & Safety Copies ----------
 
@@ -260,7 +352,10 @@ export const restoreSafetyCopy = () => invoke<void>("restore_safety_copy");
  *  to show, and phase -> confirm_recovery_kit. */
 export const changePassword = (currentPassword: string, newPassword: string, rotate: boolean) =>
   invoke<{ recovery_key: string | null }>("change_password", { currentPassword, newPassword, rotate });
-export const setSettings = (settings: Omit<Settings, "seed_explainer_seen">) => invoke<void>("set_settings", { settings });
+export const setSettings = (settings: SettingsInput) => invoke<void>("set_settings", { settings });
 export const markSeedExplainerSeen = () => invoke<void>("mark_seed_explainer_seen");
+/** The folder this computer's Vault file and Safety Copies are in, as text to show (built like
+ *  PickedFile.display_path). Not a secret; works in every phase. */
+export const vaultLocation = () => invoke<string>("vault_location");
 /** "I'm not sharing right now". */
 export const dismissSharingGuard = () => invoke<void>("dismiss_sharing_guard");

@@ -10,6 +10,9 @@
 //! * [`clear_leftover_copy`]: at startup, clear a copy the last run didn't live to clear.
 //! * [`real_home_dir`]: the owner's home folder, even inside the Mac App Sandbox.
 //! * [`continuous_ms`]: a monotonic clock that keeps counting while the computer sleeps.
+//! * [`ms_since_last_input`]: how long ago the keyboard, mouse or trackpad was last used in
+//!   any app, for the opt-in "count activity anywhere" Auto-lock setting (macOS only). A key
+//!   that is merely held down does not count as use.
 //!
 //! macOS and Windows are implemented here; other platforms get harmless stand-ins (no self-check,
 //! no running apps, no copy).
@@ -158,6 +161,53 @@ mod mac {
         Some(secs.saturating_mul(1000).saturating_add(nanos / 1_000_000))
     }
 
+    // CoreGraphics is already linked (the window list above comes from it). This one function
+    // is declared here because the `CGEventSource` part of objc2-core-graphics is not among
+    // the features this app turns on, and turning on a feature would change the dependency set.
+    #[link(name = "CoreGraphics", kind = "framework")]
+    unsafe extern "C" {
+        /// `CFTimeInterval CGEventSourceSecondsSinceLastEventType(CGEventSourceStateID,
+        /// CGEventType)`: an `int32_t` enum, a `uint32_t` enum, a `double` in seconds.
+        fn CGEventSourceSecondsSinceLastEventType(state_id: i32, event_type: u32) -> f64;
+    }
+
+    /// `kCGEventSourceStateHIDSystemState`: input from the hardware, whichever app it went to.
+    const HID_SYSTEM_STATE: i32 = 1;
+    /// The `CGEventType`s that count as someone using the computer: a mouse button going down
+    /// or up (left 1 and 2, right 3 and 4, any other 25 and 26), the pointer moving (5) or
+    /// dragging (6, 7, 27), a key coming up (11), a modifier key changing (12), scrolling (22).
+    ///
+    /// Key down (10) is left out on purpose, and so is `kCGAnyInputEventType`, which includes
+    /// it: a key that is merely held down sends key-downs for as long as it is held, and a
+    /// stuck or leaned-on key must not keep Auto-lock away (the app's own window ignores key
+    /// auto-repeat for the same reason). Typing still counts, through the key-up that ends each
+    /// stroke. Whatever else is left out (a tablet pen, a touch on the trackpad that moves
+    /// nothing) can only make the app lock sooner.
+    const INPUT_EVENTS: [u32; 13] = [1, 2, 3, 4, 5, 6, 7, 11, 12, 22, 25, 26, 27];
+
+    /// Milliseconds since the keyboard, mouse or trackpad was last used, in any app: the most
+    /// recent of [`INPUT_EVENTS`], so a key that is merely held down is not use. It reads
+    /// numbers the window server keeps: no event is observed and nothing typed is seen.
+    /// `None` if no answer is a usable time.
+    pub fn ms_since_last_input() -> Option<u64> {
+        INPUT_EVENTS
+            .iter()
+            .filter_map(|&event_type| ms_since_last(event_type))
+            .min()
+    }
+
+    /// Milliseconds since the hardware last sent an event of this one `CGEventType` (a long
+    /// time, not an error, for a type never seen). `None` if the answer isn't a usable time.
+    fn ms_since_last(event_type: u32) -> Option<u64> {
+        // SAFETY: a plain C function taking two integers by value and returning a double; it
+        // reads a counter and has no preconditions. The state is the documented constant, and
+        // any event type is accepted.
+        let seconds =
+            unsafe { CGEventSourceSecondsSinceLastEventType(HID_SYSTEM_STATE, event_type) };
+        // The cast saturates, and so does the multiplication: far past any idle time is fine.
+        (seconds.is_finite() && seconds >= 0.0).then_some((seconds * 1000.0) as u64)
+    }
+
     /// The general pasteboard, written current-host-only (no Universal Clipboard) and marked
     /// Concealed + Transient (nspasteboard.org), which well-behaved clipboard managers and
     /// history tools skip by convention (macOS doesn't enforce it).
@@ -282,6 +332,46 @@ mod mac {
                 std::fs::symlink_metadata(path).is_ok_and(|m| m.is_dir() && m.dev() != root)
             })
     }
+
+    #[cfg(test)]
+    mod tests {
+        #[test]
+        fn the_time_since_the_last_input_can_be_read() {
+            // On a Mac nobody is touching this is a long time, but it is a time: the call
+            // links, and what it returns is neither negative nor not-a-number.
+            assert!(super::ms_since_last_input().is_some());
+        }
+
+        /// `kCGEventKeyDown`: what a held key keeps sending.
+        const KEY_DOWN: u32 = 10;
+        /// `kCGEventKeyUp`: what ends every key stroke.
+        const KEY_UP: u32 = 11;
+        /// `kCGAnyInputEventType`: every kind of input, key-downs included.
+        const ANY_INPUT: u32 = u32::MAX;
+
+        #[test]
+        fn a_key_that_is_held_down_is_not_input_that_counts() {
+            assert!(!super::INPUT_EVENTS.contains(&KEY_DOWN));
+            assert!(!super::INPUT_EVENTS.contains(&ANY_INPUT));
+            // Typing still counts.
+            assert!(super::INPUT_EVENTS.contains(&KEY_UP));
+            // Every kind asked about gives a time, also one this Mac has never seen.
+            for event_type in super::INPUT_EVENTS {
+                assert!(super::ms_since_last(event_type).is_some(), "{event_type}");
+            }
+        }
+
+        #[test]
+        fn leaving_input_out_never_makes_the_computer_look_more_recently_used() {
+            // Ours is read first: input that arrives between the two reads can then only make
+            // the any-input time shorter. A kind of input that answered "just now" without
+            // having happened would keep Auto-lock away for as long as the rules allow; this
+            // is the check for that.
+            let ours = super::ms_since_last_input().unwrap();
+            let any = super::ms_since_last(ANY_INPUT).unwrap();
+            assert!(any <= ours.saturating_add(1_000), "{any} > {ours}");
+        }
+    }
 }
 
 #[cfg(windows)]
@@ -403,6 +493,11 @@ mod win {
 
     /// `Instant` already keeps counting through sleep on Windows.
     pub fn continuous_ms() -> Option<u64> {
+        None
+    }
+
+    /// Not done on Windows yet: "count activity anywhere" is offered on the Mac only.
+    pub fn ms_since_last_input() -> Option<u64> {
         None
     }
 
@@ -842,6 +937,10 @@ mod other {
     }
 
     pub fn continuous_ms() -> Option<u64> {
+        None
+    }
+
+    pub fn ms_since_last_input() -> Option<u64> {
         None
     }
 

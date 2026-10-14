@@ -296,7 +296,7 @@ impl StoredNote {
             if value.is_empty() {
                 return bad(&format!("an empty visible field {name}"));
             }
-            if !rules::allows(kind, name, value) {
+            if !rules::allows_stored(kind, name, value) {
                 return bad(&format!("a {name} that breaks the rule for that field"));
             }
         }

@@ -16,6 +16,24 @@ fn default_unlocked() -> Session {
     unlocked_session(LockSettings::default())
 }
 
+/// The lock rule, with every other setting at its default.
+fn lock_rule(idle_minutes: u32, lock_on_app_switch: bool) -> LockSettings {
+    LockSettings {
+        idle_minutes,
+        lock_on_app_switch,
+        ..LockSettings::default()
+    }
+}
+
+/// Unlocked at [`T0`] with "count activity anywhere" on.
+fn counting_anywhere(idle_minutes: u32) -> Session {
+    unlocked_session(LockSettings {
+        idle_minutes,
+        count_activity_anywhere: true,
+        ..LockSettings::default()
+    })
+}
+
 // ---------- Locked / Unlocked ----------
 
 #[test]
@@ -72,12 +90,16 @@ fn settings_round_trip() {
         s.settings(),
         LockSettings {
             idle_minutes: 5,
-            lock_on_app_switch: false
+            lock_on_app_switch: false,
+            clipboard_clear_seconds: 30,
+            count_activity_anywhere: false,
         }
     );
     let new = LockSettings {
         idle_minutes: 15,
         lock_on_app_switch: true,
+        clipboard_clear_seconds: 60,
+        count_activity_anywhere: true,
     };
     s.set_settings(new);
     assert_eq!(s.settings(), new);
@@ -85,30 +107,18 @@ fn settings_round_trip() {
 
 #[test]
 fn idle_minutes_outside_the_choices_snaps_to_nearest_choice() {
-    let mut s = Session::new(LockSettings {
-        idle_minutes: 0,
-        lock_on_app_switch: false,
-    });
+    let mut s = Session::new(lock_rule(0, false));
     assert_eq!(s.settings().idle_minutes, 1);
-    s.set_settings(LockSettings {
-        idle_minutes: 1_000_000,
-        lock_on_app_switch: false,
-    });
+    s.set_settings(lock_rule(1_000_000, false));
     assert_eq!(s.settings().idle_minutes, 60);
-    s.set_settings(LockSettings {
-        idle_minutes: 7,
-        lock_on_app_switch: false,
-    });
+    s.set_settings(lock_rule(7, false));
     assert_eq!(s.settings().idle_minutes, 5);
 }
 
 #[test]
 fn changing_idle_minutes_moves_the_deadline() {
     let mut s = default_unlocked();
-    s.set_settings(LockSettings {
-        idle_minutes: 1,
-        lock_on_app_switch: false,
-    });
+    s.set_settings(lock_rule(1, false));
     assert_eq!(s.lock_deadline(), Some(T0 + MIN));
 }
 
@@ -143,10 +153,7 @@ fn activity_just_before_the_idle_deadline_still_counts() {
 #[test]
 fn auto_lock_respects_each_idle_choice() {
     for minutes in IDLE_MINUTE_CHOICES {
-        let mut s = unlocked_session(LockSettings {
-            idle_minutes: minutes,
-            lock_on_app_switch: false,
-        });
+        let mut s = unlocked_session(lock_rule(minutes, false));
         let idle = Millis::from(minutes) * MIN;
         assert_eq!(s.tick(T0 + idle - 1), vec![], "{minutes} min");
         assert_eq!(s.tick(T0 + idle), vec![Effect::Lock], "{minutes} min");
@@ -183,6 +190,191 @@ fn idle_lock_also_hides_reveal_and_clears_clipboard() {
     );
 }
 
+// ---------- Activity anywhere ----------
+
+#[test]
+fn activity_elsewhere_changes_nothing_while_the_setting_is_off() {
+    let mut s = default_unlocked();
+    s.activity_elsewhere(T0 + 4 * MIN, T0 + 4 * MIN);
+    assert_eq!(s.lock_deadline(), Some(T0 + 5 * MIN));
+    assert_eq!(s.tick(T0 + 5 * MIN - 1), vec![]);
+    assert_eq!(s.tick(T0 + 5 * MIN), vec![Effect::Lock]);
+}
+
+#[test]
+fn with_the_setting_on_and_nothing_elsewhere_the_idle_time_is_as_before() {
+    let mut s = counting_anywhere(5);
+    assert_eq!(s.lock_deadline(), Some(T0 + 5 * MIN));
+    s.activity(T0 + 4 * MIN);
+    assert_eq!(s.lock_deadline(), Some(T0 + 9 * MIN));
+    assert_eq!(s.tick(T0 + 9 * MIN - 1), vec![]);
+    assert_eq!(s.tick(T0 + 9 * MIN), vec![Effect::Lock]);
+}
+
+#[test]
+fn activity_elsewhere_keeps_the_app_unlocked_while_it_continues() {
+    let mut s = counting_anywhere(5);
+    // The owner works in another app: input every minute, nothing inside the window.
+    for minute in 1..=30 {
+        let now = T0 + minute * MIN;
+        s.activity_elsewhere(now, now);
+        assert_eq!(s.tick(now), vec![], "minute {minute}");
+        assert_eq!(s.lock_deadline(), Some(now + 5 * MIN), "minute {minute}");
+    }
+    // It stops: the idle time runs from the last input seen anywhere.
+    assert_eq!(s.tick(T0 + 35 * MIN - 1), vec![]);
+    assert_eq!(s.tick(T0 + 35 * MIN), vec![Effect::Lock]);
+    assert!(!s.is_unlocked());
+}
+
+#[test]
+fn the_app_locks_60_minutes_after_the_last_activity_inside_the_window_whatever_happens_elsewhere() {
+    let mut s = counting_anywhere(5);
+    let limit = T0 + ACTIVITY_ANYWHERE_CAP_MS;
+    assert_eq!(limit, T0 + 60 * MIN);
+    for minute in 1..60 {
+        let now = T0 + minute * MIN;
+        s.activity_elsewhere(now, now);
+        assert_eq!(s.tick(now), vec![], "minute {minute}");
+        // The deadline is the real one: the limit, once it is nearer than the idle time.
+        assert_eq!(
+            s.lock_deadline(),
+            Some((now + 5 * MIN).min(limit)),
+            "minute {minute}"
+        );
+    }
+    s.activity_elsewhere(limit - 1, limit - 1);
+    assert_eq!(s.lock_deadline(), Some(limit));
+    assert_eq!(s.tick(limit - 1), vec![]);
+    assert_eq!(s.tick(limit), vec![Effect::Lock]);
+    assert!(!s.is_unlocked());
+}
+
+#[test]
+fn only_activity_inside_the_window_starts_the_60_minutes_again() {
+    let mut s = counting_anywhere(5);
+    for minute in 1..=30 {
+        let now = T0 + minute * MIN;
+        s.activity_elsewhere(now, now);
+    }
+    // The owner comes back to the app once, half an hour in, then works elsewhere again.
+    s.activity(T0 + 30 * MIN);
+    for minute in 31..90 {
+        let now = T0 + minute * MIN;
+        s.activity_elsewhere(now, now);
+        assert_eq!(s.tick(now), vec![], "minute {minute}");
+    }
+    let limit = T0 + 30 * MIN + ACTIVITY_ANYWHERE_CAP_MS;
+    assert_eq!(s.lock_deadline(), Some(limit));
+    assert_eq!(s.tick(limit - 1), vec![]);
+    assert_eq!(s.tick(limit), vec![Effect::Lock]);
+}
+
+#[test]
+fn no_activity_report_moves_the_60_minute_limit_once_it_is_reached() {
+    let mut s = counting_anywhere(5);
+    let limit = T0 + ACTIVITY_ANYWHERE_CAP_MS;
+    for minute in 1..60 {
+        let now = T0 + minute * MIN;
+        s.activity_elsewhere(now, now);
+    }
+    // The limit is reached before the tick that carries it out: reports of either kind,
+    // from the screens or from the OS, arrive too late to move it.
+    s.activity_elsewhere(limit, limit);
+    s.activity(limit);
+    s.activity(limit + 500);
+    s.activity_elsewhere(limit + 500, limit + 500);
+    assert_eq!(s.lock_deadline(), Some(limit));
+    assert_eq!(s.tick(limit + SEC), vec![Effect::Lock]);
+    assert!(!s.is_unlocked());
+}
+
+#[test]
+fn activity_elsewhere_after_the_idle_deadline_does_not_revive_the_session() {
+    let mut s = counting_anywhere(5);
+    s.activity_elsewhere(T0 + 5 * MIN, T0 + 5 * MIN);
+    s.activity_elsewhere(T0 + 5 * MIN + 500, T0 + 5 * MIN + 500);
+    assert_eq!(s.lock_deadline(), Some(T0 + 5 * MIN));
+    assert_eq!(s.tick(T0 + 5 * MIN + SEC), vec![Effect::Lock]);
+}
+
+#[test]
+fn a_report_dated_in_the_future_counts_as_now_and_an_older_one_moves_nothing_back() {
+    let mut s = counting_anywhere(5);
+    s.activity_elsewhere(T0 + 50 * MIN, T0 + MIN);
+    assert_eq!(s.lock_deadline(), Some(T0 + 6 * MIN));
+    s.activity_elsewhere(T0 + 30 * SEC, T0 + 2 * MIN);
+    assert_eq!(s.lock_deadline(), Some(T0 + 6 * MIN));
+    // Input from before the last activity inside the window adds nothing to it.
+    s.activity(T0 + 3 * MIN);
+    s.activity_elsewhere(T0 + 2 * MIN, T0 + 3 * MIN);
+    assert_eq!(s.lock_deadline(), Some(T0 + 8 * MIN));
+}
+
+#[test]
+fn an_idle_time_of_60_minutes_is_not_stretched_by_activity_elsewhere() {
+    let mut s = counting_anywhere(60);
+    s.activity_elsewhere(T0 + 59 * MIN, T0 + 59 * MIN);
+    assert_eq!(s.lock_deadline(), Some(T0 + 60 * MIN));
+    assert_eq!(s.tick(T0 + 60 * MIN), vec![Effect::Lock]);
+}
+
+#[test]
+fn turning_the_setting_off_goes_back_to_activity_inside_the_window_alone() {
+    let mut s = counting_anywhere(5);
+    s.activity_elsewhere(T0 + 4 * MIN, T0 + 4 * MIN);
+    assert_eq!(s.lock_deadline(), Some(T0 + 9 * MIN));
+    s.set_settings(LockSettings::default());
+    assert_eq!(s.lock_deadline(), Some(T0 + 5 * MIN));
+    // Turning it on again does not bring the earlier input back.
+    s.set_settings(LockSettings {
+        count_activity_anywhere: true,
+        ..LockSettings::default()
+    });
+    assert_eq!(s.lock_deadline(), Some(T0 + 5 * MIN));
+    assert_eq!(s.tick(T0 + 5 * MIN), vec![Effect::Lock]);
+}
+
+#[test]
+fn sleep_screen_lock_user_switch_and_quit_lock_at_once_while_activity_anywhere_is_counted() {
+    for event in [
+        OsEvent::Sleep,
+        OsEvent::ScreenLocked,
+        OsEvent::UserSwitched,
+        OsEvent::Quit,
+    ] {
+        let mut s = counting_anywhere(5);
+        s.activity_elsewhere(T0 + SEC, T0 + SEC);
+        assert_eq!(
+            s.os_event(event, T0 + 2 * SEC),
+            vec![Effect::Lock],
+            "{event:?}"
+        );
+        assert!(!s.is_unlocked(), "{event:?}");
+        // Input elsewhere while Locked unlocks nothing and starts no timer.
+        s.activity_elsewhere(T0 + 3 * SEC, T0 + 3 * SEC);
+        assert!(!s.is_unlocked(), "{event:?}");
+        assert_eq!(s.lock_deadline(), None, "{event:?}");
+    }
+    // "Lock when I switch apps" and the owner's own Lock are not held back either.
+    let mut s = unlocked_session(LockSettings {
+        lock_on_app_switch: true,
+        count_activity_anywhere: true,
+        ..LockSettings::default()
+    });
+    s.activity_elsewhere(T0 + SEC, T0 + SEC);
+    assert_eq!(
+        s.os_event(OsEvent::FocusLost, T0 + 2 * SEC),
+        vec![Effect::Lock]
+    );
+    let mut s = counting_anywhere(5);
+    s.activity_elsewhere(T0 + SEC, T0 + SEC);
+    assert_eq!(s.lock(), vec![Effect::Lock]);
+    // After the next unlock the idle time starts from that unlock.
+    s.unlocked(T0 + 10 * MIN);
+    assert_eq!(s.lock_deadline(), Some(T0 + 15 * MIN));
+}
+
 // ---------- OS events ----------
 
 #[test]
@@ -201,10 +393,7 @@ fn sleep_screen_lock_user_switch_and_quit_always_lock() {
 
 #[test]
 fn focus_gained_does_nothing() {
-    let mut s = unlocked_session(LockSettings {
-        idle_minutes: 5,
-        lock_on_app_switch: true,
-    });
+    let mut s = unlocked_session(lock_rule(5, true));
     s.start_reveal("note-1", "password", RevealMode::Timed, T0)
         .unwrap();
     assert_eq!(s.os_event(OsEvent::FocusGained, T0 + SEC), vec![]);
@@ -355,6 +544,7 @@ fn timed_reveal_records_note_field_and_expiry() {
             field: "password".into(),
             mode: RevealMode::Timed,
             expires_at: Some(T0 + TIMED_REVEAL_MS),
+            extensions: 0,
         })
     );
 }
@@ -485,10 +675,7 @@ fn focus_lost_hides_reveal_without_locking() {
 
 #[test]
 fn focus_lost_with_lock_on_app_switch_hides_then_locks() {
-    let mut s = unlocked_session(LockSettings {
-        idle_minutes: 5,
-        lock_on_app_switch: true,
-    });
+    let mut s = unlocked_session(lock_rule(5, true));
     s.start_reveal("note-1", "password", RevealMode::Timed, T0)
         .unwrap();
     assert_eq!(
@@ -500,10 +687,7 @@ fn focus_lost_with_lock_on_app_switch_hides_then_locks() {
 
 #[test]
 fn locking_on_app_switch_leaves_a_copy_on_its_30_second_timer() {
-    let mut s = unlocked_session(LockSettings {
-        idle_minutes: 5,
-        lock_on_app_switch: true,
-    });
+    let mut s = unlocked_session(lock_rule(5, true));
     s.copied(9, T0);
     // Switching to the other app to paste locks, but must not wipe the copy at once.
     assert_eq!(s.os_event(OsEvent::FocusLost, T0 + SEC), vec![Effect::Lock]);
@@ -593,6 +777,213 @@ fn reveal_refused_after_lock() {
     );
 }
 
+// ---------- More time for a shown value ----------
+
+#[test]
+fn a_timed_reveal_gets_a_new_30_seconds_as_often_as_asked() {
+    let mut s = default_unlocked();
+    s.start_reveal("note-1", "password", RevealMode::Timed, T0)
+        .unwrap();
+    let mut now = T0;
+    for round in 1..=10u32 {
+        now += 20 * SEC;
+        s.activity(now);
+        assert_eq!(s.extend_reveal(now), Ok(()), "round {round}");
+        let reveal = s.current_reveal().unwrap();
+        // Counted from the moment of asking, not added to what was left.
+        assert_eq!(reveal.expires_at, Some(now + TIMED_REVEAL_MS));
+        assert_eq!(reveal.extensions, round);
+        assert!(reveal.can_extend());
+        assert_eq!(reveal.extensions_left(), None);
+    }
+    assert_eq!(s.tick(now + TIMED_REVEAL_MS - 1), vec![]);
+    assert_eq!(s.tick(now + TIMED_REVEAL_MS), vec![Effect::HideReveal]);
+    assert_eq!(s.current_reveal(), None);
+}
+
+#[test]
+fn a_wallet_kind_reveal_gets_a_new_20_seconds_three_times_then_has_to_be_shown_again() {
+    let mut s = default_unlocked();
+    s.start_reveal("note-1", "words", RevealMode::Accessible, T0)
+        .unwrap();
+    assert!(s.current_reveal().unwrap().can_extend());
+    assert_eq!(s.current_reveal().unwrap().extensions_left(), Some(3));
+    let mut now = T0;
+    for used in 1..=MAX_ACCESSIBLE_EXTENSIONS {
+        now += 15 * SEC;
+        assert_eq!(s.extend_reveal(now), Ok(()), "extension {used}");
+        let reveal = s.current_reveal().unwrap();
+        assert_eq!(reveal.expires_at, Some(now + ACCESSIBLE_REVEAL_MS));
+        assert_eq!(
+            reveal.extensions_left(),
+            Some(MAX_ACCESSIBLE_EXTENSIONS - used)
+        );
+        assert_eq!(reveal.can_extend(), used < MAX_ACCESSIBLE_EXTENSIONS);
+    }
+    // A fourth time is refused and changes nothing: the value hides 20 s after the third.
+    assert_eq!(s.extend_reveal(now + SEC), Err(ExtendRefused::LimitReached));
+    assert_eq!(
+        s.current_reveal().unwrap().expires_at,
+        Some(now + ACCESSIBLE_REVEAL_MS)
+    );
+    assert_eq!(s.tick(now + ACCESSIBLE_REVEAL_MS - 1), vec![]);
+    assert_eq!(s.tick(now + ACCESSIBLE_REVEAL_MS), vec![Effect::HideReveal]);
+    assert_eq!(
+        s.extend_reveal(now + ACCESSIBLE_REVEAL_MS),
+        Err(ExtendRefused::NothingShown)
+    );
+
+    // Showing it again (the app asks for the Master Password first) starts a new count.
+    let again = now + ACCESSIBLE_REVEAL_MS + SEC;
+    s.start_reveal("note-1", "words", RevealMode::Accessible, again)
+        .unwrap();
+    assert_eq!(s.current_reveal().unwrap().extensions_left(), Some(3));
+    assert_eq!(s.extend_reveal(again + SEC), Ok(()));
+}
+
+#[test]
+fn a_held_reveal_cannot_be_given_more_time() {
+    let mut s = default_unlocked();
+    s.start_reveal("note-1", "words", RevealMode::Held, T0)
+        .unwrap();
+    assert!(!s.current_reveal().unwrap().can_extend());
+    assert_eq!(s.current_reveal().unwrap().extensions_left(), None);
+    assert_eq!(s.extend_reveal(T0 + SEC), Err(ExtendRefused::Held));
+    assert_eq!(
+        s.extend_reveal(T0 + HELD_REVEAL_MAX_MS - 1),
+        Err(ExtendRefused::Held)
+    );
+    let reveal = s.current_reveal().unwrap();
+    assert_eq!((reveal.expires_at, reveal.extensions), (None, 0));
+    // Its two-minute backstop is where it was.
+    assert_eq!(s.tick(T0 + HELD_REVEAL_MAX_MS - 1), vec![]);
+    assert_eq!(s.tick(T0 + HELD_REVEAL_MAX_MS), vec![Effect::HideReveal]);
+}
+
+#[test]
+fn a_reveal_that_has_ended_is_never_brought_back() {
+    // Nothing was shown at all.
+    let mut s = default_unlocked();
+    assert_eq!(s.extend_reveal(T0), Err(ExtendRefused::NothingShown));
+
+    // Its time ran out and a tick hid it.
+    s.start_reveal("note-1", "password", RevealMode::Timed, T0)
+        .unwrap();
+    assert_eq!(s.tick(T0 + TIMED_REVEAL_MS), vec![Effect::HideReveal]);
+    assert_eq!(
+        s.extend_reveal(T0 + TIMED_REVEAL_MS),
+        Err(ExtendRefused::NothingShown)
+    );
+    assert_eq!(s.current_reveal(), None);
+
+    // Its time is up, but the tick that hides it has not run yet.
+    let shown = T0 + MIN;
+    s.start_reveal("note-1", "password", RevealMode::Timed, shown)
+        .unwrap();
+    assert_eq!(s.extend_reveal(shown + TIMED_REVEAL_MS - 1), Ok(()));
+    let ends = shown + 2 * TIMED_REVEAL_MS - 1;
+    assert_eq!(s.extend_reveal(ends), Err(ExtendRefused::NothingShown));
+    assert_eq!(s.current_reveal().unwrap().expires_at, Some(ends));
+    assert_eq!(s.tick(ends), vec![Effect::HideReveal]);
+
+    // Every other way a reveal ends.
+    type End = fn(&mut Session);
+    let ways: [(&str, End); 5] = [
+        ("Hide", |s| drop(s.end_reveal())),
+        ("another Note opened", |s| drop(s.note_opened("note-2"))),
+        ("focus lost", |s| {
+            drop(s.os_event(OsEvent::FocusLost, T0 + SEC))
+        }),
+        ("Sharing Guard up", |s| drop(s.set_sharing_guard(true))),
+        ("lock", |s| drop(s.lock())),
+    ];
+    for (name, end) in ways {
+        for mode in [RevealMode::Timed, RevealMode::Accessible] {
+            let mut s = default_unlocked();
+            s.start_reveal("note-1", "password", mode, T0).unwrap();
+            end(&mut s);
+            assert_eq!(
+                s.extend_reveal(T0 + 2 * SEC),
+                Err(ExtendRefused::NothingShown),
+                "{name}, {mode:?}"
+            );
+            assert_eq!(s.current_reveal(), None, "{name}, {mode:?}");
+        }
+    }
+}
+
+#[test]
+fn more_time_is_refused_once_the_auto_lock_is_due() {
+    let mut s = unlocked_session(lock_rule(1, false));
+    // Shown 10 s before the idle time is up: the lock comes first.
+    s.start_reveal("note-1", "password", RevealMode::Timed, T0 + 50 * SEC)
+        .unwrap();
+    assert_eq!(s.extend_reveal(T0 + MIN), Err(ExtendRefused::NothingShown));
+    assert_eq!(s.tick(T0 + MIN), vec![Effect::HideReveal, Effect::Lock]);
+    assert_eq!(
+        s.extend_reveal(T0 + MIN + SEC),
+        Err(ExtendRefused::NothingShown)
+    );
+}
+
+#[test]
+fn more_time_is_not_activity_and_an_extended_reveal_ends_like_any_other() {
+    let mut s = default_unlocked();
+    s.start_reveal("note-1", "password", RevealMode::Timed, T0)
+        .unwrap();
+    s.copied(7, T0);
+    assert_eq!(s.extend_reveal(T0 + 10 * SEC), Ok(()));
+    // Neither the idle time nor the clipboard timer moved.
+    assert_eq!(s.lock_deadline(), Some(T0 + 5 * MIN));
+    assert_eq!(s.clipboard_clear_at(), Some(T0 + CLIPBOARD_CLEAR_MS));
+    assert_eq!(s.note_opened("note-2"), vec![Effect::HideReveal]);
+
+    for mode in [RevealMode::Timed, RevealMode::Accessible] {
+        let mut s = default_unlocked();
+        s.start_reveal("note-1", "password", mode, T0).unwrap();
+        assert_eq!(s.extend_reveal(T0 + SEC), Ok(()));
+        assert_eq!(
+            s.os_event(OsEvent::FocusLost, T0 + 2 * SEC),
+            vec![Effect::HideReveal],
+            "{mode:?}"
+        );
+        s.start_reveal("note-1", "password", mode, T0 + 3 * SEC)
+            .unwrap();
+        assert_eq!(s.extend_reveal(T0 + 4 * SEC), Ok(()));
+        assert_eq!(s.set_sharing_guard(true), vec![Effect::HideReveal]);
+        s.set_sharing_guard(false);
+        s.start_reveal("note-1", "password", mode, T0 + 5 * SEC)
+            .unwrap();
+        assert_eq!(s.extend_reveal(T0 + 6 * SEC), Ok(()));
+        assert_eq!(s.lock(), vec![Effect::HideReveal, Effect::Lock], "{mode:?}");
+    }
+}
+
+#[test]
+fn more_time_does_not_use_up_or_refill_the_eight_fields_a_minute() {
+    let mut s = default_unlocked();
+    for i in 0..MAX_FIELDS_PER_WINDOW {
+        let at = T0 + i as Millis * SEC;
+        s.start_reveal(&format!("note-{i}"), "password", RevealMode::Timed, at)
+            .unwrap();
+    }
+    let now = T0 + 10 * SEC;
+    for _ in 0..5 {
+        assert_eq!(s.extend_reveal(now), Ok(()));
+    }
+    assert_eq!(s.current_reveal().unwrap().note_id, "note-7");
+    // A ninth different field is refused exactly as it would have been.
+    assert_eq!(
+        s.start_reveal("note-x", "password", RevealMode::Timed, now),
+        Err(RevealRefused::TooMany(REVEAL_WINDOW_MS - 10 * SEC))
+    );
+    // The refusal left the extended reveal alone.
+    assert_eq!(
+        s.current_reveal().unwrap().expires_at,
+        Some(now + TIMED_REVEAL_MS)
+    );
+}
+
 // ---------- Clipboard ----------
 
 #[test]
@@ -650,6 +1041,145 @@ fn reveal_expiry_and_clipboard_clear_can_fire_on_the_same_tick() {
         s.tick(T0 + 30 * SEC),
         vec![Effect::HideReveal, Effect::ClearClipboardIfUnchanged(5)]
     );
+}
+
+/// Unlocked at [`T0`] with the clipboard cleared after `seconds`.
+fn clearing_after(seconds: u32, lock_on_app_switch: bool) -> Session {
+    unlocked_session(LockSettings {
+        lock_on_app_switch,
+        clipboard_clear_seconds: seconds,
+        ..LockSettings::default()
+    })
+}
+
+#[test]
+fn a_copy_is_cleared_after_60_seconds_when_the_owner_chose_that() {
+    let mut s = clearing_after(60, false);
+    assert_eq!(s.settings().clipboard_clear_seconds, 60);
+    s.copied(100, T0);
+    assert_eq!(s.clipboard_clear_at(), Some(T0 + 60 * SEC));
+    assert_eq!(s.tick(T0 + 60 * SEC - 1), vec![]);
+    assert_eq!(
+        s.tick(T0 + 60 * SEC),
+        vec![Effect::ClearClipboardIfUnchanged(100)]
+    );
+    assert_eq!(s.clipboard_clear_at(), None);
+}
+
+#[test]
+fn a_wallet_kind_copy_is_always_cleared_after_30_seconds() {
+    for seconds in CLIPBOARD_CLEAR_SECOND_CHOICES {
+        let mut s = clearing_after(seconds, false);
+        s.copied_wallet_value(5, T0);
+        assert_eq!(
+            s.clipboard_clear_at(),
+            Some(T0 + CLIPBOARD_CLEAR_MS),
+            "{seconds} s chosen"
+        );
+        assert_eq!(s.tick(T0 + 30 * SEC - 1), vec![]);
+        assert_eq!(
+            s.tick(T0 + 30 * SEC),
+            vec![Effect::ClearClipboardIfUnchanged(5)]
+        );
+        // The setting itself is as chosen: the next ordinary copy uses it.
+        s.copied(6, T0 + MIN);
+        assert_eq!(
+            s.clipboard_clear_at(),
+            Some(T0 + MIN + Millis::from(seconds) * SEC)
+        );
+    }
+}
+
+#[test]
+fn a_clipboard_time_that_is_not_one_of_the_two_choices_becomes_30_seconds() {
+    for chosen in [0, 1, 29, 31, 45, 59, 61, 120, 3_600, u32::MAX] {
+        let settings = LockSettings {
+            clipboard_clear_seconds: chosen,
+            ..LockSettings::default()
+        };
+        let mut s = Session::new(settings);
+        assert_eq!(s.settings().clipboard_clear_seconds, 30, "{chosen}");
+        s.set_settings(LockSettings {
+            clipboard_clear_seconds: 60,
+            ..LockSettings::default()
+        });
+        s.set_settings(settings);
+        assert_eq!(s.settings().clipboard_clear_seconds, 30, "{chosen}");
+        s.unlocked(T0);
+        s.copied(1, T0);
+        assert_eq!(s.clipboard_clear_at(), Some(T0 + 30 * SEC), "{chosen}");
+    }
+    for chosen in CLIPBOARD_CLEAR_SECOND_CHOICES {
+        let s = clearing_after(chosen, false);
+        assert_eq!(s.settings().clipboard_clear_seconds, chosen);
+    }
+    assert_eq!(CLIPBOARD_CLEAR_SECOND_CHOICES, [30, 60]);
+    assert_eq!(DEFAULT_CLIPBOARD_CLEAR_SECONDS, 30);
+}
+
+#[test]
+fn changing_the_clipboard_time_leaves_a_pending_clear_where_it_was() {
+    let mut s = clearing_after(60, false);
+    s.copied(100, T0);
+    s.set_settings(LockSettings::default());
+    assert_eq!(s.clipboard_clear_at(), Some(T0 + 60 * SEC));
+    s.copied(101, T0 + 10 * SEC);
+    assert_eq!(s.clipboard_clear_at(), Some(T0 + 40 * SEC));
+}
+
+#[test]
+fn locking_on_app_switch_leaves_a_60_second_copy_on_its_timer_too() {
+    let mut s = clearing_after(60, true);
+    s.copied(9, T0);
+    assert_eq!(s.os_event(OsEvent::FocusLost, T0 + SEC), vec![Effect::Lock]);
+    assert!(!s.is_unlocked());
+    assert_eq!(s.clipboard_clear_at(), Some(T0 + 60 * SEC));
+    assert_eq!(s.tick(T0 + 60 * SEC - 1), vec![]);
+    assert_eq!(
+        s.tick(T0 + 60 * SEC),
+        vec![Effect::ClearClipboardIfUnchanged(9)]
+    );
+
+    // A Wallet Kind copy keeps its own 30 s through the same lock.
+    let mut s = clearing_after(60, true);
+    s.copied_wallet_value(9, T0);
+    assert_eq!(s.os_event(OsEvent::FocusLost, T0 + SEC), vec![Effect::Lock]);
+    assert_eq!(s.tick(T0 + 30 * SEC - 1), vec![]);
+    assert_eq!(
+        s.tick(T0 + 30 * SEC),
+        vec![Effect::ClearClipboardIfUnchanged(9)]
+    );
+
+    // Every other lock still clears it at once, whichever time was chosen.
+    for seconds in CLIPBOARD_CLEAR_SECOND_CHOICES {
+        for event in [
+            OsEvent::Sleep,
+            OsEvent::ScreenLocked,
+            OsEvent::UserSwitched,
+            OsEvent::Quit,
+        ] {
+            let mut s = clearing_after(seconds, true);
+            s.copied(9, T0);
+            assert_eq!(
+                s.os_event(event, T0 + SEC),
+                vec![Effect::ClearClipboardIfUnchanged(9), Effect::Lock],
+                "{event:?}, {seconds} s"
+            );
+        }
+        let mut s = clearing_after(seconds, true);
+        s.copied(9, T0);
+        assert_eq!(
+            s.lock(),
+            vec![Effect::ClearClipboardIfUnchanged(9), Effect::Lock]
+        );
+        // And so does the idle time running out.
+        let mut s = clearing_after(seconds, true);
+        s.copied(9, T0 + 5 * MIN - SEC);
+        assert_eq!(
+            s.tick(T0 + 5 * MIN),
+            vec![Effect::ClearClipboardIfUnchanged(9), Effect::Lock]
+        );
+    }
 }
 
 // ---------- Backup reminder ----------

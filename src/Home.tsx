@@ -17,7 +17,7 @@ import {
   type NoteSummary,
   type NoteView,
 } from "./api";
-import { Choice, cmdKey, Confirm, dragRegion, ErrorLine, formatDate, mac, minSec, noAssist, PasswordModal, seconds, TitlebarDrag, useAction } from "./components";
+import { Choice, cmdKey, Confirm, daysUntil, dragRegion, ErrorLine, expiry, formatDate, mac, minSec, noAssist, PasswordModal, seconds, TitlebarDrag, useAction } from "./components";
 import { Icon, KIND_ICONS, KindBadge, type IconName } from "./icons";
 import { Detail, Editor, type Draft, type Prefill } from "./Note";
 import { Settings } from "./Settings";
@@ -29,6 +29,11 @@ const FAVORITES: Nav = { type: "favorites" };
 const SETTINGS: Nav = { type: "settings" };
 const TRASH: Nav = { type: "trash" };
 const BY_KIND = KINDS.map((kind): Nav => ({ type: "kind", kind }));
+const API_KEYS: Filter = { type: "kind", kind: "api_key" };
+// The banner speaks up once an API Key's expiry date is this near, or past.
+const EXPIRY_BANNER_DAYS = 14;
+// Written by its number, so that it can be seen in this file.
+const NO_BREAK_SPACE = String.fromCharCode(0xa0);
 // By value: the place App hands back is not one of the objects above.
 const sameNav = (a: Nav, b: Nav) => (a.type === "kind" ? b.type === "kind" && a.kind === b.kind : a.type === b.type);
 /** All, Favorites and the Kinds: the views with the search box and the two columns. */
@@ -47,7 +52,7 @@ type Pane =
   // follows "Save and add another", and says so.
   | { type: "new"; kind: Kind; seed?: Prefill; savedBefore?: boolean; draft?: Draft }
   // The draft of an edit is coming back: its Note is being fetched, and nothing is drawn yet.
-  | { type: "restoring"; id: string }
+  | { type: "restoring"; id: string; draft: Draft }
   | { type: "trashed" }
   | null;
 
@@ -65,8 +70,9 @@ function ordered(notes: NoteSummary[], sort: Sort, byService: boolean) {
   );
 }
 
-// The one Hidden Field that can be copied straight from a list row. Never a Wallet Kind: those
-// ask for the Master Password every time (ADR-0004).
+// The one Hidden Field that can be copied straight from a list row: the Kind's first, the one
+// NoteSummary.has_hidden is about. Never a Wallet Kind: those ask for the Master Password every
+// time (ADR-0004).
 const ROW_COPY: Partial<Record<Kind, string>> = { login: "password", api_key: "key" };
 
 /** Where the owner is in Home. App keeps it across a lock and the Shield: a filter, a Note id and
@@ -78,15 +84,16 @@ export interface Place {
 }
 export const START: Place = { nav: ALL, noteId: null, sort: "recent" };
 
-export function Home({ status, place, onPlace, draft, onDraft, onLock, onKit, onOperationOutcome }: {
+export function Home({ status, place, onPlace, readDraft, onDraft, onLock, onKit, onOperationOutcome }: {
   status: AppStatus;
   /** Where to start, and how to tell App where the owner is now. */
   place: Place;
   onPlace: (place: Place) => void;
   /** An Editor with unsaved changes that the Sharing Guard shield covered: it opens again as it
-   *  was (read once, at the start). `onDraft` tells App what the Editor holds now, or null once
-   *  that is saved or left. */
-  draft: Draft | null;
+   *  was. Called once, at the start, and never kept as a prop: App's copy is then the only one
+   *  outside the pane it opens, and a lock empties it. `onDraft` tells App what the Editor holds
+   *  now, or null once that is saved or left. */
+  readDraft: () => Draft | null;
   onDraft: (draft: Draft | null) => void;
   /** The Lock button. */
   onLock: () => void;
@@ -105,23 +112,26 @@ export function Home({ status, place, onPlace, draft, onDraft, onLock, onKit, on
   const notes = list && sameNav(list.nav, nav) ? list.notes : undefined;
   const byService = sort === "az" && nav.type === "kind" && nav.kind === "api_key";
   const shown = useMemo(() => (notes ? ordered(notes, sort, byService) : []), [notes, sort, byService]);
-  const [pane, setPane] = useState<Pane>(
-    draft
+  // The one place the draft is read: from here on it lives in the pane it opens.
+  const [pane, setPane] = useState<Pane>(() => {
+    const draft = readDraft();
+    return draft
       ? draft.id
-        ? { type: "restoring", id: draft.id }
+        ? { type: "restoring", id: draft.id, draft }
         : { type: "new", kind: draft.kind, draft }
       : place.noteId
         ? { type: "note", id: place.noteId }
-        : null,
-  );
+        : null;
+  });
   // For the answer to the fetch below, which arrives later.
   const paneNow = useRef(pane);
   paneNow.current = pane;
   // Counts panes opened: a second New <Kind> in a row must be a fresh Editor, not the old draft.
   const [opened, setOpened] = useState(0);
   const [version, setVersion] = useState(0);
-  // An Editor with unsaved changes asks before it's replaced. A draft that came back is one.
-  const dirty = useRef(!!draft);
+  // An Editor with unsaved changes asks before it's replaced. A draft that came back is one: on
+  // the first render, the only one this value is taken from, `pane` is what the draft made it.
+  const dirty = useRef(pane?.type === "restoring" || (pane?.type === "new" && !!pane.draft));
   const [leaving, setLeaving] = useState<(() => void) | null>(null);
   const search = useRef<HTMLInputElement>(null);
   const firstTile = useRef<HTMLButtonElement>(null);
@@ -131,6 +141,14 @@ export function Home({ status, place, onPlace, draft, onDraft, onLock, onKit, on
   const [marked, setMarked] = useState<string | null>(null);
   // A failed Copy from a list row. The next action clears it.
   const [copyError, setCopyError] = useState<string | null>(null);
+  // Every API Key, for the expiry banner: fetched apart from the list on screen, which a filter
+  // or a search narrows.
+  const [apiKeys, setApiKeys] = useState<NoteSummary[]>([]);
+  // The seconds a new copy has before the clipboard is cleared, as the status first gave them:
+  // what is read out. `n` counts the copies, so that a second one is read out too.
+  const [copied, setCopied] = useState<{ seconds: number; n: number } | null>(null);
+  // Starts as the count now: a copy made before this screen appeared is not a new one.
+  const copiesWas = useRef(status.copies);
   const changed = () => setVersion((v) => v + 1);
   const open = (next: Pane) => {
     dirty.current = false;
@@ -160,15 +178,19 @@ export function Home({ status, place, onPlace, draft, onDraft, onLock, onKit, on
             : undefined;
     return !!note && (n.type === "all" || (n.type === "favorites" ? note.favorite : n.type === "kind" && n.kind === note.kind));
   };
-  const go = (n: Nav) => {
+  // `all`: every Note under `n` is wanted (the expiry banner's button), so the search goes too.
+  const go = (n: Nav, all = false) => {
     if (sameNav(n, nav)) return;
     setCopyError(null);
     // Among All, Favorites and the Kinds the search stays, and so does a Note that still belongs.
     const keepSearch = listed(n) && listed(nav);
-    if (keepSearch && (!pane || paneFits(n))) return setNav(n);
+    if (keepSearch && (!pane || paneFits(n))) {
+      if (all) setQuery("");
+      return setNav(n);
+    }
     guard(() => {
       setNav(n);
-      if (!keepSearch) setQuery("");
+      if (!keepSearch || all) setQuery("");
       open(null);
     });
   };
@@ -217,6 +239,27 @@ export function Home({ status, place, onPlace, draft, onDraft, onLock, onKit, on
     };
   }, [nav, query, version]);
 
+  // Again whenever Notes change, and on a change of view: opening a Backup from Settings changes
+  // every Note without telling this screen.
+  useEffect(() => {
+    let live = true;
+    listNotes(API_KEYS, "").then((n) => live && setApiKeys(n), () => {});
+    return () => {
+      live = false;
+    };
+  }, [nav, version]);
+
+  // A copy is new when Rust's count of copies has gone up. The time left can't say: a Wallet
+  // Kind copy may have less of it than the copy before, and a clear being tried again has more.
+  const clipboard = status.clipboard_clear_in_ms;
+  const copies = status.copies;
+  useEffect(() => {
+    const isNew = copies !== copiesWas.current;
+    copiesWas.current = copies;
+    if (clipboard === null) setCopied(null);
+    else if (isNew) setCopied((c) => ({ seconds: seconds(clipboard), n: (c?.n ?? 0) + 1 }));
+  }, [clipboard, copies]);
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (!cmdKey(e)) return;
@@ -246,12 +289,15 @@ export function Home({ status, place, onPlace, draft, onDraft, onLock, onKit, on
   // so is the draft. Any other refusal means a lock or the shield is on its way: the status that
   // follows takes this screen away, and App drops the draft on a lock and keeps it under the shield.
   useEffect(() => {
-    const id = draft?.id;
-    if (!draft || !id) return;
+    if (pane?.type !== "restoring") return;
     let live = true;
-    const waiting = () => live && paneNow.current?.type === "restoring";
-    getNote(id).then(
-      (note) => waiting() && setPane({ type: "edit", note, draft }),
+    // The pane that is still waiting, with the draft it holds meanwhile.
+    const waiting = () => (live && paneNow.current?.type === "restoring" ? paneNow.current : null);
+    getNote(pane.id).then(
+      (note) => {
+        const from = waiting();
+        if (from) setPane({ type: "edit", note, draft: from.draft });
+      },
       (e) => waiting() && isApiError(e) && e.code === "not_found" && open(null),
     );
     return () => {
@@ -369,6 +415,15 @@ export function Home({ status, place, onPlace, draft, onDraft, onLock, onKit, on
     );
   } else if (notes?.length) detail = <p className="empty-state">{s.pickNote}</p>;
 
+  const markedNote = marked ? shown.find((n) => n.id === marked) : undefined;
+  // Counted against today's date at every draw (the status redraws this screen each second), so
+  // the banner is right after midnight too.
+  const untilExpiry = apiKeys.flatMap((n) => {
+    const days = n.expires ? daysUntil(n.expires) : null;
+    return days === null ? [] : [days];
+  });
+  const expiredKeys = untilExpiry.filter((d) => d < 0).length;
+  const expiringKeys = untilExpiry.filter((d) => d >= 0 && d <= EXPIRY_BANNER_DAYS).length;
   const capture = status.capture_hiding_active;
   const lastBackup = status.backup.last_backup_at;
   const unbacked = status.backup.unbacked_changes;
@@ -413,10 +468,11 @@ export function Home({ status, place, onPlace, draft, onDraft, onLock, onKit, on
                 <Icon name="search" />
                 <input
                   ref={search}
+                  // Marks the one box where the open Note's copy shortcut still works: see Detail.
+                  data-search
                   placeholder={s.search}
                   aria-label={s.searchLabel}
                   aria-controls={listId}
-                  aria-activedescendant={marked ? rowId(marked) : undefined}
                   value={query}
                   onChange={(e) => {
                     setCopyError(null);
@@ -442,6 +498,14 @@ export function Home({ status, place, onPlace, draft, onDraft, onLock, onKit, on
             <button onClick={() => go(SETTINGS)}>{s.goToBackups}</button>
           </div>
         )}
+        {(expiredKeys > 0 || expiringKeys > 0) && nav.type !== "settings" && (
+          <div className="banner">
+            <Icon name="warning" />
+            {s.expiryBanner(expiredKeys, expiringKeys, EXPIRY_BANNER_DAYS)}
+            {/* Not where its button leads: there the rows themselves say which. */}
+            {!sameNav(nav, API_KEYS) && <button onClick={() => go(API_KEYS, true)}>{s.showApiKeys}</button>}
+          </div>
+        )}
         {status.purge_trash_failed && <div className="banner" role="alert">{s.trashPurgeFailed}</div>}
         {nav.type === "settings" ? (
           <Settings status={status} onKit={onKit} onOperationOutcome={onOperationOutcome} />
@@ -461,7 +525,9 @@ export function Home({ status, place, onPlace, draft, onDraft, onLock, onKit, on
               <ul className="list" id={listId}>
                 {shown.map((n, i) => {
                   const before = shown[i - 1];
-                  const field = ROW_COPY[n.kind];
+                  // No Copy button on a row whose Note has nothing in that field.
+                  const field = n.has_hidden ? ROW_COPY[n.kind] : undefined;
+                  const due = expiry(n.expires);
                   const on = pane?.type === "note" && pane.id === n.id;
                   return (
                     <Fragment key={n.id}>
@@ -480,8 +546,11 @@ export function Home({ status, place, onPlace, draft, onDraft, onLock, onKit, on
                             <span>{n.title}</span>
                             {n.favorite && <Icon name="star" className="icon fav" />}
                           </span>
+                          {/* The expiry first: a long subtitle is cut off at the end of the line. */}
                           <span className="hint">
                             {s.kindNames[n.kind]}
+                            {due && " · "}
+                            {due && <span className={due.past ? "expiry past" : "expiry"}>{due.text}</span>}
                             {n.subtitle && ` · ${n.subtitle}`}
                           </span>
                         </button>
@@ -508,7 +577,7 @@ export function Home({ status, place, onPlace, draft, onDraft, onLock, onKit, on
         <footer className="status-line">
           <span>
             {s.statusLine}
-            {status.lock_in_ms !== null && ` · ${s.locksIn(minSec(status.lock_in_ms))}`}
+            {status.lock_in_ms !== null && ` · ${s.locksIn(minSec(status.lock_in_ms), !!status.settings.count_activity_anywhere)}`}
             {" · "}
             {unbacked && nav.type !== "settings" ? (
               <button className="link" onClick={() => go(SETTINGS)}>
@@ -523,9 +592,19 @@ export function Home({ status, place, onPlace, draft, onDraft, onLock, onKit, on
           </span>
         </footer>
       </div>
-      {/* Announced once; the ticking toast itself stays out of the screen reader's way. */}
+      {/* Announced once per copy, with the time that copy has (30 or 60 seconds as set, 30 for a
+          Wallet Kind); the ticking toast itself stays out of the screen reader's way. A space is
+          added for every other copy: the same words twice in a row would not be read out again. */}
       <p className="sr-only" role="status">
-        {status.clipboard_clear_in_ms !== null && s.copiedAnnounce}
+        {copied && s.copiedAnnounce(copied.seconds) + (copied.n % 2 ? "" : NO_BREAK_SPACE)}
+      </p>
+      {/* The row the arrow keys are on, for a screen reader: the keyboard stays in the search box,
+          and this line is the one thing that says which row is marked. (The box does not point
+          at the row with aria-activedescendant: a button in a plain list is not something that
+          may be pointed at, and a reader that followed it anyway would read the row twice.)
+          Always here, so that the change of its text is read out. */}
+      <p className="sr-only" role="status">
+        {markedNote && s.markedRow(markedNote.title, s.kindNames[markedNote.kind])}
       </p>
       {status.clipboard_clear_in_ms !== null && (
         <div className="toast" aria-hidden="true">
@@ -565,12 +644,6 @@ function Trash(props: {
   const [askPassword, setAskPassword] = useState<string | null>(null);
   const holdsWallet = (id: string) => !!notes?.some((n) => (!id || n.id === id) && isWalletKind(n.kind));
   const { error, run } = useAction();
-  // Restoring or deleting the Note being read goes back to the list.
-  const act = (fn: () => Promise<unknown>, id?: string) =>
-    run(fn).then((ok) => {
-      props.onChanged();
-      if (ok && id === openId) onOpen(null);
-    });
   // The keyboard follows into a Note opened from a row, not into one restored after a lock.
   const back = useRef<HTMLButtonElement>(null);
   const followed = useRef(false);
@@ -578,12 +651,51 @@ function Trash(props: {
     if (openId && followed.current) back.current?.focus();
     followed.current = false;
   }, [openId]);
+  // And it comes back out when the owner leaves that Note: to its row or, when the row is going
+  // (`gone`: restored or deleted), to the list, or to the line that says nothing is left.
+  const rows = useRef<Record<string, HTMLButtonElement | null>>({});
+  const list = useRef<HTMLUListElement>(null);
+  const nothing = useRef<HTMLParagraphElement>(null);
+  const left = useRef<{ id: string; gone: boolean } | null>(null);
+  const leave = (gone: boolean) => {
+    if (openId) left.current = { id: openId, gone };
+    onOpen(null);
+  };
+  useEffect(() => {
+    const from = left.current;
+    if (openId) left.current = null;
+    // Not under a dialog, which keeps the keyboard until it closes, nor before there is a list.
+    if (openId || !from || !notes || confirm !== null || askPassword !== null) return;
+    const row = rows.current[from.id];
+    // A row that is going is still listed until the list has been fetched again: wait for that.
+    if (from.gone && row) return;
+    left.current = null;
+    // Only when nothing else has taken the keyboard meanwhile.
+    const at = document.activeElement;
+    if (at && at !== document.body) return;
+    const to = row ?? list.current ?? nothing.current;
+    // The list can hold the keyboard for this once only. Able to hold it all the time, it would
+    // be handed it at every click on one of its buttons (WebKit looks for the nearest holder).
+    if (to && to !== row) {
+      to.tabIndex = -1;
+      to.addEventListener("blur", () => to.removeAttribute("tabindex"), { once: true });
+    }
+    to?.focus();
+  }, [openId, notes, confirm, askPassword]);
+  // Restoring or deleting the Note being read goes back to the list.
+  const act = (fn: () => Promise<unknown>, id?: string) =>
+    run(fn).then((ok) => {
+      props.onChanged();
+      if (ok && id === openId) leave(true);
+    });
+  // A key still held down from the press that moved the keyboard here doesn't press these too.
+  const noRepeat = (e: KeyEvent) => e.repeat && e.preventDefault();
   return (
     <section className="page stack">
       {openId ? (
         <>
           <div className="actions">
-            <button ref={back} className="link" onClick={() => onOpen(null)}>
+            <button ref={back} className="link" onKeyDown={noRepeat} onClick={() => leave(false)}>
               <Icon name="back" />
               {s.backToTrash}
             </button>
@@ -602,11 +714,15 @@ function Trash(props: {
           <p className="hint">{s.trashText}</p>
           <ErrorLine error={error} />
           {!!notes?.length && (
-            <ul className="card rows">
+            <ul ref={list} className="card rows">
               {notes.map((n) => (
                 <li key={n.id} className="trash-row">
                   <button
+                    ref={(el) => {
+                      rows.current[n.id] = el;
+                    }}
                     className="row"
+                    onKeyDown={noRepeat}
                     onClick={() => {
                       followed.current = true;
                       onOpen(n.id);
@@ -631,7 +747,11 @@ function Trash(props: {
               ))}
             </ul>
           )}
-          {notes?.length === 0 && <p className="hint">{s.nothingHere}</p>}
+          {notes?.length === 0 && (
+            <p ref={nothing} className="hint">
+              {s.nothingHere}
+            </p>
+          )}
           {!!notes?.length && (
             <div className="actions end">
               <button className="danger" onClick={() => setConfirm("")}>
@@ -662,7 +782,7 @@ function Trash(props: {
           onSubmit={async (password) => {
             await (askPassword ? deleteForever(askPassword, password) : emptyTrash(password));
             props.onChanged();
-            if (askPassword && askPassword === openId) onOpen(null);
+            if (askPassword && askPassword === openId) leave(true);
           }}
           onClose={() => setAskPassword(null)}
           retryInMs={props.status.retry_in_ms}

@@ -395,12 +395,46 @@ fn a_pasted_key_that_is_only_whitespace_counts_as_not_supplied() {
 #[test]
 fn passwords_passphrases_and_text_bodies_are_never_trimmed() {
     let mut d = doc();
-    for password in ["  fake pw with spaces  ", "   ", "fake-pw\n", "\tfake-pw"] {
+    let passwords = ["  fake pw with spaces  ", "   ", "fake-pw\n", "\tfake-pw"];
+    for password in passwords {
         let l = d
             .create(login("L", "site.example.test", "me", password), None, T0)
             .unwrap();
         assert_eq!(d.reveal(&l, field::PASSWORD).unwrap().as_str(), password);
     }
+    // On an edit too: each one replaces the stored password exactly as received, alone or
+    // along with a title and a visible value that are trimmed in the same edit.
+    let l = d
+        .create(
+            login("L", "site.example.test", "me", "fake-first-pw"),
+            None,
+            T0,
+        )
+        .unwrap();
+    for password in passwords {
+        let alone = set_hidden(&[(field::PASSWORD, password)]);
+        let with_trimmed_parts = NoteEdit {
+            title: Some(" L ".into()),
+            visible: map(&[(field::USERNAME, " me ")]),
+            hidden: hidden(&[(field::PASSWORD, password)]),
+        };
+        for edit in [alone, with_trimmed_parts] {
+            // Start from another password each time, so the one read back came from `edit`.
+            let other = set_hidden(&[(field::PASSWORD, "fake-other-pw")]);
+            d.update(&l, other, None, T0).unwrap();
+            d.update(&l, edit, None, T0).unwrap();
+            assert_eq!(d.reveal(&l, field::PASSWORD).unwrap().as_str(), password);
+        }
+        let view = d.get(&l).unwrap();
+        assert_eq!(view.title, "L");
+        assert_eq!(view.visible[field::USERNAME], "me");
+    }
+    // And it is still untrimmed after being written and read again.
+    let reread = Document::from_json(&d.to_json()).unwrap();
+    assert_eq!(
+        reread.reveal(&l, field::PASSWORD).unwrap().as_str(),
+        "\tfake-pw"
+    );
     let body = "  fake body, indented\n\n";
     let t = d.create(text("T", body), None, T0).unwrap();
     assert_eq!(d.reveal(&t, field::BODY).unwrap().as_str(), body);
@@ -1129,6 +1163,109 @@ fn an_edit_that_changes_nothing_is_not_a_change() {
         assert_eq!(d.changed_at(), now, "real edit {i}");
         assert_eq!(d.get(&id).unwrap().updated_at, now, "real edit {i}");
     }
+}
+
+#[test]
+fn an_untouched_save_of_a_value_an_older_build_stored_untrimmed_is_not_a_change() {
+    const ID: &str = "00112233445566778899aabbccddeeff";
+    /// What the Editor sends when it is saved untouched: the title and every visible value,
+    /// exactly as `get` handed them out.
+    fn untouched(d: &Document) -> NoteEdit {
+        let view = d.get(ID).unwrap();
+        NoteEdit {
+            title: Some(view.title),
+            visible: view.visible,
+            ..Default::default()
+        }
+    }
+
+    // Builds from before visible values were trimmed stored them as typed, so a schema 1 body
+    // can hold a value with whitespace around it.
+    let (website, username) = ("  site.example.test ", "fake-user\n");
+    let note = raw_note(
+        "login",
+        json!({"website": website, "username": username}),
+        json!({"password": "fake-pw"}),
+        json!({}),
+    );
+    let mut d = Document::from_json(&body_with_note(note)).unwrap();
+    let before = d.to_json();
+    let (at, n) = (d.changed_at(), d.change_counter());
+
+    let edit = untouched(&d);
+    d.update(ID, edit, None, T0 + 50).unwrap();
+    // One of the values alone, as stored.
+    d.update(
+        ID,
+        set_visible(&[(field::USERNAME, username)]),
+        None,
+        T0 + 51,
+    )
+    .unwrap();
+    assert_eq!((d.changed_at(), d.change_counter()), (at, n));
+    assert_eq!(d.get(ID).unwrap().updated_at, T0);
+    assert_eq!(*d.to_json(), *before);
+
+    // Editing another field is a change, and leaves the values sent back as stored alone.
+    let mut edit = untouched(&d);
+    edit.visible
+        .insert(field::PURPOSE.into(), " fake purpose ".into());
+    d.update(ID, edit, None, T0 + 60).unwrap();
+    assert_eq!((d.changed_at(), d.change_counter()), (T0 + 60, n + 1));
+    let view = d.get(ID).unwrap();
+    assert_eq!(view.updated_at, T0 + 60);
+    assert_eq!(view.visible[field::PURPOSE], "fake purpose");
+    assert_eq!(view.visible[field::WEBSITE], website);
+    assert_eq!(view.visible[field::USERNAME], username);
+
+    // A real edit of an untrimmed field is trimmed and counted: a new value, and also the
+    // stored value with only its stray whitespace taken away.
+    d.update(
+        ID,
+        set_visible(&[(field::WEBSITE, " other.example.test\n")]),
+        None,
+        T0 + 61,
+    )
+    .unwrap();
+    assert_eq!((d.changed_at(), d.change_counter()), (T0 + 61, n + 2));
+    assert_eq!(
+        d.get(ID).unwrap().visible[field::WEBSITE],
+        "other.example.test"
+    );
+    d.update(
+        ID,
+        set_visible(&[(field::USERNAME, "fake-user")]),
+        None,
+        T0 + 62,
+    )
+    .unwrap();
+    assert_eq!((d.changed_at(), d.change_counter()), (T0 + 62, n + 3));
+    let view = d.get(ID).unwrap();
+    assert_eq!(view.visible[field::USERNAME], "fake-user");
+    assert_eq!(view.updated_at, T0 + 62);
+    // With every value trimmed now, an untouched save is still not a change.
+    let edit = untouched(&d);
+    d.update(ID, edit, None, T0 + 70).unwrap();
+    assert_eq!((d.changed_at(), d.change_counter()), (T0 + 62, n + 3));
+
+    // A stored value that is nothing but whitespace is kept the same way when it comes back
+    // as stored; any other blank value removes the field, as it always did.
+    let blank = raw_note(
+        "login",
+        json!({"website": "site.example.test", "username": " \t"}),
+        json!({"password": "fake-pw"}),
+        json!({}),
+    );
+    let mut d = Document::from_json(&body_with_note(blank)).unwrap();
+    let n = d.change_counter();
+    let edit = untouched(&d);
+    d.update(ID, edit, None, T0 + 50).unwrap();
+    assert_eq!(d.change_counter(), n);
+    assert_eq!(d.get(ID).unwrap().visible[field::USERNAME], " \t");
+    d.update(ID, set_visible(&[(field::USERNAME, "  ")]), None, T0 + 51)
+        .unwrap();
+    assert_eq!(d.change_counter(), n + 1);
+    assert!(!d.get(ID).unwrap().visible.contains_key(field::USERNAME));
 }
 
 #[test]
@@ -2010,6 +2147,16 @@ const NEW_FIELDS: [(Kind, &str, &str); 9] = [
     (Kind::SeedPhrase, field::DERIVATION_PATH, "m/44'/60'/0'/0/0"),
 ];
 
+/// Schema-2 fields whose new values must fit on one line.
+const ONE_LINE_FIELDS: [(Kind, &str); 6] = [
+    (Kind::ApiKey, field::KEY_ID),
+    (Kind::ApiKey, field::PURPOSE),
+    (Kind::ApiKey, field::URL),
+    (Kind::Login, field::PURPOSE),
+    (Kind::SeedPhrase, field::ADDRESS),
+    (Kind::SeedPhrase, field::DERIVATION_PATH),
+];
+
 /// A Note of `kind` that uses only fields schema 1 already had.
 fn plain_note(kind: Kind) -> NewNote {
     match kind {
@@ -2283,7 +2430,97 @@ fn only_schema_1_and_2_are_read_and_anything_else_is_unsupported_not_damaged() {
     }
 }
 
-/// Values that break the rule for their field, by (Kind, field).
+#[test]
+fn legacy_unicode_separators_survive_open_round_trip_and_unrelated_edits() {
+    for (kind, name) in ONE_LINE_FIELDS {
+        for separator in ['\u{2028}', '\u{2029}'] {
+            // The original schema-2 build could save either separator inside these fields.
+            let value = format!("fake{separator}legacy value");
+            let raw = raw_note_with(kind, name, &value);
+            let id = raw["id"].as_str().unwrap().to_string();
+            let mut d = Document::from_json(&body_as(2, raw)).unwrap();
+            let original = d.get(&id).unwrap();
+            assert_eq!(original.visible[name], value);
+            let before = d.to_json();
+            let reread = Document::from_json(&before).unwrap();
+            assert_eq!(reread.get(&id), Some(original.clone()));
+            assert_eq!(*reread.to_json(), *before);
+
+            // An untouched Editor sends the legacy value back exactly; neither its value nor
+            // the document's timestamps or counter changes.
+            let untouched = NoteEdit {
+                title: Some(original.title.clone()),
+                visible: original.visible.clone(),
+                ..Default::default()
+            };
+            d.update(&id, untouched, None, T0 + 1).unwrap();
+            assert_eq!(*d.to_json(), *before);
+
+            // Changing another field while sending all visible values back preserves the
+            // legacy text. The next save must still open without modifying it.
+            let renamed = NoteEdit {
+                title: Some("Fake renamed Note".into()),
+                visible: original.visible.clone(),
+                ..Default::default()
+            };
+            let counter = d.change_counter();
+            d.update(&id, renamed, None, T0 + 2).unwrap();
+            assert_eq!(d.change_counter(), counter + 1);
+            assert_eq!(d.get(&id).unwrap().visible, original.visible);
+            let saved = d.to_json();
+            let reread = Document::from_json(&saved).unwrap();
+            assert_eq!(reread.get(&id), d.get(&id));
+            assert_eq!(*reread.to_json(), *saved);
+
+            // A change to the legacy value must follow the new rule, even if it only adds a
+            // suffix. A failed edit leaves the original text and the rest of the Note alone.
+            let changed = format!("{value} changed");
+            assert_eq!(
+                d.update(&id, set_visible(&[(name, &changed)]), None, T0 + 3),
+                Err(NotesError::InvalidValue(name.into())),
+                "{kind:?} {name} {separator:?}"
+            );
+            assert_eq!(*d.to_json(), *saved);
+
+            // The owner can replace the legacy value with a valid one normally.
+            d.update(
+                &id,
+                set_visible(&[(name, "fake replacement")]),
+                None,
+                T0 + 4,
+            )
+            .unwrap();
+            assert_eq!(d.get(&id).unwrap().visible[name], "fake replacement");
+            assert!(Document::from_json(&d.to_json()).is_ok());
+        }
+    }
+}
+
+#[test]
+fn newly_entered_or_changed_values_reject_unicode_line_and_paragraph_separators() {
+    for (kind, name) in ONE_LINE_FIELDS {
+        for separator in ['\u{2028}', '\u{2029}'] {
+            let value = format!("fake{separator}new value");
+            let mut d = doc();
+            assert_eq!(
+                d.create(note_with(kind, name, &value), Some(&CIPHER), T0),
+                Err(NotesError::InvalidValue(name.into())),
+                "{kind:?} {name} {separator:?}"
+            );
+            assert_eq!(d.count(), 0);
+            let id = d.create(plain_note(kind), Some(&CIPHER), T0).unwrap();
+            let before = d.to_json();
+            assert_eq!(
+                d.update(&id, set_visible(&[(name, &value)]), None, T0 + 1),
+                Err(NotesError::InvalidValue(name.into())),
+                "{kind:?} {name} {separator:?}"
+            );
+            assert_eq!(*d.to_json(), *before);
+        }
+    }
+}
+
+/// Values that break both the original stored rule and the current input rule, by field.
 fn rule_breakers() -> Vec<(Kind, &'static str, Vec<String>)> {
     let owned = |values: &[&str]| values.iter().map(|v| v.to_string()).collect::<Vec<_>>();
     let long_purpose = "p".repeat(notes::MAX_PURPOSE_CHARS + 1);
@@ -2398,6 +2635,14 @@ fn a_body_with_a_value_that_breaks_the_rule_for_its_field_is_rejected() {
         Document::from_json(&body_as(2, padded)),
         Err(NotesError::Corrupt(_))
     ));
+    // Stored legacy text is not trimmed, including a separator at the end of a value.
+    let ended = raw_note_with(Kind::ApiKey, field::KEY_ID, "FAKEKEYID0001\u{2028}");
+    let d = Document::from_json(&body_as(2, ended)).unwrap();
+    let id = d.list(Filter::All, "")[0].id.clone();
+    assert_eq!(
+        d.get(&id).unwrap().visible[field::KEY_ID],
+        "FAKEKEYID0001\u{2028}"
+    );
 }
 
 #[test]
@@ -2417,7 +2662,8 @@ fn values_at_the_edge_of_their_rule_are_accepted() {
                     (field::ENV_VAR, variable.as_str()),
                     // A leap day, and whitespace around it that trimming takes away.
                     (field::EXPIRES, "  2028-02-29\n"),
-                    (field::KEY_ID, "FAKE KEY ID with spaces"),
+                    // A line separator at the end is whitespace too, and goes the same way.
+                    (field::KEY_ID, "FAKE KEY ID with spaces\u{2028}"),
                     (field::URL, "console.example.test/keys?fake=1"),
                 ],
                 &[(field::KEY, "fake-token")],
@@ -2428,6 +2674,7 @@ fn values_at_the_edge_of_their_rule_are_accepted() {
         .unwrap();
     let view = d.get(&a).unwrap();
     assert_eq!(view.visible[field::EXPIRES], "2028-02-29");
+    assert_eq!(view.visible[field::KEY_ID], "FAKE KEY ID with spaces");
     assert_eq!(view.visible[field::PURPOSE], purpose);
     assert_eq!(view.visible[field::ENV_VAR], variable);
     let l = d

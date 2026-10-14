@@ -1,6 +1,6 @@
 // Settings: Auto-lock, Backups, opening a Backup or Safety Copy, Change Master Password, help.
 
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useId, useState, type FormEvent } from "react";
 import {
   changePassword,
   discardInspection,
@@ -13,6 +13,7 @@ import {
   replaceWithBackup,
   restoreSafetyCopy,
   setSettings,
+  vaultLocation,
   writeBackup,
   type AppStatus,
   type BackupWritten,
@@ -24,11 +25,15 @@ import { Choice, ErrorLine, Field, formatDate, Modal, NewPassword, SecretInput, 
 import { strings as s } from "./strings";
 
 const MINUTES = [1, 2, 5, 10, 15, 30, 60].map((m) => [m, s.minutes(m)] as const);
+const CLIPBOARD_SECONDS = [30, 60].map((n) => [n, s.clipboardSeconds(n)] as const);
 
 export function Settings({ status, onKit, onOperationOutcome }: { status: AppStatus; onKit: (recoveryKey: string) => void; onOperationOutcome: (message: string) => void }) {
-  const [lockRule, setLockRule] = useState({
+  // Everything setSettings takes: each change is sent together with the rest.
+  const [chosen, setChosen] = useState({
     idle_minutes: status.settings.idle_minutes,
     lock_on_app_switch: status.settings.lock_on_app_switch,
+    clipboard_clear_seconds: status.settings.clipboard_clear_seconds ?? 30,
+    count_activity_anywhere: status.settings.count_activity_anywhere ?? false,
   });
   const [copies, setCopies] = useState<SafetyCopy[]>([]);
   const [flow, setFlow] = useState<"password" | "open" | SafetyCopy | null>(null);
@@ -40,9 +45,9 @@ export function Settings({ status, onKit, onOperationOutcome }: { status: AppSta
     loadCopies();
   };
 
-  const change = (next: Partial<typeof lockRule>) => {
-    const merged = { ...lockRule, ...next };
-    setLockRule(merged);
+  const change = (next: Partial<typeof chosen>) => {
+    const merged = { ...chosen, ...next };
+    setChosen(merged);
     run(() => setSettings(merged));
   };
 
@@ -51,18 +56,32 @@ export function Settings({ status, onKit, onOperationOutcome }: { status: AppSta
       <section className="section">
         <h2>{s.autoLockTitle}</h2>
         <div className="card stack">
-          <Choice label={s.autoLockAfter} options={MINUTES} value={lockRule.idle_minutes} onChange={(m) => change({ idle_minutes: m })} />
-          <label className="switch-row">
-            {s.lockOnSwitch}
-            {/* `switch`: WebKit draws a Mac switch; elsewhere it stays a checkbox. */}
-            <input
-              type="checkbox"
-              {...{ switch: "" }}
-              checked={lockRule.lock_on_app_switch}
-              onChange={(e) => change({ lock_on_app_switch: e.target.checked })}
+          <Choice label={s.autoLockAfter} options={MINUTES} value={chosen.idle_minutes} onChange={(m) => change({ idle_minutes: m })} />
+          <Switch
+            label={s.lockOnSwitch}
+            hint={s.lockOnSwitchHint}
+            checked={chosen.lock_on_app_switch}
+            onChange={(on) => change({ lock_on_app_switch: on })}
+          />
+          {/* Only where the computer can tell when it was last used: elsewhere the core keeps it off. */}
+          {status.settings.count_activity_anywhere_supported && (
+            <Switch
+              label={s.countActivityAnywhere}
+              hint={s.countActivityAnywhereHint(chosen.lock_on_app_switch)}
+              checked={chosen.count_activity_anywhere}
+              onChange={(on) => change({ count_activity_anywhere: on })}
             />
-          </label>
+          )}
           <p className="hint">{s.alwaysLocks}</p>
+          <div className="setting">
+            <Choice
+              label={s.clipboardClearAfter}
+              options={CLIPBOARD_SECONDS}
+              value={chosen.clipboard_clear_seconds}
+              onChange={(n) => change({ clipboard_clear_seconds: n })}
+            />
+            <p className="hint">{s.walletCopiesClearAfter30}</p>
+          </div>
           <ErrorLine error={error} />
         </div>
       </section>
@@ -131,9 +150,35 @@ export function Settings({ status, onKit, onOperationOutcome }: { status: AppSta
   );
 }
 
+/** A setting drawn as a row with a switch, and one line under it saying what it does. */
+function Switch(props: { label: string; hint: string; checked: boolean; onChange: (on: boolean) => void }) {
+  const hint = useId();
+  return (
+    <div className="setting">
+      <label className="switch-row">
+        {props.label}
+        {/* `switch`: WebKit draws a Mac switch; elsewhere it stays a checkbox. */}
+        <input
+          type="checkbox"
+          {...{ switch: "" }}
+          checked={props.checked}
+          aria-describedby={hint}
+          onChange={(e) => props.onChange(e.target.checked)}
+        />
+      </label>
+      <p className="hint" id={hint}>
+        {props.hint}
+      </p>
+    </div>
+  );
+}
+
 function BackUp({ status }: { status: AppStatus }) {
   const [cloud, setCloud] = useState<CloudProvider | null>(null);
   const [written, setWritten] = useState<BackupWritten | null>(null);
+  // Where this computer's Vault is, to read: text only, nothing opens it.
+  const [folder, setFolder] = useState<string | null>(null);
+  useEffect(() => void vaultLocation().then(setFolder, () => {}), []);
   const { busy, error, run } = useAction();
   const write = () => {
     setCloud(null);
@@ -165,6 +210,7 @@ function BackUp({ status }: { status: AppStatus }) {
         {written && !written.durable && <p className="hint">{s.backupEjectHint}</p>}
         <ErrorLine error={error} />
         <p className="hint">{s.exfatTip}</p>
+        {folder && <p className="hint path">{s.vaultFolder(folder)}</p>}
       </div>
       {cloud && (
         <Modal
@@ -207,13 +253,46 @@ export function ReplaceVault({ copy, onClose, onOperationOutcome }: { copy?: Saf
     run(async () => setPreview(copy ? await inspectSafetyCopy(copy.id, credential) : await inspectBackup(credential)));
   }
 
+  // This computer's Vault beside the copy: only when the core could compare the two (the Vault
+  // here is Unlocked and the copy is a copy of it). Otherwise the copy is described by itself.
+  const here =
+    preview && preview.current_note_count != null && preview.current_changed_at != null
+      ? { notes: preview.current_note_count, changedAt: preview.current_changed_at }
+      : null;
   let body;
   if (preview)
     body = (
       <>
-        <p>{s.previewNotes(preview.note_count)}</p>
-        <p>{s.previewChanged(formatDate(preview.changed_at))}</p>
+        {here ? (
+          <table className="compare">
+            <thead>
+              <tr>
+                <td />
+                <th scope="col">{s.compareCopy(!!copy)}</th>
+                <th scope="col">{s.compareHere}</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <th scope="row">{s.compareNotes}</th>
+                <td>{preview.note_count}</td>
+                <td>{here.notes}</td>
+              </tr>
+              <tr>
+                <th scope="row">{s.compareChanged}</th>
+                <td>{formatDate(preview.changed_at)}</td>
+                <td>{formatDate(here.changedAt)}</td>
+              </tr>
+            </tbody>
+          </table>
+        ) : (
+          <>
+            <p>{s.previewNotes(preview.note_count)}</p>
+            <p>{s.previewChanged(formatDate(preview.changed_at))}</p>
+          </>
+        )}
         {preview.older_than_current && <p className="warn">{s.olderWarning(!!copy)}</p>}
+        {!!preview.only_here && <p className="warn">{s.onlyHereWarning(preview.only_here, !!copy)}</p>}
         {preview.replaces_vault && preview.older_than_current === null && <p className="warn">{s.cannotCompareWarning}</p>}
         {preview.replaces_vault && <p className="hint">{s.keptAsSafetyCopy}</p>}
         <ErrorLine error={error} />

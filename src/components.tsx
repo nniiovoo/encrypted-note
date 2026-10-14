@@ -39,6 +39,21 @@ export const minSec = (ms: number) => {
   return `${Math.floor(t / 60)}:${String(t % 60).padStart(2, "0")}`;
 };
 
+/** Whole days from today, by this computer's own date, to a YYYY-MM-DD date: 0 on the day,
+ *  negative once it is past. null for anything that isn't such a date. */
+export const daysUntil = (date: string) => {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(date);
+  if (!m) return null;
+  const today = new Date();
+  const from = Date.UTC(today.getFullYear(), today.getMonth(), today.getDate());
+  return Math.round((Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3])) - from) / 86_400_000);
+};
+/** What to say about an API Key's expiry date once it is past or no more than 30 days away. */
+export const expiry = (date: string | null | undefined) => {
+  const days = date ? daysUntil(date) : null;
+  return days === null || days > 30 ? null : { past: days < 0, text: days < 0 ? s.expired : s.expiresIn(days) };
+};
+
 /** Runs an API call and keeps its (already plain English) error. Resolves true on success.
  *  A cancelled native picker is not an error. */
 export function useAction() {
@@ -141,7 +156,9 @@ export function Modal(props: { title: string; onClose: () => void; alert?: boole
       const top = topDialog();
       // Not when a dialog that replaced this one already put the keyboard in its own input.
       if (top) top.contains(document.activeElement) || top.focus();
-      else if (!el.isConnected) trigger?.focus();
+      // Only when nothing else took the keyboard as the dialog went: after Discard, a new Editor
+      // already has it in its title box.
+      else if (!el.isConnected && (!document.activeElement || document.activeElement === document.body)) trigger?.focus();
     };
   }, []);
   return (

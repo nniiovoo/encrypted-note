@@ -66,10 +66,16 @@ pub fn run() {
             commands::delete_forever,
             commands::empty_trash,
             commands::set_favorite,
+            commands::append_text,
             commands::show_field,
             commands::show_wallet_field,
+            commands::show_and_copy_wallet_field,
             commands::hide_field,
+            commands::extend_reveal,
             commands::copy_field,
+            commands::copy_visible_field,
+            commands::copy_field_line,
+            commands::copy_field_env,
             commands::seed_wordlist,
             commands::check_seed,
             commands::check_private_key,
@@ -86,6 +92,7 @@ pub fn run() {
             commands::change_password,
             commands::set_settings,
             commands::mark_seed_explainer_seen,
+            commands::vault_location,
             commands::dismiss_sharing_guard,
         ])
         .setup(|app| {
@@ -146,6 +153,9 @@ fn setup(app: &AppHandle) {
                 limits: vault_format::Limits::PRODUCTION,
                 clock: Box::new(SystemClock::start()),
                 clipboard: Box::new(platform::SystemClipboard),
+                // Asked once: where the OS can't say when input was last seen (every
+                // platform but the Mac, for now), "count activity anywhere" isn't offered.
+                activity_anywhere_supported: platform::ms_since_last_input().is_some(),
             })
             .map_err(|e| e.message)
         })
@@ -217,6 +227,10 @@ fn on_window_event(window: &Window, event: &WindowEvent) {
 /// Tick every 500 ms; every 2 s also poll running apps and the Capture Hiding self-check. Emit
 /// "status-changed" whenever the status changes in more than its countdowns (the screens poll
 /// once a second for those).
+///
+/// While the owner has "count activity anywhere" on, each round also asks the OS how long ago
+/// the keyboard or mouse was last used in any app and tells the core. What that is worth is
+/// decided by the session rules, not here.
 fn background(app: &AppHandle) {
     let mut last: Option<AppStatus> = None;
     for round in 0u64.. {
@@ -233,6 +247,11 @@ fn background(app: &AppHandle) {
                 core.guard_update(&apps);
             }
             core.set_capture_hiding_active(capture_hiding_active);
+        }
+        if core.counts_activity_anywhere()
+            && let Some(ago_ms) = platform::ms_since_last_input()
+        {
+            core.activity_elsewhere(ago_ms);
         }
         core.tick();
         let key = without_countdowns(core.app_status());
