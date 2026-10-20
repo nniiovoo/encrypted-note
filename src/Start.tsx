@@ -2,8 +2,8 @@
 // and setting a new Master Password after a Recovery Key unlock.
 
 import { useEffect, useState, type FormEvent } from "react";
-import { confirmRecoveryKit, createVault, listSafetyCopies, lock, setNewPassword, unlock, type AppStatus, type SafetyCopy } from "./api";
-import { AppIcon, ErrorLine, Field, formatDate, Modal, NewPassword, SecretInput, seconds, useAction } from "./components";
+import { confirmRecoveryKit, createVault, lock, setNewPassword, unlock, type AppStatus, type SafetyCopy } from "./api";
+import { AppIcon, ErrorLine, Field, formatDate, Modal, NewPassword, SafetyCopiesNote, SecretInput, seconds, useAction, useSafetyCopies } from "./components";
 import { Icon, type IconName } from "./icons";
 import { ReplaceVault } from "./Settings";
 import { strings as s } from "./strings";
@@ -23,9 +23,10 @@ export function NoVault({ onKit, onOperationOutcome }: { onKit: (recoveryKey: st
   const [step, setStep] = useState<"welcome" | "create" | "open">("welcome");
   // No Vault file, but Safety Copies: this is not a first run. Say so, before the owner
   // concludes their Notes are gone and creates a new Vault over them.
-  const [copies, setCopies] = useState<SafetyCopy[]>([]);
+  const safety = useSafetyCopies();
+  const copies = safety.copies ?? [];
   const [copy, setCopy] = useState<SafetyCopy | null>(null);
-  useEffect(() => void listSafetyCopies().then(setCopies, () => {}), []);
+  useEffect(safety.reload, []);
   if (step === "create")
     return (
       <div className="center narrow">
@@ -70,6 +71,14 @@ export function NoVault({ onKit, onOperationOutcome }: { onKit: (recoveryKey: st
               </li>
             ))}
           </ul>
+        </section>
+      )}
+      {safety.error && copies.length === 0 && (
+        <section className="card stack">
+          <h2>{s.safetyCopiesUncheckedTitle}</h2>
+          <p>{s.safetyCopiesUncheckedText}</p>
+          <ErrorLine error={safety.error} />
+          <button onClick={safety.reload}>{s.tryAgain}</button>
         </section>
       )}
       <button className="primary big" onClick={() => setStep("create")}>
@@ -139,7 +148,8 @@ export function Locked({ status, onOperationOutcome }: { status: AppStatus; onOp
   const [useKey, setUseKey] = useState(false);
   const [secret, setSecret] = useState("");
   const [restore, setRestore] = useState<"choose" | "backup" | null>(null);
-  const [copies, setCopies] = useState<SafetyCopy[]>([]);
+  const safety = useSafetyCopies();
+  const copies = safety.copies ?? [];
   const [copy, setCopy] = useState<SafetyCopy | null>(null);
   const { busy, error, run } = useAction();
   const wait = status.retry_in_ms ? seconds(status.retry_in_ms) : 0;
@@ -176,7 +186,7 @@ export function Locked({ status, onOperationOutcome }: { status: AppStatus; onOp
         className="link"
         onClick={() => {
           setRestore("choose");
-          run(async () => setCopies(await listSafetyCopies()));
+          safety.reload();
         }}
       >
         {s.restoreVault}
@@ -195,8 +205,7 @@ export function Locked({ status, onOperationOutcome }: { status: AppStatus; onOp
               ))}
             </ul>
           )}
-          {copies.length === 0 && <p className="hint">{s.noSafetyCopies}</p>}
-          <ErrorLine error={error} />
+          <SafetyCopiesNote {...safety} />
         </Modal>
       )}
       {restore === "backup" && <ReplaceVault onClose={() => setRestore(null)} onOperationOutcome={onOperationOutcome} />}

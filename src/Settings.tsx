@@ -7,7 +7,6 @@ import {
   forgetBackupDestination,
   inspectBackup,
   inspectSafetyCopy,
-  listSafetyCopies,
   pickBackupDestination,
   pickBackupToOpen,
   replaceWithBackup,
@@ -21,7 +20,7 @@ import {
   type SafetyCopy,
   type VaultPreview,
 } from "./api";
-import { Choice, ErrorLine, Field, formatDate, Modal, NewPassword, SecretInput, useAction } from "./components";
+import { Choice, ErrorLine, Field, formatDate, Modal, NewPassword, SafetyCopiesNote, SecretInput, useAction, useSafetyCopies } from "./components";
 import { strings as s } from "./strings";
 
 const MINUTES = [1, 2, 5, 10, 15, 30, 60].map((m) => [m, s.minutes(m)] as const);
@@ -35,14 +34,14 @@ export function Settings({ status, onKit, onOperationOutcome }: { status: AppSta
     clipboard_clear_seconds: status.settings.clipboard_clear_seconds ?? 30,
     count_activity_anywhere: status.settings.count_activity_anywhere ?? false,
   });
-  const [copies, setCopies] = useState<SafetyCopy[]>([]);
+  const safety = useSafetyCopies();
+  const { copies } = safety;
   const [flow, setFlow] = useState<"password" | "open" | SafetyCopy | null>(null);
   const { error, run } = useAction();
-  const loadCopies = () => void listSafetyCopies().then(setCopies, () => {});
-  useEffect(loadCopies, []);
+  useEffect(safety.reload, []);
   const closeFlow = () => {
     setFlow(null);
-    loadCopies();
+    safety.reload();
   };
 
   const change = (next: Partial<typeof chosen>) => {
@@ -100,7 +99,7 @@ export function Settings({ status, onKit, onOperationOutcome }: { status: AppSta
         <h2>{s.safetyCopiesTitle}</h2>
         <div className="card stack">
           <p className="hint">{s.safetyCopiesText}</p>
-          {copies.length > 0 && (
+          {copies && copies.length > 0 && (
             <ul className="rows">
               {copies.map((c) => (
                 <li key={c.id} className="trash-row">
@@ -112,7 +111,7 @@ export function Settings({ status, onKit, onOperationOutcome }: { status: AppSta
               ))}
             </ul>
           )}
-          {copies.length === 0 && <p className="hint">{s.noSafetyCopies}</p>}
+          <SafetyCopiesNote {...safety} />
         </div>
       </section>
 

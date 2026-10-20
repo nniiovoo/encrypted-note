@@ -2,7 +2,7 @@
 
 import { useEffect, useId, useRef, useState, type ComponentProps, type FormEvent, type KeyboardEvent as KeyEvent, type ReactNode } from "react";
 import appIcon from "../src-tauri/icons/128x128@2x.png";
-import { assessPassword, isApiError, suggestPassphrase, type Assessment } from "./api";
+import { assessPassword, isApiError, listSafetyCopies, suggestPassphrase, type Assessment, type SafetyCopy } from "./api";
 import { strings as s } from "./strings";
 
 /** The Mac window draws its title bar over the page (tauri.conf.json), so the page provides the
@@ -81,6 +81,39 @@ export const ErrorLine = ({ error }: { error: string | null }) =>
       {error}
     </p>
   );
+
+/** The Safety Copies on this computer, listed by `reload`. `copies` is null until a list first
+ *  arrives. A failed list sets `error` and keeps the last one: Safety Copies that can't be read
+ *  are not the same as none. */
+export function useSafetyCopies() {
+  const [copies, setCopies] = useState<SafetyCopy[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const reload = () =>
+    void listSafetyCopies().then(
+      (list) => {
+        setCopies(list);
+        setError(null);
+      },
+      (e) => setError(isApiError(e) ? e.message : s.somethingWentWrong),
+    );
+  return { copies, error, reload };
+}
+
+/** Under a list of Safety Copies: still looking, none at all, or that they couldn't be read,
+ *  with a way to try again. */
+export function SafetyCopiesNote({ copies, error, reload }: ReturnType<typeof useSafetyCopies>) {
+  if (error)
+    return (
+      <>
+        <p className="error" role="alert">
+          {copies?.length ? s.safetyCopiesStale : s.safetyCopiesUnreadable} {error}
+        </p>
+        <button onClick={reload}>{s.tryAgain}</button>
+      </>
+    );
+  if (copies === null) return <p className="hint">{s.lookingForSafetyCopies}</p>;
+  return copies.length === 0 && <p className="hint">{s.noSafetyCopies}</p>;
+}
 
 /** A labelled input. Says so when Caps Lock is on while typing into a password box. `hint`
  *  explains the field; `check` is what the page says about what is in it now (its length, a

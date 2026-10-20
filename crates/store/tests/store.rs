@@ -278,6 +278,72 @@ fn a_retried_save_does_not_take_a_second_copy_of_the_same_vault() {
     );
 }
 
+/// The Vault as it is after a save that took its Safety Copy and then failed: still the
+/// version the newest (automatic) copy holds.
+fn after_a_failed_save(root: &Path, dir: &VaultDir) {
+    dir.save_vault(b"fake-vault-v0", &accept, T0).unwrap();
+    dir.save_vault(b"fake-vault-v1", &accept, T0 + 1).unwrap();
+    dir.save_vault(b"fake-vault-v2", &accept, T0 + 2).unwrap();
+    fs::write(root.join(VAULT_FILE), b"fake-vault-v1").unwrap();
+}
+
+fn holding(dir: &VaultDir, kind: SafetyKind, bytes: &[u8]) -> usize {
+    let copies = dir.safety_copies().unwrap();
+    let of_kind = copies.iter().filter(|c| c.kind == kind);
+    of_kind
+        .filter(|c| dir.read_safety_copy(&c.id).unwrap() == bytes)
+        .count()
+}
+
+#[test]
+fn a_backup_opened_after_a_failed_save_still_keeps_the_vault_as_a_replaced_copy() {
+    let (_tmp, root) = data_dir();
+    let dir = VaultDir::open(&root).unwrap();
+    after_a_failed_save(&root, &dir);
+    dir.replace_vault(b"fake-vault-backup", &accept, T0 + 3)
+        .unwrap();
+    assert_eq!(holding(&dir, SafetyKind::Replaced, b"fake-vault-v1"), 1);
+
+    // More same-day saves than automatic copies are kept: the automatic copy of v1 goes,
+    // the replaced one stays.
+    for i in 0..(AUTO_SAFETY_KEEP as i64 + 2) {
+        dir.save_vault(format!("fake-vault-new{i}").as_bytes(), &accept, T0 + 4 + i)
+            .unwrap();
+    }
+    assert_eq!(holding(&dir, SafetyKind::Automatic, b"fake-vault-v1"), 0);
+    assert_eq!(holding(&dir, SafetyKind::Replaced, b"fake-vault-v1"), 1);
+}
+
+#[test]
+fn a_retried_replace_does_not_take_a_second_replaced_copy() {
+    let (_tmp, root) = data_dir();
+    let dir = VaultDir::open(&root).unwrap();
+    dir.save_vault(b"fake-vault-mine", &accept, T0).unwrap();
+    dir.replace_vault(b"fake-vault-backup", &accept, T0 + 1)
+        .unwrap();
+    // As after a replace that took its Safety Copy and then failed.
+    fs::write(root.join(VAULT_FILE), b"fake-vault-mine").unwrap();
+    dir.replace_vault(b"fake-vault-backup", &accept, T0 + 2)
+        .unwrap();
+    assert_eq!(dir.safety_copies().unwrap().len(), 1);
+    assert_eq!(holding(&dir, SafetyKind::Replaced, b"fake-vault-mine"), 1);
+}
+
+#[test]
+fn a_save_after_a_failed_replace_takes_its_own_automatic_copy() {
+    let (_tmp, root) = data_dir();
+    let dir = VaultDir::open(&root).unwrap();
+    dir.save_vault(b"fake-vault-mine", &accept, T0).unwrap();
+    dir.replace_vault(b"fake-vault-backup", &accept, T0 + 1)
+        .unwrap();
+    fs::write(root.join(VAULT_FILE), b"fake-vault-mine").unwrap();
+    // The replaced copy is kept by other rules, so it does not stand in for this one; it stays.
+    dir.save_vault(b"fake-vault-edited", &accept, T0 + 2)
+        .unwrap();
+    assert_eq!(holding(&dir, SafetyKind::Automatic, b"fake-vault-mine"), 1);
+    assert_eq!(holding(&dir, SafetyKind::Replaced, b"fake-vault-mine"), 1);
+}
+
 #[test]
 fn a_safety_copy_never_replaces_a_file_already_there() {
     let (_tmp, root) = data_dir();
