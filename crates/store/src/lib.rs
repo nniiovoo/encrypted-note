@@ -31,8 +31,10 @@
 //! Copy is stamped with `max(now, newest existing created_at)` so that a clock going backwards
 //! can never make the copy just taken look older than the others (and be pruned at once); the
 //! same-second counter `<n>` is shared by both kinds, so "newest first" is always exact. A
-//! Safety Copy never replaces another file, and none is written when the newest one already
-//! holds the same bytes (a save that failed after its copy was taken, tried again).
+//! Safety Copy never replaces another file, and none is written when the newest one is of the
+//! same kind and already holds the same bytes (a save that failed after its copy was taken,
+//! tried again). A copy of the other kind does not count, since it may be pruned sooner: a
+//! Backup opened after a failed save still gets its own `replaced-*` copy.
 //!
 //! No file larger than [`MAX_FILE_BYTES`] is read or written: a real Vault is far smaller, and
 //! a picked "Backup" of any size must not be pulled into memory.
@@ -240,7 +242,10 @@ impl VaultDir {
         let dir = self.safety_dir();
         create_private_dir(&dir)?;
         let newest = self.numbered_safety_copies()?.into_iter().next();
+        // Only a copy of the same kind makes this one unnecessary: the kinds are kept by
+        // different rules, so an `auto-*` copy can't stand in for the `replaced-*` one asked for.
         if let Some((copy, _)) = &newest
+            && copy.kind == kind
             && read_if_exists(&dir.join(&copy.id))?.as_deref() == Some(bytes)
         {
             return Ok(CommitStatus::Durable);

@@ -384,6 +384,13 @@ export const strings = {
   safetyCopiesText: "Earlier versions of your Vault the app keeps automatically, in case something goes wrong.",
   safetyKinds: { automatic: "Automatic", replaced: "Before opening a Backup" } satisfies Record<"automatic" | "replaced", string>,
   noSafetyCopies: "No Safety Copies yet.",
+  lookingForSafetyCopies: "Looking for Safety Copies…",
+  safetyCopiesUnreadable: "The Safety Copies couldn't be read, so this doesn't show whether there are any.",
+  safetyCopiesStale: "The Safety Copies couldn't be read again, so this list may be out of date.",
+  safetyCopiesUncheckedTitle: "Safety Copies couldn't be checked",
+  safetyCopiesUncheckedText:
+    "If this computer had a Vault before, Safety Copies of it may still be here. Try again before you create a new Vault.",
+  tryAgain: "Try again",
   seedPasteTooMany: "That paste contains more than 24 words. Clear the field and paste a 12- or 24-word phrase.",
   changePasswordTitle: "Change Master Password",
   changePasswordText: "Your Recovery Kit keeps working unless you choose that someone may know your old password.",
