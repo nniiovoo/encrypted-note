@@ -6,6 +6,7 @@
 //!   and cloud sync; clipboard managers skip them only by convention). It never reads the
 //!   clipboard's contents.
 //! * [`observe_lock_events`]: OS notifications that must lock the app at once, and app switches.
+//! * [`lock_events_unavailable`]: Windows lock notifications whose registration failed.
 //! * [`default_backup_folder`]: where the Backup save panel starts.
 //! * [`clear_leftover_copy`]: at startup, clear a copy the last run didn't live to clear.
 //! * [`real_home_dir`]: the owner's home folder, even inside the Mac App Sandbox.
@@ -374,11 +375,149 @@ mod mac {
     }
 }
 
+#[cfg(not(windows))]
+pub fn lock_events_unavailable() -> Vec<&'static str> {
+    Vec::new()
+}
+
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum LockRegistration {
+    WindowHook = 1,
+    Session = 2,
+    DisplayOff = 4,
+    LidClose = 8,
+}
+
+#[cfg(any(windows, test))]
+fn register_lock_notifications(mut register: impl FnMut(LockRegistration) -> bool) -> u8 {
+    let mut registered = 0;
+    for kind in [
+        LockRegistration::WindowHook,
+        LockRegistration::Session,
+        LockRegistration::DisplayOff,
+        LockRegistration::LidClose,
+    ] {
+        if register(kind) {
+            registered |= kind as u8;
+        } else if kind == LockRegistration::WindowHook {
+            break;
+        }
+    }
+    registered
+}
+
+#[cfg(any(windows, test))]
+fn missing_lock_events(registered: u8) -> Vec<&'static str> {
+    use LockRegistration::*;
+    let hook = WindowHook as u8;
+    [
+        ("sleep", hook),
+        ("screen_lock", hook | Session as u8),
+        ("user_switch", hook | Session as u8),
+        ("display_off", hook | DisplayOff as u8),
+        ("lid_close", hook | LidClose as u8),
+    ]
+    .into_iter()
+    .filter(|(_, required)| registered & required != *required)
+    .map(|(event, _)| event)
+    .collect()
+}
+
+#[cfg(any(windows, test))]
+fn unregister_lock_notifications(
+    registrations: &std::sync::atomic::AtomicU8,
+    mut unregister: impl FnMut(LockRegistration),
+) {
+    let registered = registrations.swap(0, std::sync::atomic::Ordering::SeqCst);
+    // The window hook stays until WM_NCDESTROY, after these notification registrations end.
+    for kind in [
+        LockRegistration::Session,
+        LockRegistration::DisplayOff,
+        LockRegistration::LidClose,
+    ] {
+        if registered & kind as u8 != 0 {
+            unregister(kind);
+        }
+    }
+}
+
+#[cfg(test)]
+mod lock_registration_tests {
+    use super::{
+        LockRegistration::*, missing_lock_events, register_lock_notifications,
+        unregister_lock_notifications,
+    };
+    use std::sync::atomic::{AtomicU8, Ordering};
+
+    #[test]
+    fn startup_reports_unavailable_until_registered() {
+        assert_eq!(
+            missing_lock_events(0),
+            [
+                "sleep",
+                "screen_lock",
+                "user_switch",
+                "display_off",
+                "lid_close"
+            ]
+        );
+    }
+
+    #[test]
+    fn failed_window_hook_stops_registration_and_reports_every_event() {
+        let mut called = Vec::new();
+        let registered = register_lock_notifications(|kind| {
+            called.push(kind);
+            false
+        });
+        assert_eq!(called, [WindowHook]);
+        assert_eq!(missing_lock_events(registered), missing_lock_events(0));
+    }
+
+    #[test]
+    fn partial_failures_report_only_the_affected_events() {
+        for (failed, missing) in [
+            (Session, vec!["screen_lock", "user_switch"]),
+            (DisplayOff, vec!["display_off"]),
+            (LidClose, vec!["lid_close"]),
+        ] {
+            let registered = register_lock_notifications(|kind| kind != failed);
+            assert_eq!(missing_lock_events(registered), missing);
+        }
+        assert!(missing_lock_events(register_lock_notifications(|_| true)).is_empty());
+    }
+
+    #[test]
+    fn successful_session_retry_clears_its_warning() {
+        let registrations = AtomicU8::new(register_lock_notifications(|kind| kind != Session));
+        assert_eq!(
+            missing_lock_events(registrations.load(Ordering::SeqCst)),
+            ["screen_lock", "user_switch"]
+        );
+        registrations.fetch_or(Session as u8, Ordering::SeqCst);
+        assert!(missing_lock_events(registrations.load(Ordering::SeqCst)).is_empty());
+    }
+
+    #[test]
+    fn cleanup_unregisters_only_successes_once_and_clears_health() {
+        let registrations = AtomicU8::new(register_lock_notifications(|kind| kind != DisplayOff));
+        let mut removed = Vec::new();
+        unregister_lock_notifications(&registrations, |kind| removed.push(kind));
+        unregister_lock_notifications(&registrations, |_| panic!("already unregistered"));
+        assert_eq!(removed, [Session, LidClose]);
+        assert_eq!(
+            missing_lock_events(registrations.load(Ordering::SeqCst)),
+            missing_lock_events(0)
+        );
+    }
+}
+
 #[cfg(windows)]
 mod win {
     use std::path::{Path, PathBuf};
     use std::sync::OnceLock;
-    use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU8, Ordering};
     use std::time::Duration;
 
     use session::OsEvent;
@@ -653,6 +792,11 @@ mod win {
     }
 
     static ON_EVENT: OnceLock<Box<dyn Fn(OsEvent) + Send + Sync>> = OnceLock::new();
+    static LOCK_REGISTRATIONS: AtomicU8 = AtomicU8::new(0);
+
+    pub fn lock_events_unavailable() -> Vec<&'static str> {
+        super::missing_lock_events(LOCK_REGISTRATIONS.load(Ordering::SeqCst))
+    }
     /// Stops the foreground-process watcher when the main window is destroyed.
     static FOREGROUND_RUNNING: AtomicBool = AtomicBool::new(false);
     /// Set while the main window is minimized, so restoring it re-applies Capture Hiding once.
@@ -668,17 +812,13 @@ mod win {
     const SESSION_RETRY_TIMER: u32 = 0x454E_4F54;
     const SESSION_RETRY_MS: u32 = 2000;
 
-    /// Call `on_event` for screen lock, display off, lid close, sleep, user switch, disconnect
-    /// and log off. A foreground-process watcher also catches app switches during a file picker.
-    /// Also applies Capture Hiding (see [`apply_capture_hiding`]) and makes the main window the
-    /// owner of our clipboard writes. Must be called on the main thread, which owns the window;
-    /// lasts until it closes. A registration that fails is logged to stderr; the session one is
-    /// retried every 2 s, since it fails while Terminal Services is still starting (an app started
-    /// at log on).
+    /// Observe OS lock events on the main window's thread, and report failed registrations in
+    /// lock_events_unavailable. Session registration is retried while Terminal Services starts.
     pub fn observe_lock_events(
         app: &AppHandle,
         on_event: impl Fn(OsEvent) + Clone + Send + Sync + 'static,
     ) {
+        use super::LockRegistration::*;
         let Some(hwnd) = app.get_webview_window("main").as_ref().and_then(hwnd) else {
             return;
         };
@@ -687,16 +827,70 @@ mod win {
         }
         CLIPBOARD_OWNER.store(hwnd.0 as isize, Ordering::SeqCst);
         apply_capture_hiding(hwnd);
-        // SAFETY: we're on the thread that owns `hwnd` (SetWindowSubclass refuses others);
-        // `window_proc` has the SUBCLASSPROC signature and uses no reference data.
-        if !unsafe { SetWindowSubclass(hwnd, Some(window_proc), SUBCLASS_ID, 0) }.as_bool() {
-            eprintln!(
-                "encrypted-note: can't subclass the main window; screen lock, sleep and log off \
-                 won't lock the app"
-            );
+        let registered = super::register_lock_notifications(|kind| match kind {
+            WindowHook => {
+                // SAFETY: we're on the thread owning hwnd; window_proc has SUBCLASSPROC's signature.
+                let installed =
+                    unsafe { SetWindowSubclass(hwnd, Some(window_proc), SUBCLASS_ID, 0) }.as_bool();
+                if installed {
+                    let _ = ON_EVENT.set(Box::new(on_event.clone()));
+                } else {
+                    eprintln!(
+                        "encrypted-note: can't subclass the main window; OS events won't lock the app"
+                    );
+                }
+                installed
+            }
+            Session => {
+                let registered = register_session_notification(hwnd);
+                if !registered {
+                    eprintln!(
+                        "encrypted-note: session notifications unavailable; retrying every {SESSION_RETRY_MS} ms"
+                    );
+                    // SAFETY: our timer on the window's own thread; it dies with the window.
+                    if unsafe {
+                        SetTimer(
+                            Some(hwnd),
+                            SESSION_RETRY_TIMER as usize,
+                            SESSION_RETRY_MS,
+                            None,
+                        )
+                    } == 0
+                    {
+                        eprintln!("encrypted-note: can't schedule the session-notification retry");
+                    }
+                }
+                registered
+            }
+            DisplayOff | LidClose => {
+                let (guid, slot, name) = if kind == DisplayOff {
+                    (&GUID_CONSOLE_DISPLAY_STATE, &POWER_NOTIFY, "display-off")
+                } else {
+                    (&GUID_LIDSWITCH_STATE_CHANGE, &LID_NOTIFY, "lid-close")
+                };
+                // SAFETY: hwnd receives these notifications; successful handles are unregistered in WM_DESTROY.
+                match unsafe {
+                    RegisterPowerSettingNotification(
+                        HANDLE(hwnd.0),
+                        guid,
+                        DEVICE_NOTIFY_WINDOW_HANDLE,
+                    )
+                } {
+                    Ok(handle) => {
+                        slot.store(handle.0, Ordering::SeqCst);
+                        true
+                    }
+                    Err(error) => {
+                        eprintln!("encrypted-note: {name} notifications unavailable ({error})");
+                        false
+                    }
+                }
+            }
+        });
+        LOCK_REGISTRATIONS.store(registered, Ordering::SeqCst);
+        if registered & WindowHook as u8 == 0 {
             return;
         }
-        let _ = ON_EVENT.set(Box::new(on_event));
         if !FOREGROUND_RUNNING.swap(true, Ordering::SeqCst) {
             let process = std::process::id();
             std::thread::spawn(move || {
@@ -712,51 +906,6 @@ mod win {
                     active = next;
                 }
             });
-        }
-        if !register_session_notification(hwnd) {
-            eprintln!(
-                "encrypted-note: session notifications unavailable (screen lock, user switch, \
-                 log off); retrying every {SESSION_RETRY_MS} ms"
-            );
-            // SAFETY: plain call on the window's own thread; the timer dies with the window.
-            if unsafe {
-                SetTimer(
-                    Some(hwnd),
-                    SESSION_RETRY_TIMER as usize,
-                    SESSION_RETRY_MS,
-                    None,
-                )
-            } == 0
-            {
-                eprintln!("encrypted-note: can't schedule the session-notification retry");
-            }
-        }
-        // SAFETY: only names `hwnd` as the recipient of the display-state messages; the handle is
-        // unregistered in WM_DESTROY.
-        match unsafe {
-            RegisterPowerSettingNotification(
-                HANDLE(hwnd.0),
-                &GUID_CONSOLE_DISPLAY_STATE,
-                DEVICE_NOTIFY_WINDOW_HANDLE,
-            )
-        } {
-            Ok(handle) => POWER_NOTIFY.store(handle.0, Ordering::SeqCst),
-            Err(error) => eprintln!(
-                "encrypted-note: display-off notifications unavailable ({error}); closing the lid \
-                 locks the app only if the machine sleeps"
-            ),
-        }
-        match unsafe {
-            RegisterPowerSettingNotification(
-                HANDLE(hwnd.0),
-                &GUID_LIDSWITCH_STATE_CHANGE,
-                DEVICE_NOTIFY_WINDOW_HANDLE,
-            )
-        } {
-            Ok(handle) => LID_NOTIFY.store(handle.0, Ordering::SeqCst),
-            Err(error) => eprintln!(
-                "encrypted-note: lid-close notifications unavailable ({error}); closing the lid locks the app only if the machine sleeps"
-            ),
         }
     }
 
@@ -851,6 +1000,8 @@ mod win {
             }
             (WM_TIMER, SESSION_RETRY_TIMER) => {
                 if register_session_notification(hwnd) {
+                    LOCK_REGISTRATIONS
+                        .fetch_or(super::LockRegistration::Session as u8, Ordering::SeqCst);
                     // SAFETY: our own timer on this window's thread.
                     let _ = unsafe { KillTimer(Some(hwnd), SESSION_RETRY_TIMER as usize) };
                 }
@@ -881,21 +1032,33 @@ mod win {
                 apply_capture_hiding(hwnd);
             }
             (WM_DESTROY, _) => {
-                let power = POWER_NOTIFY.swap(0, Ordering::SeqCst);
-                let lid = LID_NOTIFY.swap(0, Ordering::SeqCst);
                 FOREGROUND_RUNNING.store(false, Ordering::SeqCst);
-                // SAFETY: the window still exists during WM_DESTROY, as unregistering requires;
-                // `power` is the handle RegisterPowerSettingNotification returned, freed once.
-                unsafe {
-                    let _ = KillTimer(Some(hwnd), SESSION_RETRY_TIMER as usize);
-                    let _ = WTSUnRegisterSessionNotification(hwnd);
-                    if power != 0 {
-                        let _ = UnregisterPowerSettingNotification(HPOWERNOTIFY(power));
+                // SAFETY: our own timer on this still-live window's thread.
+                let _ = unsafe { KillTimer(Some(hwnd), SESSION_RETRY_TIMER as usize) };
+                super::unregister_lock_notifications(&LOCK_REGISTRATIONS, |kind| {
+                    use super::LockRegistration::*;
+                    // SAFETY: only successful registrations are undone, once, while hwnd exists.
+                    unsafe {
+                        match kind {
+                            Session => {
+                                let _ = WTSUnRegisterSessionNotification(hwnd);
+                            }
+                            DisplayOff | LidClose => {
+                                let slot = if kind == DisplayOff {
+                                    &POWER_NOTIFY
+                                } else {
+                                    &LID_NOTIFY
+                                };
+                                let handle = slot.swap(0, Ordering::SeqCst);
+                                if handle != 0 {
+                                    let _ =
+                                        UnregisterPowerSettingNotification(HPOWERNOTIFY(handle));
+                                }
+                            }
+                            WindowHook => {} // Removed in WM_NCDESTROY.
+                        }
                     }
-                    if lid != 0 {
-                        let _ = UnregisterPowerSettingNotification(HPOWERNOTIFY(lid));
-                    }
-                }
+                });
             }
             (WM_NCDESTROY, _) => {
                 // SAFETY: removes our own subclass on the window's thread, as documented.
