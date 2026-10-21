@@ -1,17 +1,14 @@
 import { useEffect, useRef, useState } from "react";
-import { activity, appStatus, dismissSharingGuard, lock, onStatusChanged, type AppStatus } from "./api";
+import { activity, appStatus, cancelNativeOperation, dismissSharingGuard, lock, onStatusChanged, type AppStatus } from "./api";
 import { cmdKey, ErrorLine, mac, TitlebarDrag, useAction } from "./components";
 import { Home, START, type Place } from "./Home";
 import { Icon } from "./icons";
 import type { Draft } from "./Note";
-import { KitLost, Locked, NewPasswordScreen, NoVault, RecoveryKit, type Kit } from "./Start";
+import { Locked, NativeRecoveryKit, NewPasswordScreen, NoVault } from "./Start";
 import { strings as s } from "./strings";
 
 export function App() {
   const [status, setStatus] = useState<AppStatus | null>(null);
-  // The Recovery Key to show once. It is held here only because the screen that received it
-  // (setup or Change Master Password) is replaced as soon as the phase moves on.
-  const [kit, setKit] = useState<Kit | null>(null);
   const [operationOutcome, setOperationOutcome] = useState<string | null>(null);
   // Where the owner was in Home (sidebar filter, open Note id, sort choice), so an Auto-lock or
   // the Shield brings them back to it. Memory only; never a title, the search text or a draft.
@@ -51,6 +48,8 @@ export function App() {
     const poll = () => {
       appStatus().then((next) => setStatus((current) => !current || next.revision > current.revision ? next : current), () => {});
     };
+    const cancelOnUnload = () => void cancelNativeOperation().catch(() => {});
+    window.addEventListener("beforeunload", cancelOnUnload);
     poll();
     const timer = setInterval(poll, 1000);
     // Activity for Auto-lock, at most once per 5 s. A key that is merely held down (auto-repeat)
@@ -67,17 +66,12 @@ export function App() {
     return () => {
       unlisten.then((u) => u());
       clearInterval(timer);
+      window.removeEventListener("beforeunload", cancelOnUnload);
       events.forEach((e) => window.removeEventListener(e, onActivity, true));
     };
   }, []);
 
   useEffect(() => {
-    if (phase !== "confirm_recovery_kit") {
-      // A Key Rotation is saved only when the new Recovery Kit is confirmed, which unlocks;
-      // leaving that step any other way (a lock, of any kind) threw it away. Say which.
-      if (kit?.rotation) setOperationOutcome(phase === "unlocked" ? s.keyRotationCompleted : s.keyRotationCancelled);
-      setKit(null);
-    }
     // The place survives an Auto-lock and an app-switch lock, but not a lock the owner asked for,
     // nor a Vault that is new, was opened with the Recovery Key or is getting new keys.
     if (phase === "locked" ? lockedOnPurpose.current : phase !== "unlocked") forgetPlace();
@@ -110,8 +104,6 @@ export function App() {
       {status && (
         <Screen
           status={status}
-          kit={kit}
-          setKit={setKit}
           place={place}
           onPlace={setPlace}
           restarts={restarts}
@@ -136,10 +128,8 @@ export function App() {
   );
 }
 
-function Screen({ status, kit, setKit, place, onPlace, restarts, readDraft, onDraft, onLock, onOperationOutcome, onOutcomeOutside }: {
+function Screen({ status, place, onPlace, restarts, readDraft, onDraft, onLock, onOperationOutcome, onOutcomeOutside }: {
   status: AppStatus;
-  kit: Kit | null;
-  setKit: (kit: Kit) => void;
   place: Place;
   onPlace: (place: Place) => void;
   /** Keys Home: when it changes, Home starts again from `place`. */
@@ -153,7 +143,7 @@ function Screen({ status, kit, setKit, place, onPlace, restarts, readDraft, onDr
   /** Reported from the Locked or first-run screen. */
   onOutcomeOutside: (message: string) => void;
 }) {
-  // The first-run screen can show a suggested Master Password in plain text.
+  // Native credential operations follow the same Sharing Guard as the app.
   const sensitive = status.phase !== "locked";
   const shield = status.sharing_guard.up && sensitive;
   // What was drawn before this, so the Shield can tell an unlock from an interruption.
@@ -163,9 +153,9 @@ function Screen({ status, kit, setKit, place, onPlace, restarts, readDraft, onDr
   if (shield) return <Shield apps={status.sharing_guard.apps} afterUnlock={seen.before === "locked"} />;
   switch (status.phase) {
     case "no_vault":
-      return <NoVault onKit={(key) => setKit({ key, rotation: false })} onOperationOutcome={onOutcomeOutside} />;
+      return <NoVault onOperationOutcome={onOutcomeOutside} />;
     case "confirm_recovery_kit":
-      return kit ? <RecoveryKit kit={kit} /> : <KitLost />;
+      return <NativeRecoveryKit />;
     case "locked":
       return <Locked status={status} onOperationOutcome={onOutcomeOutside} />;
     case "needs_new_password":
@@ -180,7 +170,6 @@ function Screen({ status, kit, setKit, place, onPlace, restarts, readDraft, onDr
           readDraft={readDraft}
           onDraft={onDraft}
           onLock={onLock}
-          onKit={(key) => setKit({ key, rotation: true })}
           onOperationOutcome={onOperationOutcome}
         />
       );

@@ -1,8 +1,8 @@
 // Small shared pieces for every screen. In-page only: no native popups while Unlocked (ADR-0002).
 
-import { useEffect, useId, useRef, useState, type ComponentProps, type FormEvent, type KeyboardEvent as KeyEvent, type ReactNode } from "react";
+import { useEffect, useId, useRef, useState, type ComponentProps, type KeyboardEvent as KeyEvent, type ReactNode } from "react";
 import appIcon from "../src-tauri/icons/128x128@2x.png";
-import { assessPassword, isApiError, listSafetyCopies, suggestPassphrase, type Assessment, type SafetyCopy } from "./api";
+import { cancelNativeOperation, isApiError, listSafetyCopies, type SafetyCopy } from "./api";
 import { strings as s } from "./strings";
 
 /** The Mac window draws its title bar over the page (tauri.conf.json), so the page provides the
@@ -225,133 +225,42 @@ export const Confirm = (props: { title: string; text: string; confirmLabel: stri
   </Modal>
 );
 
-/** Asks the Master Password again (Wallet Kinds, ADR-0004). The input is cleared as it is sent. */
-export function PasswordModal(props: {
+/** The credentials for this exact action are collected by native controls. */
+export function NativeActionModal(props: {
   title: string;
   text: string;
   submitLabel: string;
-  onSubmit: (password: string) => Promise<unknown>;
+  onSubmit: () => Promise<unknown>;
   onClose: () => void;
-  /** status.retry_in_ms: after wrong passwords the core refuses any attempt for a while. */
   retryInMs?: number | null | undefined;
 }) {
-  const [password, setPassword] = useState("");
-  const input = useRef<HTMLInputElement>(null);
   const { busy, error, run } = useAction();
+  const pending = useRef(false);
   const wait = props.retryInMs ? seconds(props.retryInMs) : 0;
-  async function submit(e: FormEvent) {
-    e.preventDefault();
-    // During the wait even the right password is refused unchecked: keep what was typed.
-    if (wait > 0) return;
-    const p = password;
-    setPassword("");
-    if (await run(() => props.onSubmit(p))) props.onClose();
-  }
-  // After a wrong password the button that was clicked is disabled again and typing would go
-  // nowhere: the password box takes the keyboard back.
-  useEffect(() => {
-    const at = document.activeElement;
-    if (!busy && (!at || at === document.body || (at as HTMLButtonElement).disabled)) input.current?.focus();
-  }, [busy]);
+  useEffect(() => () => {
+    if (pending.current) void cancelNativeOperation().catch(() => {});
+  }, []);
+  const close = () => {
+    if (pending.current) void cancelNativeOperation().catch(() => {});
+    props.onClose();
+  };
   return (
-    <Modal title={props.title} onClose={props.onClose}>
-      <form onSubmit={submit} className="stack">
-        <p>{props.text}</p>
-        <Field label={s.masterPassword}>
-          <SecretInput ref={input} value={password} onChange={(e) => setPassword(e.target.value)} autoFocus />
-        </Field>
-        <ErrorLine error={error} />
-        {wait > 0 && <p className="hint">{s.tryAgainIn(wait)}</p>}
-        <div className="actions">
-          <button type="button" onClick={props.onClose}>
-            {s.cancel}
-          </button>
-          <button className="primary" disabled={busy || !password || wait > 0}>
-            {busy ? s.checking : props.submitLabel}
-          </button>
-        </div>
-      </form>
-    </Modal>
-  );
-}
-
-/** Choose a Master Password: strength meter, typed twice. `children` go at the top of the same
- *  form (e.g. the current password when changing it). */
-export function NewPassword(props: {
-  submitLabel: string;
-  busyLabel: string;
-  onSubmit: (password: string) => Promise<unknown>;
-  /** Suggestion and show toggle: only on Create Master Password. */
-  allowShow?: boolean;
-  /** False while `children` still need input. */
-  ready?: boolean;
-  children?: ReactNode;
-}) {
-  const [password, setPassword] = useState("");
-  const [again, setAgain] = useState("");
-  const [show, setShow] = useState(false);
-  const [assessment, setAssessment] = useState<Assessment | null>(null);
-  const { busy, error, run } = useAction();
-
-  useEffect(() => {
-    setAssessment(null);
-    if (!password) return;
-    let live = true;
-    const timer = setTimeout(() => assessPassword(password).then((a) => live && setAssessment(a), () => {}), 300);
-    return () => {
-      live = false;
-      clearTimeout(timer);
-    };
-  }, [password]);
-
-  async function submit(e: FormEvent) {
-    e.preventDefault();
-    const p = password;
-    setPassword("");
-    setAgain("");
-    setShow(false);
-    await run(() => props.onSubmit(p));
-  }
-
-  // A shown Master Password is ordinary text. It must not reach the general clipboard, which
-  // nothing marks private or clears (Notes are copied by the Rust side for that reason).
-  const noCopy = (e: { preventDefault: () => void }) => e.preventDefault();
-  return (
-    <form onSubmit={submit} onCopy={noCopy} onCut={noCopy} className="stack">
-      {props.children}
-      <Field label={s.newPassword}>
-        <SecretInput show={show} value={password} onChange={(e) => setPassword(e.target.value)} autoFocus={!props.children} />
-      </Field>
-      {props.allowShow && (
-        <button
-          type="button"
-          className="link"
-          onClick={() => run(async () => { setPassword(await suggestPassphrase()); setShow(true); })}
-        >
-          {s.suggestPassword}
-        </button>
-      )}
-      {password && (
-        <div className="meter" data-score={assessment?.score ?? 0}>
-          <div />
-        </div>
-      )}
-      {assessment && <p className={assessment.acceptable ? "ok" : "warn"}>{assessment.acceptable ? s.strongEnough : s.notStrongEnough}</p>}
-      {assessment?.feedback.map((f) => <p key={f} className="hint">{f}</p>)}
-      <Field label={s.typeItAgain}>
-        <SecretInput show={show} value={again} onChange={(e) => setAgain(e.target.value)} />
-      </Field>
-      {again && again !== password && <p className="warn">{s.passwordsDontMatch}</p>}
-      {props.allowShow && (
-        <label className="check">
-          <input type="checkbox" checked={show} onChange={(e) => setShow(e.target.checked)} />
-          {s.showPassword}
-        </label>
-      )}
+    <Modal title={props.title} onClose={close}>
+      <p>{props.text}</p>
+      <p className="hint">{s.nativeCredentialHint}</p>
       <ErrorLine error={error} />
-      <button className="primary big" disabled={busy || props.ready === false || !assessment?.acceptable || password !== again}>
-        {busy ? props.busyLabel : props.submitLabel}
-      </button>
-    </form>
+      {wait > 0 && <p className="hint">{s.tryAgainIn(wait)}</p>}
+      <div className="actions">
+        <button onClick={close}>{s.cancel}</button>
+        <button className="primary" disabled={busy || wait > 0} onClick={() => {
+          if (pending.current) return;
+          pending.current = true;
+          run(props.onSubmit).then((ok) => {
+            pending.current = false;
+            if (ok) props.onClose();
+          });
+        }}>{busy ? s.checking : props.submitLabel}</button>
+      </div>
+    </Modal>
   );
 }

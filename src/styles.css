@@ -354,32 +354,6 @@ textarea:focus-visible {
   outline: 3px solid var(--focus);
 }
 
-.meter {
-  height: 5px;
-  border-radius: 3px;
-  background: var(--fill);
-}
-.meter div {
-  height: 100%;
-  width: 5%;
-  border-radius: 3px;
-  background: var(--warn);
-  transition: width 0.2s;
-}
-.meter[data-score="1"] div {
-  width: 25%;
-}
-.meter[data-score="2"] div {
-  width: 50%;
-}
-.meter[data-score="3"] div {
-  width: 75%;
-}
-.meter[data-score="4"] div {
-  width: 100%;
-  background: var(--ok);
-}
-
 .hint {
   color: var(--muted);
   font-size: 12px;
@@ -663,26 +637,6 @@ details.card ul {
 }
 .center > .link.centered {
   align-self: center;
-}
-
-.kit {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-.recovery-key {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  font-family: var(--mono);
-  font-size: 22px;
-  letter-spacing: 0.06em;
-}
-.recovery-key span {
-  padding: 4px 10px;
-  border-radius: 7px;
-  background: var(--group);
-  box-shadow: 0 0 0 1px var(--separator);
 }
 
 .shield-icon {

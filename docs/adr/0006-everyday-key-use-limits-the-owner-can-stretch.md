@@ -41,7 +41,7 @@ A request that loosens any rule requires reauthentication even if it tightens an
 
 The clipboard choice remains 30 or 60 seconds under its existing policy, and a **Wallet Kind** copy remains 30 seconds. Clipboard time is not an Auto-lock rule and is outside this decision. Sleep, screen lock and user switch still lock at once, and the activity-anywhere 60-minute cap stays fixed.
 
-Re-entering a password in the same WebView helps prevent an accidental or unattended settings change. It is not independent protection from compromised renderer code, which could observe or replay that entry. Moving password entry into Rust-owned native UI remains [issue #13](https://github.com/nniiovoo/encrypted-note/issues/13); this decision does not claim that trust boundary is already fixed.
+Loosening Auto-lock now collects the Master Password in Rust-owned native controls. Rust freezes the complete effective candidate and checks the current native operation/session before applying it; no password or reusable approval is returned to the WebView. This source implementation of [issue #13](https://github.com/nniiovoo/encrypted-note/issues/13) still needs physical native accessibility/capture acceptance. New Hidden Field input and ordinary Show remain in the renderer under ADR-0003's stated limits.
 
 ## Considered Options
 
@@ -52,4 +52,4 @@ Re-entering a password in the same WebView helps prevent an accidental or unatte
 - **Keep the previous value when a key is replaced**: rejected. It would keep a possibly exposed key alive inside the **Vault**; **Safety Copies** already cover a wrong replace.
 - **A box for pasting many keys at once, or importing a `.env` file**: rejected as an import feature. "Save and add another" covers entering several by hand.
 - **A global hot key or a menu-bar window**: rejected. It needs a new dependency, and a second window would sit outside Capture Hiding (ADR-0002).
-- **Quick Unlock** would remove the largest daily cost, typing the **Master Password** after every lock. It stays planned (ADR-0003 names the allowed designs) because it needs a signed build and hardware to test on.
+- **Quick Unlock** now has a local Mac Secure Enclave implementation in source, with physical acceptance pending. It needs supported enrolled biometric hardware, not an Apple Developer account/profile. Native Master Password verification remains required after app restart and every seven days, and Wallet actions still ask separately. [The custody decision](../quick-unlock-design.md) records its filesystem, copied-blob and memory limits. Windows Hello remains later.

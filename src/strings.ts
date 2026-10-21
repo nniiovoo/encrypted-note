@@ -40,6 +40,17 @@ export const strings = {
   checking: "Checking…",
   masterPassword: "Master Password",
   recoveryKey: "Recovery Key",
+  nativeCredentialHint: "Continue in the app’s native password controls.",
+  nativeSetupHint: "Choose your Master Password and record your Recovery Kit in the native controls.",
+  nativeKitHint: "Complete your Recovery Kit in the native controls. Nothing is saved until you confirm it.",
+  unlockWithPassword: "Unlock with Master Password",
+  unlockWithRecoveryKey: "Unlock with Recovery Key",
+  unlockWithTouchId: "Unlock with Touch ID",
+  quickUnlockTitle: "Touch ID",
+  quickUnlockText: "Use Touch ID on this Mac after opening this Vault with your Master Password. Your Master Password is required again after restarting the app and at least every seven days.",
+  quickUnlockWalletLimit: "Seed Phrases and Private Keys still require your Master Password for every protected action.",
+  enableTouchId: "Enable Touch ID",
+  disableTouchId: "Disable Touch ID",
   title: "Title",
 
   // Welcome
@@ -48,7 +59,7 @@ export const strings = {
     ["Stays on this computer", "Your Vault is one encrypted file on this computer. This app never connects to the internet."],
     [
       "Only you have the key",
-      "Your Master Password and your Recovery Kit are the only ways in. Nobody can reset them for you, so keep your Recovery Kit safe.",
+      "Your Master Password and Recovery Kit open your Vault. You can enable Touch ID on this Mac after entering your Master Password. Nobody can reset your credentials, so keep your Recovery Kit safe.",
     ],
     [
       "Hidden until you choose",
@@ -202,7 +213,7 @@ export const strings = {
   keepHolding: "Released before it appeared. Keep holding until it shows.",
   showWalletTitle: (field: string) => `Show ${field}`,
   holdHint:
-    "Type your Master Password, then press Enter to show it for 20 seconds, or press and hold the button to show it only while you hold (keyboard: Tab to the button, then hold Space).",
+    "Choose how to show this value. Enter your Master Password in the native controls, then use their Hold to show button (keyboard: hold Space) or their 20-second display. The value stays in those controls.",
   holdToShow: "Hold to show",
   showFor20: "Show for 20 seconds",
   showFor20AndCopy: "Show for 20 seconds and copy",
@@ -322,7 +333,7 @@ export const strings = {
   autoLockChangeIdle: (minutes: number) => `Lock after ${minutes} minutes without use.`,
   autoLockChangeSwitch: "Stop locking when you switch to another app.",
   autoLockChangeActivity: "Count activity anywhere on this computer to keep the app Unlocked.",
-  autoLockReauthLimit: "Loosening Auto-lock needs your Master Password again. This helps prevent accidental or unattended changes. A password typed in this window cannot protect against software that has compromised the window.",
+  autoLockReauthLimit: "Loosening Auto-lock needs your Master Password again in native controls. This helps prevent accidental or unattended changes; a compromised app or operating system remains a risk.",
   autoLockAfter: "Lock after this long without use",
   minutes: (m: number) => `${m} min`,
   lockOnSwitch: "Lock when I switch to another app",
