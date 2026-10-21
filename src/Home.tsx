@@ -146,7 +146,7 @@ export function Home({ status, place, onPlace, readDraft, onDraft, onLock, onKit
   const [apiKeys, setApiKeys] = useState<NoteSummary[]>([]);
   // The seconds a new copy has before the clipboard is cleared, as the status first gave them:
   // what is read out. `n` counts the copies, so that a second one is read out too.
-  const [copied, setCopied] = useState<{ seconds: number; n: number } | null>(null);
+  const [copied, setCopied] = useState<{ seconds: number; n: number; source: string | undefined } | null>(null);
   // Starts as the count now: a copy made before this screen appeared is not a new one.
   const copiesWas = useRef(status.copies);
   const changed = () => setVersion((v) => v + 1);
@@ -253,12 +253,14 @@ export function Home({ status, place, onPlace, readDraft, onDraft, onLock, onKit
   // Kind copy may have less of it than the copy before, and a clear being tried again has more.
   const clipboard = status.clipboard_clear_in_ms;
   const copies = status.copies;
+  const source = status.clipboard_source;
+  const copiedFrom = source ? s.copiedFrom(s.fields[source.kind][source.field] ?? source.field, source.title) : undefined;
   useEffect(() => {
     const isNew = copies !== copiesWas.current;
     copiesWas.current = copies;
     if (clipboard === null) setCopied(null);
-    else if (isNew) setCopied((c) => ({ seconds: seconds(clipboard), n: (c?.n ?? 0) + 1 }));
-  }, [clipboard, copies]);
+    else if (isNew) setCopied((c) => ({ seconds: seconds(clipboard), n: (c?.n ?? 0) + 1, source: copiedFrom }));
+  }, [clipboard, copies, copiedFrom]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -596,7 +598,7 @@ export function Home({ status, place, onPlace, readDraft, onDraft, onLock, onKit
           Wallet Kind); the ticking toast itself stays out of the screen reader's way. A space is
           added for every other copy: the same words twice in a row would not be read out again. */}
       <p className="sr-only" role="status">
-        {copied && s.copiedAnnounce(copied.seconds) + (copied.n % 2 ? "" : NO_BREAK_SPACE)}
+        {copied && s.copiedAnnounce(copied.seconds, copied.source) + (copied.n % 2 ? "" : NO_BREAK_SPACE)}
       </p>
       {/* The row the arrow keys are on, for a screen reader: the keyboard stays in the search box,
           and this line is the one thing that says which row is marked. (The box does not point
@@ -608,7 +610,7 @@ export function Home({ status, place, onPlace, readDraft, onDraft, onLock, onKit
       </p>
       {status.clipboard_clear_in_ms !== null && (
         <div className="toast" aria-hidden="true">
-          {s.copied(seconds(status.clipboard_clear_in_ms))}
+          {s.copied(seconds(status.clipboard_clear_in_ms), copiedFrom)}
         </div>
       )}
       {leaving && (

@@ -92,6 +92,13 @@ export interface SettingsInput {
   count_activity_anywhere?: boolean;
 }
 
+/** Visible metadata captured with a successful clipboard write. Never the copied value. */
+export interface ClipboardSource {
+  title: string;
+  kind: Kind;
+  field: string;
+}
+
 export interface AppStatus {
   /** Monotonic server sequence; late polls and events cannot roll the screen back. */
   revision: number;
@@ -110,6 +117,8 @@ export interface AppStatus {
    *  clear that is being tried again has more). A lock doesn't reset it. Rust always sends
    *  it. */
   copies?: number;
+  /** Gone on lock, Sharing Guard or clipboard clear. */
+  clipboard_source?: ClipboardSource | null;
   /** The currently shown Hidden Field, if any (screens hide anything else). */
   reveal: {
     note_id: string;
