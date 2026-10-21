@@ -684,6 +684,10 @@ The result is a 4420-byte file whose SHA-256 is
 
 ## 13. The Emergency Reader
 
+The Reader accepts ordinary files of at most 64 MiB, the same limit as the app's store.
+It checks the file before asking for a credential and bounds the actual read too, in case
+the file grows while being read. Directories and special files are refused as I/O errors.
+
 `enote-reader` is a small terminal program, separate from the app, that does all of the above
 for you:
 
