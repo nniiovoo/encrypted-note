@@ -4,6 +4,12 @@ A separate, optional local MCP tool for short text generation. This directory is
 
 The default transport is stdio: importing the modules or running tests starts no production listener. Optional HTTP starts only with the explicit HTTP entry point and binds 127.0.0.1:8789. There is no hosted account system, public listener, telemetry, browser launcher or automatic tunnel setup.
 
+## Use from your agent or code without a provider key
+
+The selected deployment is: agent/code → stdio bridge → local owner broker → OpenAI → text result. The bridge receives a separate limited local token; only the owner broker reads the new Agent Key and adds provider authentication. Your code calls `generate_text({ text })` through MCP. It needs no OpenAI API key or secret-bearing client configuration.
+
+[The keyless code example](docs/keyless-code.md) shows the client call and its prerequisites. This is one restricted operation, not a drop-in OpenAI SDK endpoint. The Mac identity boundary, provider controls and live connection remain unverified. The planned credential file format is plaintext with owner-only permissions, not encrypted Vault storage; no real credential file has been provisioned. OpenAI receives the key over HTTPS for authentication. Owner Vault and wallet keys are never part of this route.
+
 ## Fixed operation
 
 Exactly one MCP tool is exposed:
@@ -36,11 +42,11 @@ Tests inject a fictional provider in code and use obvious fake markers. They inc
 
 Dependencies are exact-pinned: @modelcontextprotocol/sdk 1.32.1 supplies official MCP server/client protocol and transports; zod 4.6.7 supplies the SDK input/output schemas. package-lock.json pins their transitive resolution. No OpenAI SDK or separate HTTP framework is added directly; production inference uses Node HTTPS. The [official OpenAI MCP guide](https://developers.openai.com/plugins/build/mcp-server) recommends the official MCP SDKs.
 
-## Owner-controlled runtime
+## Development runtime entry points
 
 A live runtime needs a NEW, separately restricted Agent Key. It must never use an owner key or a value stored in the owner Vault.
 
-The code requires OPENAI_AGENT_API_KEY in the trusted companion process environment. It does not read OPENAI_API_KEY, dotenv files, the owner Keychain, home-directory credential stores or app data. This variable must not enter the agent environment, tool arguments, MCP client configuration, chat, shell history, logs or repository. No actual credential is included or created here.
+The generic development entry points require OPENAI_AGENT_API_KEY in the trusted companion process environment. They do not read OPENAI_API_KEY, dotenv files, the owner Keychain, home-directory credential stores or app data. This variable must not enter the agent environment, tool arguments, MCP client configuration, chat, shell history, logs or repository. No actual credential is included or created here. The selected protected deployment instead uses the [prepared owner launcher and agent bridge](isolation/PLAN.md); callers must not launch the generic entry point with a provider key.
 
 After an independent owner-controlled runtime is configured, npm start runs stdio. A same-account unrestricted agent can inspect or tamper with a process, environment or code owned by that account. This implementation does not solve that OS boundary. Do not give it a real key until the owner has selected and verified a protected execution identity and readonly deployment outside agent control. The key is held in JavaScript process memory; secure erasure is not guaranteed.
 
