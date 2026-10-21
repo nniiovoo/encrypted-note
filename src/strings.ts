@@ -160,10 +160,11 @@ export const strings = {
   captureOn: (mac: boolean) => (mac ? "Screen-capture protection: on (best-effort on Mac)" : "Screen-capture protection: on"),
   captureOff: "Screen-capture protection is off. Avoid sharing your screen while this app is open.",
   captureUnknown: "Screen-capture protection: can't check on this computer",
-  copied: (s: number) => `Copied. The clipboard clears in ${s} s.`,
+  copiedFrom: (field: string, title: string) => `Copied ${field} of “${title}”.`,
+  copied: (s: number, source = "Copied.") => `${source} The clipboard clears in ${s} s.`,
   // Said once per copy, with the time that copy has: 30 or 60 seconds as chosen in Settings, and
   // always 30 for a Seed Phrase or Private Key.
-  copiedAnnounce: (s: number) => `Copied. The clipboard clears in ${plural(s, "second", "seconds")}.`,
+  copiedAnnounce: (s: number, source = "Copied.") => `${source} The clipboard clears in ${plural(s, "second", "seconds")}.`,
 
   // Note detail
   created: (date: string) => `Created ${date}`,

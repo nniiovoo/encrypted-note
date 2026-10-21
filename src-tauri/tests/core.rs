@@ -1661,6 +1661,7 @@ fn status_has_the_shape_api_ts_expects() {
         "lock_in_ms",
         "clipboard_clear_in_ms",
         "copies",
+        "clipboard_source",
         "reveal",
         "failed_attempts",
         "retry_in_ms",
@@ -1693,6 +1694,7 @@ fn status_has_the_shape_api_ts_expects() {
     assert_eq!(status["sharing_guard"], json!({"up": false, "apps": []}));
     assert_eq!(status["revision"], 0);
     assert_eq!(status["copies"], 0);
+    assert_eq!(status["clipboard_source"], Value::Null);
     assert_eq!(status["purge_trash_failed"], false);
     assert_eq!(status["settings_unreadable"], false);
 }
@@ -4285,4 +4287,94 @@ fn a_private_key_is_checked_under_whatever_chain_name_the_note_has() {
         code(app.core.check_private_key("Fake Chain", not_a_key)),
         "locked"
     );
+}
+
+#[test]
+fn copy_feedback_names_only_the_source_metadata_of_each_successful_write() {
+    let mut app = App::new();
+    unlocked(&mut app);
+    let n = sample_notes(&mut app);
+    let source = |app: &App| serde_json::to_value(app.core.app_status().clipboard_source).unwrap();
+    let expected = |title: &str, kind: &str, field: &str| json!({"title": title, "kind": kind, "field": field});
+
+    app.core.copy_field(&n.login, "password", None).unwrap();
+    assert_eq!(source(&app), expected("Fake login", "login", "password"));
+    app.core.copy_visible_field(&n.pk, "address").unwrap();
+    assert_eq!(
+        source(&app),
+        expected("Fake private key", "private_key", "address")
+    );
+    app.core.copy_field_line(&n.text, "body", 0).unwrap();
+    assert_eq!(source(&app), expected("Fake text", "text", "body"));
+    app.core.copy_field_env(&n.api).unwrap();
+    assert_eq!(source(&app), expected("Fake API key", "api_key", "key"));
+    let status = serde_json::to_string(&app.core.app_status()).unwrap();
+    for value in [
+        "fake-api-key-0000",
+        "FAKE_DEPLOY_KEY",
+        "fake-login-pass",
+        BODY,
+    ] {
+        assert!(!status.contains(value));
+    }
+    app.core
+        .copy_field(&n.seed, "passphrase", Some(pw(PASSWORD)))
+        .unwrap();
+    assert_eq!(
+        source(&app),
+        expected("Fake seed", "seed_phrase", "passphrase")
+    );
+    drop(
+        app.core
+            .show_and_copy_wallet_field(&n.pk, "key", pw(PASSWORD))
+            .unwrap(),
+    );
+    assert_eq!(
+        source(&app),
+        expected("Fake private key", "private_key", "key")
+    );
+
+    // Failed writes and validation failures cannot announce a new copy or relabel the last one.
+    let before = (app.core.app_status().copies, source(&app));
+    app.board.lock().unwrap().write_failures = 1;
+    assert_eq!(code(app.core.copy_field(&n.login, "password", None)), "io");
+    assert_eq!(code(app.core.copy_field_env(&n.login)), "invalid_input");
+    assert_eq!((app.core.app_status().copies, source(&app)), before);
+
+    // Back-to-back copies describe the last completed write, never the Note currently open.
+    app.core.copy_field(&n.login, "password", None).unwrap();
+    app.core.copy_field_env(&n.api).unwrap();
+    app.core.get_note(&n.login).unwrap();
+    assert_eq!(source(&app), expected("Fake API key", "api_key", "key"));
+}
+
+#[test]
+fn copy_feedback_forgets_titles_on_clear_sharing_guard_and_every_lock() {
+    let mut app = App::new();
+    unlocked(&mut app);
+    let n = sample_notes(&mut app);
+    app.core.copy_field(&n.login, "password", None).unwrap();
+    app.advance(30_000);
+    app.core.tick();
+    assert_eq!(app.core.app_status().clipboard_source, None);
+
+    app.core.copy_field(&n.login, "password", None).unwrap();
+    app.core.guard_update(&zoom());
+    assert_eq!(app.core.app_status().clipboard_source, None);
+    app.core.dismiss_sharing_guard();
+    assert_eq!(app.core.app_status().clipboard_source, None);
+    app.core.guard_update(&[]);
+
+    set_lock_on_app_switch(&mut app);
+    app.core.copy_field(&n.login, "password", None).unwrap();
+    app.core.os_event(OsEvent::FocusLost);
+    assert_eq!(app.phase(), "locked");
+    // App-switch lock preserves the paste timer, but never its source title.
+    assert!(app.core.app_status().clipboard_clear_in_ms.is_some());
+    assert_eq!(app.core.app_status().clipboard_source, None);
+    app.core.unlock(password(PASSWORD)).unwrap();
+    assert_eq!(app.core.app_status().clipboard_source, None);
+    app.core.copy_field(&n.login, "password", None).unwrap();
+    app.core.lock();
+    assert_eq!(app.core.app_status().clipboard_source, None);
 }

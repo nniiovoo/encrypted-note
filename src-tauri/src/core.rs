@@ -131,6 +131,8 @@ pub struct AppStatus {
     /// was copied. The screens tell a new copy by it; the time left can't say (a Wallet Kind
     /// copy may have less than the copy before it, and a clear that is tried again has more).
     pub copies: u64,
+    /// Visible metadata of the last successful copy; never its value or an environment assignment.
+    pub clipboard_source: Option<ClipboardSource>,
     pub reveal: Option<RevealView>,
     pub failed_attempts: u32,
     pub retry_in_ms: Option<u64>,
@@ -141,6 +143,13 @@ pub struct AppStatus {
     /// The settings file was there but unreadable, so the strictest lock rules are in force.
     pub settings_unreadable: bool,
     pub settings: SettingsView,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct ClipboardSource {
+    pub title: String,
+    pub kind: Kind,
+    pub field: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -404,6 +413,7 @@ pub struct AppCore {
     clipboard: Box<dyn Clipboard>,
     /// Copies written to the clipboard since the app started (`AppStatus::copies`).
     copies: u64,
+    clipboard_source: Option<ClipboardSource>,
     session: Session,
     guard: guard::GuardState,
     detected: Vec<&'static str>,
@@ -455,6 +465,7 @@ impl AppCore {
             clock: config.clock,
             clipboard: config.clipboard,
             copies: 0,
+            clipboard_source: None,
             session,
             guard: guard::GuardState::new(),
             detected: Vec::new(),
@@ -501,6 +512,7 @@ impl AppCore {
                 .clipboard_clear_at()
                 .map(|at| at.saturating_sub(now)),
             copies: self.copies,
+            clipboard_source: self.clipboard_source.clone(),
             reveal: self.session.current_reveal().map(|r| RevealView {
                 note_id: r.note_id.clone(),
                 field: r.field.clone(),
@@ -600,6 +612,9 @@ impl AppCore {
     pub fn guard_update(&mut self, apps: &[guard::RunningApp]) {
         self.detected = guard::detect(GUARD_PLATFORM, apps);
         let up = self.guard.update(&self.detected);
+        if up {
+            self.clipboard_source = None;
+        }
         let effects = self.session.set_sharing_guard(up);
         self.apply(effects);
     }
@@ -984,7 +999,7 @@ impl AppCore {
         self.session
             .start_reveal(id, field, RevealMode::Accessible, self.clock.now_ms())
             .map_err(reveal_refused)?;
-        if let Err(e) = self.copy_out(&value, true) {
+        if let Err(e) = self.copy_out(id, field, &value, true) {
             // Nothing was copied, and the value is not handed over either: nothing is shown.
             let effects = self.session.end_reveal();
             self.apply(effects);
@@ -1033,7 +1048,7 @@ impl AppCore {
         self.session
             .admit_hidden_field(id, field, self.clock.now_ms())
             .map_err(reveal_refused)?;
-        self.copy_out(&value, wallet_kind)
+        self.copy_out(id, field, &value, wallet_kind)
     }
 
     /// Writes one visible field (a username, website, service, public address...) to the
@@ -1055,7 +1070,7 @@ impl AppCore {
             .get(field)
             .filter(|value| !value.is_empty())
             .ok_or_else(|| notes_error(NotesError::EmptyField))?;
-        self.copy_out(value, false)
+        self.copy_out(id, field, value, false)
     }
 
     /// Writes one line of a Hidden Field to the clipboard, never returning it: line `line`,
@@ -1081,7 +1096,7 @@ impl AppCore {
         self.session
             .admit_hidden_field(id, field, self.clock.now_ms())
             .map_err(reveal_refused)?;
-        self.copy_out(chosen, false)
+        self.copy_out(id, field, chosen, false)
     }
 
     /// Writes `NAME=value` to the clipboard for an API Key that has a variable name and a key:
@@ -1108,7 +1123,7 @@ impl AppCore {
         self.session
             .admit_hidden_field(id, notes::field::KEY, self.clock.now_ms())
             .map_err(reveal_refused)?;
-        self.copy_out(&line, false)
+        self.copy_out(id, notes::field::KEY, &line, false)
     }
 
     // ---------- checks ----------
@@ -1392,6 +1407,8 @@ impl AppCore {
                     if !self.clipboard.clear_if(count) {
                         self.session
                             .retry_clipboard_clear(count, self.clock.now_ms());
+                    } else {
+                        self.clipboard_source = None;
                     }
                 }
             }
@@ -1400,6 +1417,7 @@ impl AppCore {
 
     /// Drop every decrypted Vault (keys and document) and forget a Sharing Guard dismissal.
     fn forget_open_vaults(&mut self) {
+        self.clipboard_source = None;
         self.phase = match std::mem::replace(&mut self.phase, Phase::Locked) {
             Phase::NoVault
             | Phase::ConfirmRecoveryKit {
@@ -1415,6 +1433,7 @@ impl AppCore {
     /// Every phase change drops a pending Backup or Safety Copy: its preview (and its "older"
     /// warning) described what it would have replaced before the change.
     fn set_phase(&mut self, phase: Phase) {
+        self.clipboard_source = None;
         self.phase = phase;
         self.inspected = None;
         self.backup_to_open = None;
@@ -1458,8 +1477,21 @@ impl AppCore {
     /// Put `text` on the clipboard privately and start the timer that clears it: the time the
     /// owner chose, or always 30 s for a Wallet Kind value (`wallet_value`). Every copy that
     /// reached the clipboard is counted for the status; a refused one is not.
-    fn copy_out(&mut self, text: &str, wallet_value: bool) -> Result<(), ApiError> {
+    fn copy_out(
+        &mut self,
+        id: &str,
+        field: &str,
+        text: &str,
+        wallet_value: bool,
+    ) -> Result<(), ApiError> {
+        let view = self.open()?.doc.get(id).ok_or_else(note_not_found)?;
+        let source = ClipboardSource {
+            title: view.title,
+            kind: view.kind,
+            field: field.to_owned(),
+        };
         let change_count = self.clipboard.write(text)?;
+        self.clipboard_source = Some(source);
         self.copies = self.copies.wrapping_add(1);
         let now = self.clock.now_ms();
         if wallet_value {
