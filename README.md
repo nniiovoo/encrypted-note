@@ -4,7 +4,7 @@
 
 # encrypted-note
 
-An offline, encrypted vault for seed phrases, private keys, passwords and API keys.
+An offline, encrypted vault for seed phrases, private keys, passwords and API keys, designed to be easy and safe for AI agents to use.
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-2f6f5e)](LICENSE)
 ![Platforms: macOS and Windows](https://img.shields.io/badge/platform-macOS%20%7C%20Windows-2f6f5e)
@@ -38,6 +38,17 @@ npx tauri build     # build the app
 ```
 
 Run `./scripts/check.sh` (tests, clippy, cargo-deny, TypeScript) before a pull request. Debug builds read `ENOTE_DEV_DATA_DIR=<folder>` to keep your real Vault untouched, and `ENOTE_DEV_ALLOW_CAPTURE=1` to allow screenshots; release builds ignore both.
+
+## Agent safety
+
+AI coding agents are instructed to follow [AGENTS.md](AGENTS.md):
+
+- Use obviously fake secrets in code, tests, docs, local issues and commits. Never include real passwords, keys or seed phrases.
+- Keep the app offline: no HTTP clients, updaters, telemetry, crash reporters or analytics.
+- Keep keys and decrypted Notes in the Rust core. The WebView receives only one Hidden Field at a time.
+- Add dependencies only when clearly needed, pin exact versions, and explain why in the PR or local issue.
+
+Agents should test with fictional data in a separate development Vault using `ENOTE_DEV_DATA_DIR` and run the checks described above before a pull request.
 
 ## Docs
 
