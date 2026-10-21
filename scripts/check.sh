@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 # One command that must pass before any slice is done:
-#   Rust tests + clippy (deny warnings) + cargo-deny (advisories, network ban, licenses) + TypeScript type-check.
+#   Source hygiene + Rust tests + clippy (deny warnings) + cargo-deny + TypeScript type-check.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+
+echo "==> networking source hygiene"
+node scripts/check-network-source.mjs
 
 echo "==> cargo test"
 cargo test --workspace --quiet

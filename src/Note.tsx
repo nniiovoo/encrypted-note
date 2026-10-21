@@ -467,11 +467,11 @@ export function Detail(
         </div>
       )}
       {modal?.step === "show" && (
-        <WalletShow id={id} field={modal.field} name={label(note.kind, modal.field)} status={status} onClose={() => setModal(null)} />
+        <WalletShow id={id} title={note.title} field={modal.field} name={label(note.kind, modal.field)} status={status} onClose={() => setModal(null)} />
       )}
       {modal?.step === "confirm-copy" && (
         <Confirm
-          title={s.copySeedTitle}
+          title={s.noteAction(s.copyTitle(label(note.kind, modal.field)), note.title)}
           text={s.copySeedText}
           confirmLabel={s.copyAnyway}
           onConfirm={() => setModal({ ...modal, step: "copy" })}
@@ -480,7 +480,7 @@ export function Detail(
       )}
       {modal?.step === "copy" && (
         <PasswordModal
-          title={s.copyTitle(label(note.kind, modal.field))}
+          title={s.noteAction(s.copyTitle(label(note.kind, modal.field)), note.title)}
           text={s.copyText(WALLET_COPY_SECONDS)}
           submitLabel={s.copy}
           onSubmit={(password) => copyField(id, modal.field, password)}
@@ -490,7 +490,7 @@ export function Detail(
       )}
       {modal?.step === "trash" && live && (
         <PasswordModal
-          title={s.moveToTrash}
+          title={s.noteAction(s.moveToTrash, note.title)}
           text={s.walletTrashText}
           submitLabel={s.moveToTrash}
           onSubmit={async (password) => {
@@ -506,7 +506,7 @@ export function Detail(
 }
 
 /** Wallet Kinds (ADR-0004): Master Password each time, visible only while held, or for 20 s. */
-function WalletShow(props: { id: string; field: string; name: string; status: AppStatus; onClose: () => void }) {
+function WalletShow(props: { id: string; title: string; field: string; name: string; status: AppStatus; onClose: () => void }) {
   const { id, field } = props;
   const [password, setPassword] = useState("");
   const { shown, keep, hide, version } = useShown(id, props.status);
@@ -604,7 +604,7 @@ function WalletShow(props: { id: string; field: string; name: string; status: Ap
 
   return (
     <>
-      <Modal title={s.showWalletTitle(props.name)} onClose={props.onClose}>
+      <Modal title={s.noteAction(s.showWalletTitle(props.name), props.title)} onClose={props.onClose}>
         {isShown ? <Value field={field} value={shown.value} /> : <p className="hint">{s.holdHint}</p>}
         {reveal && reveal.expires_in_ms != null && (
           <div className="actions start">
@@ -696,7 +696,7 @@ function WalletShow(props: { id: string; field: string; name: string; status: Ap
       </Modal>
       {confirmCopy && (
         <Confirm
-          title={s.copySeedTitle}
+          title={s.noteAction(s.fieldAction(s.showFor20AndCopy, props.name), props.title)}
           text={s.copySeedText}
           confirmLabel={s.copyAnyway}
           onConfirm={() => {
@@ -1163,7 +1163,7 @@ export function Editor(props: {
       )}
       {step === "password" && (
         <PasswordModal
-          title={s.savePasswordTitle}
+          title={s.noteAction(note ? s.edit : s.add, note?.title ?? title.trim())}
           text={s.savePasswordText}
           submitLabel={s.save}
           onSubmit={save}
