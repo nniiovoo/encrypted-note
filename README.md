@@ -1,20 +1,89 @@
 # Restricted OpenAI text companion
 
-A separate optional local MCP tool for short text generation, outside encrypted-note. It does not read that app's Vault, Notes, metadata, wallet/recovery material, backups or IPC.
+A separate, optional local MCP tool for short text generation. This directory is outside encrypted-note. It neither imports that app nor opens its Vault, Notes, metadata, backups, recovery material, wallet keys or IPC. It is a runnable development implementation with fictional-provider tests; no live key, account configuration, deployment or ChatGPT connection has been performed.
 
-The only tool is generate_text({text}). It accepts at most 4096 UTF-8 input bytes and sends one trusted request to https://api.openai.com/v1/responses using fixed gpt-6-luna, reasoning none, service tier default and at most 512 output tokens. Tools, response storage, streaming and background mode are disabled. Input cannot override destinations, models, files, history or policy.
+The default transport is stdio: importing the modules or running tests starts no production listener. Optional HTTP starts only with the explicit HTTP entry point and binds 127.0.0.1:8789. There is no hosted account system, public listener, telemetry, browser launcher or automatic tunnel setup.
 
-The default transport is stdio. Optional Streamable HTTP starts only explicitly, binds loopback and checks a distinct bearer token, Host, Origin, path and message size. Both transports propagate cancellation and disconnects to admitted provider work. No public listener, account system, tunnel or automatic startup is configured.
+## Fixed operation
+
+Exactly one MCP tool is exposed:
+
+- generate_text accepts exactly { "text": "..." }; no other properties.
+- Nonempty, well-formed text: at most 4096 UTF-8 bytes.
+- One fixed POST destination: https://api.openai.com/v1/responses.
+- One fixed model: gpt-6-luna; reasoning none; service tier default.
+- At most 512 output tokens, including any reasoning; response text is additionally bounded to 64 KiB.
+- store, stream and background are false. tools is empty and tool_choice is none.
+- No files, images, history, previous responses, prompt templates, URL, headers, model choice, plugins or tool definitions can be supplied.
+- No automatic retry or redirect following. A timeout or cancellation may still incur a provider charge.
+- One in-flight request, six admitted requests per rolling minute, 60 per rolling hour, and 100 per process. Failed admitted requests consume the local allowance.
+- Provider response bodies are bounded to 256 KiB. Only completed assistant text from the fixed model returns to the caller; provider errors, headers and response identifiers do not.
+- Local counters reset when this process restarts. They supplement independent provider caps; they are not durable provider spending controls.
+- Returned text is untrusted. The companion never executes it.
+
+The versioned nonsecret contract is policy.json. Runtime input cannot change it. The trusted deployment must protect code and policy against agent modification.
+
+GPT-6 Luna is currently documented as an efficient focused-task model, priced at $0.10/M short-context input tokens and $0.50/M output tokens under Standard pricing. Cache-write pricing may also apply. This fixes a model ID, not a cryptographic model-weights snapshot. Sources checked 2026-10-21: [model](https://developers.openai.com/api/docs/models/gpt-6-luna), [pricing](https://developers.openai.com/api/docs/pricing).
+
+## Develop and verify without credentials
 
 Use Node 22 or later:
 
     npm ci --ignore-scripts
     npm test
 
-Tests use fictional providers, including official MCP clients over an actual stdio subprocess and optional loopback HTTP. They never call OpenAI.
+Tests inject a fictional provider in code and use obvious fake markers. They include the official MCP client over an actual stdio subprocess and optional loopback Streamable HTTP. No test calls the OpenAI API. There is no runtime provider-URL override or fake-provider switch in the production entry points.
 
-Exact-pinned dependencies: @modelcontextprotocol/sdk 1.32.1 provides official MCP protocol/transports; zod 4.6.7 provides input/output schemas. package-lock.json pins their transitive resolution. No OpenAI SDK or direct web framework dependency is added.
+Dependencies are exact-pinned: @modelcontextprotocol/sdk 1.32.1 supplies official MCP server/client protocol and transports; zod 4.6.7 supplies the SDK input/output schemas. package-lock.json pins their transitive resolution. No OpenAI SDK or separate HTTP framework is added directly; production inference uses Node HTTPS. The [official OpenAI MCP guide](https://developers.openai.com/plugins/build/mcp-server) recommends the official MCP SDKs.
 
-These entry points are development interfaces. A same-account unrestricted agent can inspect or alter an owner process, environment or code. No protected runtime or real-key deployment is established here. No owner key may be reused. Provider scope, one-hour expiry, $1 enforced monthly hard cap, model/tool restrictions, revocation and actual agent isolation must be independently configured and verified before a live trial.
+## Owner-controlled runtime
 
-Local stdio does not itself establish a ChatGPT cloud connection. No key, account, live generation, provider limit or cloud connection was exercised.
+A live runtime needs a NEW, separately restricted Agent Key. It must never use an owner key or a value stored in the owner Vault.
+
+The code requires OPENAI_AGENT_API_KEY in the trusted companion process environment. It does not read OPENAI_API_KEY, dotenv files, the owner Keychain, home-directory credential stores or app data. This variable must not enter the agent environment, tool arguments, MCP client configuration, chat, shell history, logs or repository. No actual credential is included or created here.
+
+After an independent owner-controlled runtime is configured, npm start runs stdio. A same-account unrestricted agent can inspect or tamper with a process, environment or code owned by that account. This implementation does not solve that OS boundary. Do not give it a real key until the owner has selected and verified a protected execution identity and readonly deployment outside agent control. The key is held in JavaScript process memory; secure erasure is not guaranteed.
+
+Optional npm run start:http additionally requires a distinct AGENT_COMPANION_BEARER_TOKEN of 32–256 base64url characters. The bearer token authorizes only this bounded tool; it is not the provider key. HTTP checks authorization on every request, accepts only the /mcp path, rejects query strings and batching, bounds bodies to 64 KiB, and rejects unexpected Host and Origin values. GET and DELETE are unsupported. Only loopback is bound. It adds no user registration or login system.
+
+No startup command containing a secret or secret-bearing MCP configuration is supplied. Secret provisioning and runtime control remain an independent owner operation.
+
+## Required provider controls before a live pilot
+
+None of these controls has been applied or verified by this project. The owner selected a one-hour expiry and a $1 monthly project hard spend limit for the first trial; those settings remain unapplied and unverified.
+
+| Control | Required owner verification |
+| --- | --- |
+| Separate project and credential | New dedicated Agent Key; no owner credential or owner Vault data. |
+| Permission | Only api.responses.write on the key and its effective least-privilege project role. Avoid broader inherited owner/member grants. All other key permissions denied; an empty scopes array means ALL permissions, not no permissions. |
+| Model | Provider project allowlist contains only gpt-6-luna. |
+| Tools | File search, web search, image generation, MCP and Code Interpreter disabled in provider policy. Disabling a project tool may require changing an organization policy from allow-all to selected-project access. |
+| Remaining tool gap | These five provider switches do not document disabling hosted shell. The companion forbids all tool requests, but a stolen raw key could retain broader Responses capability. Protected custody remains necessary. |
+| Expiry | Fixed provider-enforced expiration; no agent authority to extend it. |
+| Spending | An enforced project HARD limit, not a spend alert. Enforcement can slightly overshoot during propagation. |
+| Usage | Owner-approved model/project rate limits; verify provider-side rejection. Local rate controls alone do not prove provider enforcement. |
+| Administration | Agent cannot create credentials, change roles, raise caps, extend expiry or edit protected companion code. |
+| Revocation | Owner-controlled provider revoke/delete operation, followed by an observed denied request. Service-account-owned keys require the applicable service-account revocation procedure; deleting an individual project key via the generic API rejects service-account-owned keys. |
+| Data destination | Supplied text goes to OpenAI; generated text returns to the calling agent and may enter that agent's cloud conversation. No owner-Vault content or metadata is permitted. |
+| Retention | store:false does not establish Zero Data Retention. Abuse monitoring and prompt-cache retention may still apply. |
+| Negative controls | Denied models, endpoints, tools, admin permissions; expiry and revocation; cap rejection; output/error/log non-disclosure; isolated custody and code ownership. |
+
+Sources: [least-privilege service accounts](https://developers.openai.com/api/docs/guides/terraform/service-accounts), [model/tool controls](https://developers.openai.com/api/docs/guides/terraform/project-controls), [key expiry](https://developers.openai.com/api/docs/guides/production-best-practices#api-keys), [hard spend limits](https://developers.openai.com/api/docs/guides/spend-limits), [data handling](https://developers.openai.com/api/docs/guides/your-data#v1responses). These are documentation findings, not evidence of this account's actual permissions.
+
+## Optional ChatGPT connection
+
+Local stdio is the primary integration and needs no public server. The official SDK client tests prove protocol behavior, not a live ChatGPT connection.
+
+ChatGPT can optionally reach a private MCP server through owner-selected Secure MCP Tunnel. That path requires a separately approved tunnel identity, narrow runtime tunnel permissions, the correct Platform organization/workspace associations, and a trusted local tunnel-client. It can launch this stdio server without a public listener. Do not share the inference key with the tunnel's control-plane identity or grant tunnel administration to the inference key.
+
+Tunnel creation, client installation, sign-in, credential provisioning, workspace changes, authentication configuration and cloud connectivity have not been performed. They remain optional owner decisions. The optional HTTP bearer transport does not implement OAuth or claim to complete ChatGPT authentication by itself.
+
+[Official private-tunnel requirements](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels), [ChatGPT connection and end-to-end test](https://developers.openai.com/plugins/deploy/connect-chatgpt).
+
+## Current limits
+
+This implementation is ready for code review and fictional-data development. It is not approved for real keys or production use. Provider controls, OS isolation, credential custody, successful live generation, ChatGPT authentication and end-to-end connection remain unverified. Neither source review nor a successful fake-provider test can guarantee that a key cannot be stolen or misused.
+
+## Prepared isolated Mac setup
+
+[The reviewed setup package](isolation/PLAN.md) prepares a Standard-account boundary, an owner-controlled launcher that reads only the secure helper’s confirmed 0600 key file, and an agent-side local stdio bridge. No account, ACL, provider setting, key or runtime was changed. The generic environment-based entry points above remain development interfaces; the selected protected deployment uses this separate setup and keeps the provider key out of environment/configuration.
