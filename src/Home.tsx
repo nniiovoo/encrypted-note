@@ -32,6 +32,10 @@ const BY_KIND = KINDS.map((kind): Nav => ({ type: "kind", kind }));
 const API_KEYS: Filter = { type: "kind", kind: "api_key" };
 // The banner speaks up once an API Key's expiry date is this near, or past.
 const EXPIRY_BANNER_DAYS = 14;
+const withinExpiryWarning = (note: NoteSummary) => {
+  const days = note.expires ? daysUntil(note.expires) : null;
+  return days !== null && days <= EXPIRY_BANNER_DAYS;
+};
 // Written by its number, so that it can be seen in this file.
 const NO_BREAK_SPACE = String.fromCharCode(0xa0);
 // By value: the place App hands back is not one of the objects above.
@@ -105,11 +109,12 @@ export function Home({ status, place, onPlace, readDraft, onDraft, onLock, onKit
   const navNow = useRef(nav);
   navNow.current = nav;
   const [query, setQuery] = useState("");
+  const [expiryOnly, setExpiryOnly] = useState(false);
   const [sort, setSort] = useState(place.sort);
   // Undefined until this nav's list arrives, so nothing (not "empty") shows while loading. The
   // query it answers is kept with it, so Enter in the search box never opens an older search's row.
   const [list, setList] = useState<{ nav: Nav; query: string; notes: NoteSummary[] }>();
-  const notes = list && sameNav(list.nav, nav) ? list.notes : undefined;
+  const notes = list && sameNav(list.nav, nav) ? (expiryOnly ? list.notes.filter(withinExpiryWarning) : list.notes) : undefined;
   const byService = sort === "az" && nav.type === "kind" && nav.kind === "api_key";
   const shown = useMemo(() => (notes ? ordered(notes, sort, byService) : []), [notes, sort, byService]);
   // The one place the draft is read: from here on it lives in the pane it opens.
@@ -178,19 +183,19 @@ export function Home({ status, place, onPlace, readDraft, onDraft, onLock, onKit
             : undefined;
     return !!note && (n.type === "all" || (n.type === "favorites" ? note.favorite : n.type === "kind" && n.kind === note.kind));
   };
-  // `all`: every Note under `n` is wanted (the expiry banner's button), so the search goes too.
-  const go = (n: Nav, all = false) => {
-    if (sameNav(n, nav)) return;
+  const go = (n: Nav, expiring = false) => {
+    if (sameNav(n, nav) && expiryOnly === expiring) return;
     setCopyError(null);
     // Among All, Favorites and the Kinds the search stays, and so does a Note that still belongs.
     const keepSearch = listed(n) && listed(nav);
-    if (keepSearch && (!pane || paneFits(n))) {
-      if (all) setQuery("");
+    if (keepSearch && !expiring && (!pane || paneFits(n))) {
+      setExpiryOnly(false);
       return setNav(n);
     }
     guard(() => {
       setNav(n);
-      if (!keepSearch || all) setQuery("");
+      setExpiryOnly(expiring);
+      if (!keepSearch || expiring) setQuery("");
       open(null);
     });
   };
@@ -309,7 +314,7 @@ export function Home({ status, place, onPlace, readDraft, onDraft, onLock, onKit
     const noteId = pane?.type === "note" || pane?.type === "restoring" ? pane.id : pane?.type === "edit" ? pane.note.id : null;
     onPlace({ nav, noteId, sort });
   }, [nav, pane, sort]);
-  useEffect(() => setMarked(null), [list, sort, query]);
+  useEffect(() => setMarked(null), [list, sort, query, expiryOnly]);
   useEffect(() => {
     if (marked) document.getElementById(rowId(marked))?.scrollIntoView({ block: "nearest" });
   }, [marked]);
@@ -418,12 +423,9 @@ export function Home({ status, place, onPlace, readDraft, onDraft, onLock, onKit
   const markedNote = marked ? shown.find((n) => n.id === marked) : undefined;
   // Counted against today's date at every draw (the status redraws this screen each second), so
   // the banner is right after midnight too.
-  const untilExpiry = apiKeys.flatMap((n) => {
-    const days = n.expires ? daysUntil(n.expires) : null;
-    return days === null ? [] : [days];
-  });
-  const expiredKeys = untilExpiry.filter((d) => d < 0).length;
-  const expiringKeys = untilExpiry.filter((d) => d >= 0 && d <= EXPIRY_BANNER_DAYS).length;
+  const affectedKeys = apiKeys.filter(withinExpiryWarning);
+  const expiredKeys = affectedKeys.filter((n) => expiry(n.expires)?.past).length;
+  const expiringKeys = affectedKeys.length - expiredKeys;
   const capture = status.capture_hiding_active;
   const lastBackup = status.backup.last_backup_at;
   const unbacked = status.backup.unbacked_changes;
@@ -502,8 +504,7 @@ export function Home({ status, place, onPlace, readDraft, onDraft, onLock, onKit
           <div className="banner">
             <Icon name="warning" />
             {s.expiryBanner(expiredKeys, expiringKeys, EXPIRY_BANNER_DAYS)}
-            {/* Not where its button leads: there the rows themselves say which. */}
-            {!sameNav(nav, API_KEYS) && <button onClick={() => go(API_KEYS, true)}>{s.showApiKeys}</button>}
+            <button onClick={() => go(API_KEYS, !expiryOnly)}>{expiryOnly ? s.showAllApiKeys : s.showApiKeys}</button>
           </div>
         )}
         {status.purge_trash_failed && <div className="banner" role="alert">{s.trashPurgeFailed}</div>}
