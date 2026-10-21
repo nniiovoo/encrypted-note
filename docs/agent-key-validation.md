@@ -1,64 +1,80 @@
-# Isolated Agent Key workflow validation
+# Restricted OpenAI Agent Key workflow validation
 
-Status: ready-for-human — research only; no workflow has run. Refs [#27](https://github.com/nniiovoo/encrypted-note/issues/27).
+Status: ready-for-human — separate companion source published privately; 30 fictional tests passed: 21 provider/protocol tests and 9 isolation-preparation tests. Actual OS isolation, protected custody, provider configuration and a real-key pilot remain unverified. Refs [#27](https://github.com/nniiovoo/encrypted-note/issues/27) and [#28](https://github.com/nniiovoo/encrypted-note/issues/28).
 
-The boundary is separate restricted Agent Keys and absolutely no agent access to the owner's Vault, Notes, Master Password, Recovery Key, Backups or Safety Copies ([#25](https://github.com/nniiovoo/encrypted-note/issues/25)). This record concerns an external sandbox only. It adds no interface, network code or dependency to encrypted-note ([ADR-0001](adr/0001-local-only-vault-moved-by-hand.md)). Account/execution isolation must be verified first ([#26](https://github.com/nniiovoo/encrypted-note/issues/26)).
+The owner selected OpenAI API text generation with one fixed model and a new separate restricted Agent Key. Agents receive no owner Vault, Notes, metadata, Master Password, Recovery Key, Wallet Kind, Backup, Safety Copy or Emergency Reader access ([ADR-0007](adr/0007-agents-use-separate-restricted-keys.md)). The operation and outstanding gate are recorded in [ADR-0008](adr/0008-agent-gateway-awaits-a-concrete-api.md).
 
-## Official-source preflight, 2026-10-21
+This workflow is an optional companion outside encrypted-note. The app adds no network code, dependency, listener, account login or agent interface ([ADR-0001](adr/0001-local-only-vault-moved-by-hand.md)). The local Vault needs no OpenAI account or server. Local agents use MCP over stdio; no hosted service or public listener is required.
 
-The research target is **local Docker Sandboxes, sbx 0.49.1**, rather than a cloud sandbox. No installed binary, daemon, agent image, kit, setting or network behavior has been checked. Recheck the official documentation and exact installed command help before a scoped run; current web documentation is not proof of a particular binary's behavior. The older ignored draft is not installation or test evidence.
+## Reviewed development contract, 2026-10-21
 
-| Topic | Documentation finding and source | Still to verify locally |
-|---|---|---|
-| Exact release | Docker lists stable 0.49.1, released 2026-10-20 ([release notes](https://docs.docker.com/ai/sandboxes/release-notes/)) | Exact binary version/source, integrity, daemon and agent/kit versions |
-| Supported Mac | Docker lists macOS 14+ on Apple silicon and Docker sign-in ([installation requirements](https://docs.docker.com/ai/sandboxes/install/)) | Test hardware support; any tool-account sign-in is a separate owner action |
-| Credential scope | Service values are held on the host; the proxy substitutes authentication headers. Service secrets are global by default; sandbox scope must be chosen explicitly ([credentials](https://docs.docker.com/ai/sandboxes/configuration/credentials/), [secret-set reference](https://docs.docker.com/reference/cli/sbx/secret/set/)) | Fake marker never readable in guest; only intended sandbox receives injection; no global fallback |
-| Transport and mounts | Forward-proxy and transparent-proxy routes enforce policy, but only the forward proxy injects credentials. Direct mounts expose host files, and sandbox processes can write host clipboard text ([isolation layers](https://docs.docker.com/ai/sandboxes/security/isolation/)) | Exact route and destination policy, TLS handling, mount inventory and host bridges for this run |
-| CLI telemetry | Docker documents command/result/duration analytics, including Docker username when signed in; `SBX_NO_TELEMETRY=1` opts out. Docker authentication and registry traffic are separate ([FAQ](https://docs.docker.com/ai/sandboxes/faq/)) | Effective CLI/daemon environment and observed outbound destinations; opt-out does not prove zero network traffic |
-| Other host controls | Settings expose SSH-agent forwarding, host-browser opening, clipboard image access and automatic diagnostic-upload consent. Declining automatic diagnostics does not prohibit an explicit upload ([settings](https://docs.docker.com/ai/sandboxes/configuration/settings/)) | Effective values and restart requirements; SSH forwarding/browser bridges off, image reads off, automatic uploads declined; no explicit diagnostic upload |
+The companion source is published in the private [encrypted-note-agent-companion repository](https://github.com/nniiovoo/encrypted-note-agent-companion), including merged [PR #4](https://github.com/nniiovoo/encrypted-note-agent-companion/pull/4), [PR #5](https://github.com/nniiovoo/encrypted-note-agent-companion/pull/5) and [PR #6](https://github.com/nniiovoo/encrypted-note-agent-companion/pull/6). It uses the official MCP SDK, exact-pinned to @modelcontextprotocol/sdk 1.32.1 with zod 4.6.7 for schemas. These dependencies are outside the offline app. A reproducible install with lifecycle scripts disabled reported zero known package vulnerabilities at validation time; this is not a security guarantee.
 
-Docker, its host proxy/daemon, the host account, hypervisor, selected agent/kit and allowed destination become part of the trusted setup. An agent in the same host account is outside the guest boundary. A domain allowlist limits destinations, not allowed actions at those destinations. These are reasons to test the selected setup, not claims that it is safe for real keys.
+| Boundary | Implemented and checked with fictional data |
+| --- | --- |
+| Tool and parameters | Only generate_text; exactly one nonempty, well-formed text argument, at most 4096 UTF-8 bytes. Additional model, URL, header, file, history, state and policy arguments are rejected before provider work. |
+| Destination | Trusted code constructs POST https://api.openai.com/v1/responses. No runtime provider-URL override, redirect following or automatic retry. |
+| Model and output | Fixed gpt-6-luna, reasoning none, service tier default; max_output_tokens 512. Only completed assistant text from that model returns, bounded to 64 KiB. |
+| Provider state | store, stream and background false; tools empty and tool_choice none. No files, images, prompt templates, previous responses or conversations. |
+| Admission | One concurrent request; six per rolling minute, 60 per rolling hour and 100 per process. Invalid input consumes none; admitted failures consume allowance. Restart resets local counters. |
+| Bounds and errors | MCP messages bounded to 64 KiB and provider responses to 256 KiB. Thrown provider errors, headers, response IDs and error bodies are not forwarded. An exact provider-key echo is rejected. |
+| Lifecycle | Timeout and cancellation abort work without retry. Independent review found HTTP cancellation, stdin EOF and abrupt input-close gaps; all were fixed and regression-tested. A cancelled request may still be billed. |
+| Local MCP | Official client initialized, listed exactly one tool and called it successfully through a real stdio subprocess with a fictional provider. |
+| Optional HTTP | Official Streamable HTTP client succeeded on an explicitly started loopback fixture. Missing/wrong authorization, unsafe Host/Origin, query paths, batching and oversized bodies were rejected. No production listener was started. |
+| Configuration | Only a dedicated Agent Key variable is accepted; owner OPENAI_API_KEY is not reused. Optional HTTP needs a distinct bearer token. No actual credential file was created or inspected. |
 
-## Scope before execution
+All 30 automated fictional tests passed: 21 exercise provider/protocol behavior, and 9 exercise isolation preparation with fictional fixtures. Independent review found no remaining request-override or direct credential-disclosure defect in the inspected implementation. These results establish the tested source and preparation behavior; they do not establish an actual separate OS identity, deployed permissions, provider control, secure erasure, real billing behavior or resistance to an unrestricted same-account agent.
 
-Keep an owner-approved operational record privately identifying the exact tool/version, account boundary, sandbox names, fake fixtures, permitted destinations, tools, expected changes and cleanup. This document authorizes no installation, account change, sign-in, provider-account modification, custom proxy, credential import, or real-key pilot. If no fake-only supported route is available, leave the relevant check pending.
+Published source remains separate from this app and its bundle. Operational logs remain private; repository publication is not evidence of a completed protected deployment or live pilot. Publish only sanitized findings and source versions; do not copy private paths, raw settings, account names, real credentials, headers or account transcripts into GitHub.
 
-Use one obviously fake marker (for example `FAKE-AGENT-KEY-VALIDATION-ONLY`) through the tool's interactive host entry. Do not copy from encrypted-note or use real values in arguments, environment dumps, shell history, chat or logs. No OAuth credential, dynamic host-secret resolver, SSH agent, MCP gateway, real service login, broad host mount or global secret belongs to this test. Keep shared skills and any required fixture mounts within the explicitly approved fake-only scope.
+## Current official provider evidence
 
-Before starting an agent, inspect the effective policy and all kit-added grants. Allow only the approved exact HTTPS test destination in the selected sandbox; inspect TLS trust and proxy bypass behavior. Test a second sandbox with no credential grant as a negative control. Do not widen policy to make a failing test succeed. A positive injection control needs an already-approved test endpoint that validates the fake header without returning it; do not deploy a new proxy or send the marker to an unreviewed echo service.
+Sources below were checked on 2026-10-21. No account settings or provider permissions were queried.
 
-## Fake-only checks
+| Requirement | Current documentation | Runtime result |
+| --- | --- | --- |
+| Fixed model | GPT-6 Luna supports reasoning none; the companion fixes its model ID ([model](https://developers.openai.com/api/docs/models/gpt-6-luna)). A fixed ID does not cryptographically pin weights. | Fictional request construction passed; actual account availability pending. |
+| Narrow credential | A least-privilege service account and key can grant only api.responses.write; role grants are additive, and key scopes cannot exceed effective role access ([service accounts](https://developers.openai.com/api/docs/guides/terraform/service-accounts)). An empty scopes array means all permissions. | Separate role, key and denied permissions pending. |
+| Model restriction | A provider project allowlist can permit only gpt-6-luna ([project controls](https://developers.openai.com/api/docs/guides/terraform/project-controls)). | Allowlist and denied-model checks pending. |
+| Hosted tools | Five project policies cover file search, web search, image generation, MCP and Code Interpreter; project denial can require organization selected-project policy ([tool controls](https://developers.openai.com/api/docs/guides/terraform/project-controls#configure-hosted-tools)). Hosted-shell denial is not established by those five switches. | Provider tool denial pending; companion tool exclusion passed. |
+| Expiry | Fixed project-key expiration and administrator maximum lifetimes are supported ([key lifetime](https://developers.openai.com/api/docs/guides/production-best-practices#api-keys)). | No key created; expiry and denied-after-expiry check pending. |
+| Revocation | The owner must revoke/delete the provider credential, using the applicable service-account procedure where needed; stopping the local tool alone is insufficient. | No key created; revocation and denied-after-revocation check pending. |
+| Hard spend cap | Enforced organization and project hard monthly limits return 429 after tracked spend reaches a cap; alerts do not stop traffic, and propagation permits a small overshoot ([spend limits](https://developers.openai.com/api/docs/guides/spend-limits)). | No limit applied or observed; pending. |
+| Usage caps | Independent provider rate limits supplement the companion's admission controls; a monthly spend limit is not an exact request-count cap. | Local admission tests passed; provider limits pending. |
+| Retention | store:false does not establish Zero Data Retention; abuse-monitoring and prompt-cache retention may still apply ([data handling](https://developers.openai.com/api/docs/guides/your-data#v1responses)). | Documentation only; actual project policy pending. |
 
-| Check | Procedure and required observation | Result |
-|---|---|---|
-| Credential entry | Confirm fake entry is interactive and host-side; inspect only fake test history/logs for accidental echoes | pending |
-| Positive injection control | An approved fixture accepts the fake injected header from the intended sandbox without revealing its value | pending |
-| Guest non-disclosure | Search only the test guest's environment, files, process arguments and output for the exact fake marker; guest sees only the tool's placeholder | pending |
-| Sandbox scope | The ungranted second sandbox cannot authenticate to that fixture; no global secret supplies a fallback | pending |
-| Destination restriction | A designated unallowed HTTPS destination and a redirect to it are blocked; no marker is sent there | pending |
-| Host boundary | Only approved fake fixtures are mounted; guest cannot read designated fake host-only files or use SSH, host-browser, clipboard-image or MCP bridges | pending |
-| Errors and logs | Force a fake authentication error and inspect guest output plus approved host/proxy/daemon logs; no marker, header value or credential-bearing URL appears | pending |
-| Response echo | With an approved fake fixture only, test whether headers or credential-derived values can return in a response; any marker reaching the guest fails non-disclosure | pending |
-| Remove/revoke | After a successful fake positive control, remove its scoped host entry and repeat in the existing sandbox; authentication must stop without a restart loophole | pending |
-| Expiry | If the fixture models expiry, prove an accepted fake value is rejected after expiry; label this a fixture result, not provider enforcement | pending |
-| Policy and telemetry | Record effective scope, destination/TLS settings, host-bridge settings, telemetry opt-out, diagnostic consent and observed network destinations; unexplained traffic remains unresolved | pending |
-| Cleanup | Remove only the scoped fake credentials, fake sandboxes and approved fixtures; verify other sandboxes and host settings are unaffected | pending |
+The owner approved a one-hour credential expiry and a $1 monthly provider hard project limit for the first trial. These controls have not been applied or verified; approved values are not active account settings or evidence of a successful real-key pilot.
 
-An invalid fake key returning 401 before and after removal proves neither correct injection nor revocation. Without a successful positive control, leave those results pending. A fake fixture cannot establish a real provider's scopes, hard spending limits, expiry or revocation delay. Those require current official provider evidence and a separately owner-scoped later pilot; do not create or change a provider key for this record.
+## Remaining owner-controlled operational checks
 
-## Evidence and decision
+A real pilot requires an independent owner-controlled session that the agent cannot administer. Fix the concrete execution identity, protected code ownership, secret custody, actual provider project, operation limits, permitted output destinations and cleanup before importing a new Agent Key. No existing owner key may be reused or copied from the Vault.
 
-Publish only dates, exact tool/OS/agent/kit versions, fake fixture labels, effective control summaries, sanitized outcomes and issue links. Keep account names, private paths, raw settings inventories, authentication transcripts, real identifiers/values, headers and raw logs out of the repository and GitHub. Record expected and observed results separately.
+The owner approved preparation of the separate standard macOS account/protected launcher and a first trial with a one-hour key expiry and $1 provider hard project cap. Preparation does not establish that the account, launcher or provider controls are active; their observed checks remain pending below.
 
-```text
-Run date / private operational scope approval date:
-Exact sbx, daemon, OS, agent image and kit versions:
-Credential scope / approved fixture label / policy summary (no private paths):
-Check / expected result / actual result / pass, fail or pending:
-Positive and negative control results:
-Provider controls: researched only, not validated (official source links):
-Residual permissions and limits / follow-up issue:
-Fake fixture and credential cleanup: complete or pending:
-```
+A companion process under the same unrestricted account as the agent does not protect its key or policy from that agent. An environment variable kept out of chat is not an OS boundary. [Separate-account validation](agent-account-validation.md) remains pending; another independently reviewed execution boundary may be selected instead. No actual OS account, permission, home-folder or service change has been made for this workflow. The 9 isolation-preparation tests use fictional fixtures and do not replace the real OS boundary checks below.
 
-Every runtime result is pending. Any marker returned to the agent, unscoped injection or unexplained route blocks a real-key recommendation. Even successful isolation leaves an agent able to misuse every allowed operation and send data through an allowed service, up to provider-enforced limits. A later real-key pilot needs its own scope and provider-enforced restrictions; this checklist neither grants that permission nor makes any owner Vault accessible.
+| Check | Required observation before a real-key recommendation | Result |
+| --- | --- | --- |
+| Custody and code | Agent tools cannot read the provider key, inspect the keyholder process or modify protected code/policy; only approved fictional host fixtures are used to test the boundary first. | pending |
+| Provider authority | Only the approved model and operation work; file/tool/admin/model expansion and credential management are denied as scoped. | pending |
+| Expiry and revoke | A previously successful dedicated credential is rejected after expiry and owner revocation, with propagation behavior recorded. | pending |
+| Hard limits | Applied provider hard-spend and rate limits are verified independently; limit errors do not trigger a retry or automatic limit increase. | pending |
+| Live generation | One explicitly approved fictional text request succeeds through the protected runtime, with sanitized output and actual provider usage recorded. | pending |
+| Disclosure and logs | No actual key, secret-bearing header, raw provider error or owner data reaches model-visible results, process arguments, history or logs. | pending |
+| Cleanup | Scoped test credentials and optional runtime resources are removed without affecting owner Vaults or other services. | pending |
+
+A fake invalid key returning an error cannot establish successful injection, provider revocation or expiry. The tested fake transport bypasses the live provider deliberately; it proves none of those account properties. Even a successful pilot permits misuse of every allowed operation up to independently enforced limits.
+
+## Optional ChatGPT cloud connection
+
+Local stdio is available to a local MCP client. ChatGPT cloud cannot directly reach localhost or a local stdio process. An owner-selected [Secure MCP Tunnel](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels) can reach a private stdio/HTTP server without exposing a public listener, with separate tunnel-runtime permissions and the appropriate organization/workspace associations.
+
+Tunnel creation, client installation, authentication, workspace changes and cloud connectivity have not been performed. They remain optional and have no effect on the offline Vault. The optional loopback bearer transport does not itself implement OAuth or establish a ChatGPT connection.
+
+Only an observed authenticated end-to-end tool call can complete that connection check ([official connection tests](https://developers.openai.com/plugins/deploy/connect-chatgpt)). The approved output destination must explicitly include any ChatGPT/model service that receives supplied or generated text.
+
+## Evidence outcome
+
+Completed: private source publication in the separate companion repository, independent code review, 30 fictional tests (21 provider/protocol plus 9 isolation preparation), official local MCP client compatibility and reproducible dependency installation.
+
+Pending: actual OS isolation, protected execution and credential custody; provider account, permissions, model/tool/rate/spend policies; actual expiry/revocation; live API generation; optional ChatGPT authentication and connection. No real credential, owner Vault or wallet material was used.
