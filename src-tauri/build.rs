@@ -51,9 +51,53 @@ const COMMANDS: &[&str] = &[
 ];
 
 fn main() {
+    println!("cargo:rerun-if-changed=native/biometry.swift");
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
+        build_biometry();
+    }
     tauri_build::try_build(
         tauri_build::Attributes::new()
             .app_manifest(tauri_build::AppManifest::new().commands(COMMANDS)),
     )
     .expect("failed to run tauri-build");
+}
+
+fn build_biometry() {
+    use std::{path::PathBuf, process::Command};
+    let arch = match std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() {
+        Ok("aarch64") => "arm64",
+        Ok("x86_64") => "x86_64",
+        _ => panic!("unsupported macOS architecture"),
+    };
+    let out = PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR"));
+    let object = out.join("biometry.o");
+    let archive = out.join("libencrypted_note_biometry.a");
+    let status = Command::new("xcrun")
+        .args([
+            "swiftc",
+            "-parse-as-library",
+            "-emit-object",
+            "-O",
+            "-target",
+        ])
+        .arg(format!("{arch}-apple-macos13.0"))
+        .args(["-module-name", "EncryptedNoteBiometry", "-o"])
+        .arg(&object)
+        .arg("native/biometry.swift")
+        .status()
+        .expect("run Swift compiler");
+    assert!(status.success(), "compile local biometric bridge");
+    let status = Command::new("xcrun")
+        .args(["ar", "crs"])
+        .arg(&archive)
+        .arg(&object)
+        .status()
+        .expect("run archive tool");
+    assert!(status.success(), "archive local biometric bridge");
+    println!("cargo:rustc-link-search=native={}", out.display());
+    println!("cargo:rustc-link-lib=static=encrypted_note_biometry");
+    for framework in ["CryptoKit", "Security", "LocalAuthentication", "Foundation"] {
+        println!("cargo:rustc-link-lib=framework={framework}");
+    }
+    swift_rs::SwiftLinker::new("13.0").link();
 }

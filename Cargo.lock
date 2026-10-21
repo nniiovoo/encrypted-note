@@ -1005,6 +1005,7 @@ dependencies = [
  "serde_json",
  "session",
  "store",
+ "swift-rs",
  "tauri",
  "tauri-build",
  "tempfile",
