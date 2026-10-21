@@ -1,15 +1,20 @@
-# Bounded OpenAI text operation
+# Restricted OpenAI text companion
 
-Development core for a separate optional agent companion. It does not integrate with encrypted-note or read its Vault, Notes, metadata, wallet material, recovery data or IPC.
+A separate optional local MCP tool for short text generation, outside encrypted-note. It does not read that app's Vault, Notes, metadata, wallet/recovery material, backups or IPC.
 
-The operation accepts exactly one nonempty, well-formed text string of at most 4096 UTF-8 bytes. Trusted code constructs only POST https://api.openai.com/v1/responses using fixed gpt-6-luna, reasoning none, service tier default and at most 512 output tokens. Tools are empty; storage, streaming and background mode are disabled. The provider destination, model, headers, files, history and policy cannot be overridden by input.
+The only tool is generate_text({text}). It accepts at most 4096 UTF-8 input bytes and sends one trusted request to https://api.openai.com/v1/responses using fixed gpt-6-luna, reasoning none, service tier default and at most 512 output tokens. Tools, response storage, streaming and background mode are disabled. Input cannot override destinations, models, files, history or policy.
 
-Admission permits one in-flight call, six per minute, 60 per hour and 100 per process. Admitted failures consume allowance. No redirects or automatic retries are followed; cancellation/timeouts abort work but may still be billed. Only bounded completed assistant text returns; raw provider errors, headers and exact-key echoes are rejected.
+The default transport is stdio. Optional Streamable HTTP starts only explicitly, binds loopback and checks a distinct bearer token, Host, Origin, path and message size. Both transports propagate cancellation and disconnects to admitted provider work. No public listener, account system, tunnel or automatic startup is configured.
 
-Run the fictional-provider tests with Node 22 or later:
+Use Node 22 or later:
 
+    npm ci --ignore-scripts
     npm test
 
-This slice has no third-party dependency or MCP runtime. Its tests inject a fictional provider or mock HTTPS; they never call OpenAI.
+Tests use fictional providers, including official MCP clients over an actual stdio subprocess and optional loopback HTTP. They never call OpenAI.
 
-No real key, provider permissions/expiry/hard cap, protected key custody, agent execution boundary or live generation has been verified. Existing owner keys must never be reused. Source review and tests do not establish that a credential cannot be stolen or misused.
+Exact-pinned dependencies: @modelcontextprotocol/sdk 1.32.1 provides official MCP protocol/transports; zod 4.6.7 provides input/output schemas. package-lock.json pins their transitive resolution. No OpenAI SDK or direct web framework dependency is added.
+
+These entry points are development interfaces. A same-account unrestricted agent can inspect or alter an owner process, environment or code. No protected runtime or real-key deployment is established here. No owner key may be reused. Provider scope, one-hour expiry, $1 enforced monthly hard cap, model/tool restrictions, revocation and actual agent isolation must be independently configured and verified before a live trial.
+
+Local stdio does not itself establish a ChatGPT cloud connection. No key, account, live generation, provider limit or cloud connection was exercised.
