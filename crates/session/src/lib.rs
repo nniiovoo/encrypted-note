@@ -200,7 +200,7 @@ pub struct Session {
 /// Keeps `idle_minutes` within the offered choices by snapping to the nearest one
 /// (the shorter one on a tie, which is the safer side), and `clipboard_clear_seconds` within
 /// its two: anything else becomes the default, which is the shorter one.
-fn sanitize(settings: LockSettings) -> LockSettings {
+pub fn normalize_settings(settings: LockSettings) -> LockSettings {
     let wanted = settings.idle_minutes;
     let idle_minutes = IDLE_MINUTE_CHOICES
         .iter()
@@ -224,7 +224,7 @@ impl Session {
     /// Starts Locked.
     pub fn new(settings: LockSettings) -> Session {
         Session {
-            settings: sanitize(settings),
+            settings: normalize_settings(settings),
             last_activity: None,
             last_elsewhere: None,
             failures: 0,
@@ -241,7 +241,7 @@ impl Session {
         self.settings
     }
     pub fn set_settings(&mut self, settings: LockSettings) {
-        self.settings = sanitize(settings);
+        self.settings = normalize_settings(settings);
         if !self.settings.count_activity_anywhere {
             self.last_elsewhere = None;
         }

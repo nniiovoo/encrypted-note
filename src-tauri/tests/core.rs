@@ -309,6 +309,8 @@ fn set_lock_on_app_switch(app: &mut App) {
 /// out, which keeps them as they are.
 fn lock_rule(idle_minutes: u32, lock_on_app_switch: bool) -> SettingsInput {
     SettingsInput {
+        master_password: None,
+        session_generation: None,
         idle_minutes,
         lock_on_app_switch,
         clipboard_clear_seconds: None,
@@ -1653,6 +1655,7 @@ fn status_has_the_shape_api_ts_expects() {
         .map(String::as_str)
         .collect();
     let mut expected = vec![
+        "session_generation",
         "revision",
         "phase",
         "platform",
@@ -2231,6 +2234,8 @@ fn an_unreadable_settings_file_means_the_strictest_lock_rules() {
     // Every setting at its most relaxed.
     app.core
         .set_settings(SettingsInput {
+            master_password: Some(pw(PASSWORD)),
+            session_generation: Some(app.core.app_status().session_generation),
             idle_minutes: 30,
             lock_on_app_switch: false,
             clipboard_clear_seconds: Some(60),
@@ -3571,7 +3576,7 @@ fn copies_stay_for_the_chosen_30_or_60_seconds_and_wallet_kind_values_always_for
     // The lock rule sent alone, as the Settings screen has always sent it, keeps the choice.
     app.core
         .set_settings(settings(
-            json!({"idle_minutes": 10, "lock_on_app_switch": false}),
+            json!({"idle_minutes": 10, "lock_on_app_switch": false, "master_password": PASSWORD, "session_generation": app.core.app_status().session_generation}),
         ))
         .unwrap();
     let view = app.core.app_status().settings;
@@ -3751,6 +3756,8 @@ fn counting_activity_anywhere_keeps_the_app_unlocked_but_never_past_60_minutes()
             "idle_minutes": 5,
             "lock_on_app_switch": false,
             "count_activity_anywhere": true,
+            "master_password": PASSWORD,
+            "session_generation": app.core.app_status().session_generation,
         })))
         .unwrap();
     assert!(app.core.app_status().settings.count_activity_anywhere);
@@ -4036,4 +4043,197 @@ fn a_private_key_is_checked_under_whatever_chain_name_the_note_has() {
         code(app.core.check_private_key("Fake Chain", not_a_key)),
         "locked"
     );
+}
+
+#[test]
+fn loosening_each_auto_lock_rule_requires_a_fresh_password() {
+    for (before, after) in [
+        (
+            json!({"idle_minutes": 5, "lock_on_app_switch": false}),
+            json!({"idle_minutes": 10, "lock_on_app_switch": false}),
+        ),
+        (
+            json!({"idle_minutes": 5, "lock_on_app_switch": true}),
+            json!({"idle_minutes": 5, "lock_on_app_switch": false}),
+        ),
+        (
+            json!({"idle_minutes": 5, "lock_on_app_switch": false}),
+            json!({"idle_minutes": 5, "lock_on_app_switch": false, "count_activity_anywhere": true}),
+        ),
+        // Tightening one rule does not authorize loosening another.
+        (
+            json!({"idle_minutes": 5, "lock_on_app_switch": false}),
+            json!({"idle_minutes": 10, "lock_on_app_switch": true}),
+        ),
+        (
+            json!({"idle_minutes": 5, "lock_on_app_switch": true}),
+            json!({"idle_minutes": 1, "lock_on_app_switch": false}),
+        ),
+    ] {
+        let mut app = App::new();
+        unlocked(&mut app);
+        app.core.set_settings(settings(before)).unwrap();
+        let current = app.core.app_status();
+        let stored = std::fs::read(app.data_dir().join("settings.json")).unwrap();
+        let mut request = settings(after.clone());
+        request.session_generation = Some(current.session_generation);
+        assert_eq!(
+            app.core.set_settings(request).unwrap_err().code,
+            "invalid_input"
+        );
+        assert_eq!(app.core.app_status().settings, current.settings);
+        assert_eq!(
+            std::fs::read(app.data_dir().join("settings.json")).unwrap(),
+            stored
+        );
+
+        let mut request = settings(after.clone());
+        request.session_generation = Some(current.session_generation);
+        request.master_password = Some(pw(WRONG_PASSWORD));
+        assert_eq!(
+            app.core.set_settings(request).unwrap_err().code,
+            "wrong_credential"
+        );
+        assert_eq!(app.core.app_status().settings, current.settings);
+        assert_eq!(app.core.app_status().failed_attempts, 1);
+
+        app.advance(app.core.app_status().retry_in_ms.unwrap_or(0));
+        let mut request = settings(after);
+        request.session_generation = Some(current.session_generation);
+        request.master_password = Some(pw(PASSWORD));
+        let applied = app.core.set_settings(request).unwrap();
+        assert_ne!(applied, current.settings);
+        assert_eq!(app.core.app_status().failed_attempts, 0);
+        let stored = std::fs::read_to_string(app.data_dir().join("settings.json")).unwrap();
+        assert!(!stored.contains(PASSWORD));
+        assert!(!stored.contains("master_password"));
+        app.core.lock();
+        let app = app.restart();
+        assert_eq!(app.core.app_status().settings, applied);
+    }
+}
+
+#[test]
+fn tightening_and_unchanged_auto_lock_rules_need_no_password() {
+    let mut app = App::new();
+    unlocked(&mut app);
+    let mut relaxed = settings(
+        json!({"idle_minutes": 10, "lock_on_app_switch": false, "count_activity_anywhere": true}),
+    );
+    relaxed.master_password = Some(pw(PASSWORD));
+    relaxed.session_generation = Some(app.core.app_status().session_generation);
+    app.core.set_settings(relaxed).unwrap();
+    // Omitted preferences retain their effective values, including activity anywhere.
+    app.core.set_settings(lock_rule(10, false)).unwrap();
+    assert!(app.core.app_status().settings.count_activity_anywhere);
+    app.core.set_settings(lock_rule(5, false)).unwrap();
+    app.core.set_settings(lock_rule(5, true)).unwrap();
+    app.core.set_settings(settings(json!({"idle_minutes": 5, "lock_on_app_switch": true, "count_activity_anywhere": false}))).unwrap();
+    // Clipboard preference is outside Auto-lock authorization, including its invalid-value default.
+    for seconds in [60, 45, 30] {
+        let applied = app.core.set_settings(settings(json!({"idle_minutes": 5, "lock_on_app_switch": true, "clipboard_clear_seconds": seconds}))).unwrap();
+        assert_eq!(
+            applied.clipboard_clear_seconds,
+            if seconds == 60 { 60 } else { 30 }
+        );
+    }
+}
+
+#[test]
+fn auto_lock_authorization_compares_normalized_and_supported_settings() {
+    let mut app = App::on_a_computer(false);
+    unlocked(&mut app);
+    // Seven snaps to five; unsupported activity anywhere is off before comparison.
+    let applied = app.core.set_settings(settings(json!({"idle_minutes": 7, "lock_on_app_switch": false, "count_activity_anywhere": true}))).unwrap();
+    assert_eq!(applied.idle_minutes, 5);
+    assert!(!applied.count_activity_anywhere);
+    // Eight snaps to ten, and unsupported activity cannot hide this loosening.
+    let mut request = settings(
+        json!({"idle_minutes": 8, "lock_on_app_switch": false, "count_activity_anywhere": true}),
+    );
+    request.session_generation = Some(app.core.app_status().session_generation);
+    assert_eq!(
+        app.core.set_settings(request).unwrap_err().code,
+        "invalid_input"
+    );
+    assert_eq!(app.core.app_status().settings.idle_minutes, 5);
+}
+
+#[test]
+fn a_settings_prompt_cannot_outlive_its_unlock_session() {
+    let mut app = App::new();
+    unlocked(&mut app);
+    let generation = app.core.app_status().session_generation;
+    let request = || {
+        settings(
+            json!({"idle_minutes": 10, "lock_on_app_switch": false, "master_password": PASSWORD, "session_generation": generation}),
+        )
+    };
+    app.core.lock();
+    assert_eq!(app.core.set_settings(request()).unwrap_err().code, "locked");
+    app.core.unlock(password(PASSWORD)).unwrap();
+    assert_ne!(app.core.app_status().session_generation, generation);
+    assert_eq!(
+        app.core.set_settings(request()).unwrap_err().code,
+        "invalid_input"
+    );
+    assert_eq!(app.core.app_status().settings.idle_minutes, 5);
+
+    let mut request = request();
+    request.session_generation = Some(app.core.app_status().session_generation);
+    app.advance(5 * 60_000); // Expiry is checked in Rust even if the screen has not seen a lock.
+    assert_eq!(app.core.set_settings(request).unwrap_err().code, "locked");
+    assert_eq!(app.core.app_status().settings.idle_minutes, 5);
+}
+
+#[test]
+fn auto_lock_reauthentication_keeps_the_existing_wrong_password_delays() {
+    let mut app = App::new();
+    unlocked(&mut app);
+    let generation = app.core.app_status().session_generation;
+    for _ in 0..5 {
+        let request = settings(
+            json!({"idle_minutes": 10, "lock_on_app_switch": false, "master_password": WRONG_PASSWORD, "session_generation": generation}),
+        );
+        assert_eq!(
+            app.core.set_settings(request).unwrap_err().code,
+            "wrong_credential"
+        );
+    }
+    let request = settings(
+        json!({"idle_minutes": 10, "lock_on_app_switch": false, "master_password": PASSWORD, "session_generation": generation}),
+    );
+    assert_eq!(
+        app.core.set_settings(request).unwrap_err().code,
+        "retry_later"
+    );
+    assert_eq!(app.core.app_status().settings.idle_minutes, 5);
+    app.core.tick();
+    let app = app.restart();
+    assert_eq!(app.core.app_status().failed_attempts, 5);
+}
+
+#[test]
+fn a_failed_settings_save_never_activates_or_later_persists_a_looser_rule() {
+    let mut app = App::new();
+    unlocked(&mut app);
+    app.core.set_settings(lock_rule(1, true)).unwrap();
+    let current = app.core.app_status();
+    let file = app.data_dir().join("settings.json");
+    let saved = app.data_dir().join("fake-saved-settings.json");
+    std::fs::rename(&file, &saved).unwrap();
+    std::fs::create_dir(&file).unwrap();
+    let request = settings(
+        json!({"idle_minutes": 10, "lock_on_app_switch": false, "count_activity_anywhere": true, "master_password": PASSWORD, "session_generation": current.session_generation}),
+    );
+    assert_eq!(app.core.set_settings(request).unwrap_err().code, "io");
+    assert_eq!(app.core.app_status().settings, current.settings);
+    std::fs::remove_dir(&file).unwrap();
+    std::fs::rename(&saved, &file).unwrap();
+    app.core.mark_seed_explainer_seen().unwrap(); // A later save must not smuggle in the failed change.
+    let app = app.restart();
+    let applied = app.core.app_status().settings;
+    assert_eq!(applied.idle_minutes, 1);
+    assert!(applied.lock_on_app_switch);
+    assert!(!applied.count_activity_anywhere);
 }
