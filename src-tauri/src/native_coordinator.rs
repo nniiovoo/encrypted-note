@@ -470,7 +470,7 @@ async fn reveal(
                     value,
                     mode,
                 },
-                Box::new(move || extend(&extend_app, token)),
+                Box::new(move || extend(&extend_app, token, deadline)),
                 activity_hook(&app, token, deadline),
                 Box::new(move || {
                     let _ = tx.send(Ok(()));
@@ -561,24 +561,31 @@ fn authorize_core_callback(
         Snapshot::Retry => return retry_if_live(state, token, deadline),
         Snapshot::Denied => return Authorization::Denied,
     };
-    let valid = |core: &AppCore| {
-        state.live(token)
-            && id.is_none_or(|id| id == active.id)
-            && Instant::now() < deadline
-            && Instant::now() < active.deadline
-            && active_matches(&active, core)
-    };
-    if !valid(core) {
+    if !active_authorized(&active, core, state, deadline, id) {
         return Authorization::Denied;
     }
     if genuine_owner_activity {
         core.activity();
     }
-    if valid(core) {
+    if active_authorized(&active, core, state, deadline, id) {
         Authorization::Allowed
     } else {
         Authorization::Denied
     }
+}
+
+fn active_authorized(
+    active: &Active,
+    core: &AppCore,
+    state: &CoordinatorState,
+    deadline: Instant,
+    id: Option<u64>,
+) -> bool {
+    state.live(active.token)
+        && id.is_none_or(|id| id == active.id)
+        && Instant::now() < deadline
+        && Instant::now() < active.deadline
+        && active_matches(active, core)
 }
 
 fn active_matches(active: &Active, core: &AppCore) -> bool {
@@ -617,35 +624,52 @@ fn activity_hook(app: &AppHandle, token: u64, deadline: Instant) -> native_crede
     })
 }
 
-fn extend(app: &AppHandle, token: u64) -> bool {
-    let state = app.state::<CoordinatorState>();
-    let Snapshot::Active(active) = state.try_snapshot(token) else {
-        return false;
-    };
-    let Stage::Reveal(_) = &active.stage else {
-        return false;
-    };
-    let core_state = app.state::<CoreState>();
-    let Ok(mut core) = core_state.0.try_lock() else {
-        return false;
-    };
-    if authorize_core_callback(
-        &mut core,
-        &state,
+fn extend(app: &AppHandle, token: u64, deadline: Instant) -> Authorization {
+    extend_callback(
+        &app.state::<CoreState>().0,
+        &app.state::<CoordinatorState>(),
         token,
-        active.deadline,
-        Some(active.id),
-        false,
-    ) != Authorization::Allowed
-        || core.extend_reveal().is_err()
-        || !state.live(token)
-        || Instant::now() >= active.deadline
-        || !active_matches(&active, &core)
+        deadline,
+        |core| {
+            let _ = app.emit(STATUS_EVENT, commands::status(core));
+        },
+    )
+}
+
+fn extend_callback(
+    core: &Mutex<AppCore>,
+    state: &CoordinatorState,
+    token: u64,
+    deadline: Instant,
+    on_extended: impl FnOnce(&AppCore),
+) -> Authorization {
+    let mut core = match core.try_lock() {
+        Ok(core) => core,
+        Err(TryLockError::WouldBlock) => return retry_if_live(state, token, deadline),
+        Err(TryLockError::Poisoned(_)) => return Authorization::Denied,
+    };
+    core.tick();
+    if !core
+        .app_status()
+        .reveal
+        .is_some_and(|shown| shown.can_extend)
     {
-        return false;
+        return Authorization::Denied;
     }
-    let _ = app.emit(STATUS_EVENT, commands::status(&core));
-    true
+    let active = match state.try_snapshot(token) {
+        Snapshot::Active(active) => active,
+        Snapshot::Retry => return retry_if_live(state, token, deadline),
+        Snapshot::Denied => return Authorization::Denied,
+    };
+    if !matches!(&active.stage, Stage::Reveal(_))
+        || !active_authorized(&active, &core, state, deadline, None)
+        || core.extend_reveal().is_err()
+        || !active_authorized(&active, &core, state, deadline, None)
+    {
+        return Authorization::Denied;
+    }
+    on_extended(&core);
+    Authorization::Allowed
 }
 
 /// Called after tick/guard updates while the caller already holds CoreState.
@@ -1074,6 +1098,14 @@ mod tests {
     }
 
     fn fake_wallet_readout(core: &mut AppCore, state: &CoordinatorState) -> u64 {
+        fake_wallet_readout_mode(core, state, ShowMode::Held)
+    }
+
+    fn fake_wallet_readout_mode(
+        core: &mut AppCore,
+        state: &CoordinatorState,
+        mode: ShowMode,
+    ) -> u64 {
         use std::collections::BTreeMap;
         let fake_key = setup_fake_vault(core);
         core.confirm_recovery_kit(&last_groups(&fake_key).unwrap())
@@ -1108,7 +1140,7 @@ mod tests {
                 &id,
                 "key",
                 Zeroizing::new("fake-lantern-quartz-mosaic-velvet-orbit".to_owned()),
-                ShowMode::Held,
+                mode,
             )
             .unwrap();
         let status = core.app_status();
@@ -1313,6 +1345,99 @@ mod tests {
         assert_eq!(
             authorize_callback(&core, &state, token, deadline, None, false),
             Authorization::Denied
+        );
+    }
+
+    #[test]
+    fn core_contention_does_not_close_or_consume_a_native_extension() {
+        use std::cell::Cell;
+        let (mut core, _temp, now) = fake_core_with_clock();
+        let state = CoordinatorState::default();
+        let token = fake_wallet_readout_mode(&mut core, &state, ShowMode::Accessible);
+        let deadline = state.snapshot(token).unwrap().deadline;
+        let notifications = Cell::new(0);
+        now.fetch_add(5_000, Ordering::SeqCst);
+        let core = Mutex::new(core);
+        let held = core.lock().unwrap();
+        assert_eq!(
+            extend_callback(&core, &state, token, deadline, |_| notifications.set(1)),
+            Authorization::Retry
+        );
+        let shown = held.app_status().reveal.unwrap();
+        assert_eq!(shown.extensions_left, Some(3));
+        assert_eq!(shown.expires_in_ms, Some(15_000));
+        assert_eq!(notifications.get(), 0);
+        assert_eq!(
+            extend_callback(&core, &state, token, Instant::now(), |_| notifications
+                .set(1)),
+            Authorization::Denied
+        );
+        drop(held);
+        assert_eq!(
+            extend_callback(&core, &state, token, deadline, |_| notifications.set(1)),
+            Authorization::Allowed
+        );
+        let shown = core.lock().unwrap().app_status().reveal.unwrap();
+        assert_eq!(shown.extensions_left, Some(2));
+        assert_eq!(shown.expires_in_ms, Some(20_000));
+        assert_eq!(notifications.get(), 1);
+    }
+
+    #[test]
+    fn metadata_contention_retries_an_extension_but_never_revives_an_expired_readout() {
+        let (mut core, _temp, now) = fake_core_with_clock();
+        let state = CoordinatorState::default();
+        let token = fake_wallet_readout_mode(&mut core, &state, ShowMode::Accessible);
+        let deadline = state.snapshot(token).unwrap().deadline;
+        let core = Mutex::new(core);
+        let metadata = state.active.lock().unwrap();
+        assert_eq!(
+            extend_callback(&core, &state, token, deadline, |_| panic!("not extended")),
+            Authorization::Retry
+        );
+        assert_eq!(
+            core.lock()
+                .unwrap()
+                .app_status()
+                .reveal
+                .unwrap()
+                .extensions_left,
+            Some(3)
+        );
+        now.fetch_add(20_000, Ordering::SeqCst);
+        assert_eq!(
+            extend_callback(&core, &state, token, deadline, |_| panic!("not extended")),
+            Authorization::Denied
+        );
+        assert!(core.lock().unwrap().app_status().reveal.is_none());
+        drop(metadata);
+    }
+
+    #[test]
+    fn native_extension_limit_remains_a_denial_after_three_successful_extensions() {
+        let (mut core, _temp, _now) = fake_core_with_clock();
+        let state = CoordinatorState::default();
+        let token = fake_wallet_readout_mode(&mut core, &state, ShowMode::Accessible);
+        let deadline = state.snapshot(token).unwrap().deadline;
+        let core = Mutex::new(core);
+        for _ in 0..3 {
+            assert_eq!(
+                extend_callback(&core, &state, token, deadline, |_| ()),
+                Authorization::Allowed
+            );
+        }
+        assert_eq!(
+            extend_callback(&core, &state, token, deadline, |_| panic!("not extended")),
+            Authorization::Denied
+        );
+        assert_eq!(
+            core.lock()
+                .unwrap()
+                .app_status()
+                .reveal
+                .unwrap()
+                .extensions_left,
+            Some(0)
         );
     }
 
