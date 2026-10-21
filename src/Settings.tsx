@@ -1,7 +1,8 @@
 // Settings: Auto-lock, Backups, opening a Backup or Safety Copy, Change Master Password, help.
 
-import { useEffect, useId, useState, type FormEvent } from "react";
+import { useEffect, useId, useRef, useState, type FormEvent } from "react";
 import {
+  appStatus,
   changePassword,
   discardInspection,
   forgetBackupDestination,
@@ -18,22 +19,24 @@ import {
   type BackupWritten,
   type CloudProvider,
   type SafetyCopy,
+  type Settings as SettingsView,
   type VaultPreview,
 } from "./api";
-import { Choice, ErrorLine, Field, formatDate, Modal, NewPassword, SafetyCopiesNote, SecretInput, useAction, useSafetyCopies } from "./components";
+import { Choice, ErrorLine, Field, formatDate, Modal, NewPassword, PasswordModal, SafetyCopiesNote, SecretInput, useAction, useSafetyCopies } from "./components";
 import { strings as s } from "./strings";
 
 const MINUTES = [1, 2, 5, 10, 15, 30, 60].map((m) => [m, s.minutes(m)] as const);
 const CLIPBOARD_SECONDS = [30, 60].map((n) => [n, s.clipboardSeconds(n)] as const);
 
 export function Settings({ status, onKit, onOperationOutcome }: { status: AppStatus; onKit: (recoveryKey: string) => void; onOperationOutcome: (message: string) => void }) {
-  // Everything setSettings takes: each change is sent together with the rest.
-  const [chosen, setChosen] = useState({
-    idle_minutes: status.settings.idle_minutes,
-    lock_on_app_switch: status.settings.lock_on_app_switch,
-    clipboard_clear_seconds: status.settings.clipboard_clear_seconds ?? 30,
-    count_activity_anywhere: status.settings.count_activity_anywhere ?? false,
-  });
+  const [chosen, setChosen] = useState(() => lockChoices(status.settings));
+  const [pending, setPending] = useState<{ settings: typeof chosen; generation: number; text: string } | null>(null);
+  const [saving, setSaving] = useState(false);
+  const submitting = useRef(false);
+  const latest = useRef(status);
+  latest.current = status;
+  useEffect(() => setChosen(lockChoices(status.settings)), [status.settings.idle_minutes, status.settings.lock_on_app_switch, status.settings.clipboard_clear_seconds, status.settings.count_activity_anywhere]);
+  useEffect(() => setPending(null), [status.session_generation, status.phase]);
   const safety = useSafetyCopies();
   const { copies } = safety;
   const [flow, setFlow] = useState<"password" | "open" | SafetyCopy | null>(null);
@@ -44,21 +47,49 @@ export function Settings({ status, onKit, onOperationOutcome }: { status: AppSta
     safety.reload();
   };
 
-  const change = (next: Partial<typeof chosen>) => {
-    const merged = { ...chosen, ...next };
-    setChosen(merged);
-    run(() => setSettings(merged));
+  const save = async (settings: typeof chosen, password?: string, generation?: number) => {
+    if (submitting.current) return;
+    submitting.current = true;
+    setSaving(true);
+    try {
+      setChosen(lockChoices(await setSettings({ ...settings, master_password: password, session_generation: generation })));
+    } catch (error) {
+      const actual = await appStatus().catch(() => latest.current);
+      setChosen(lockChoices(actual.settings));
+      throw error;
+    } finally {
+      submitting.current = false;
+      setSaving(false);
+    }
   };
+  const change = (next: Partial<typeof chosen>) => {
+    if (submitting.current || pending) return;
+    const merged = { ...chosen, ...next };
+    const changes = [
+      merged.idle_minutes > chosen.idle_minutes ? s.autoLockChangeIdle(merged.idle_minutes) : "",
+      chosen.lock_on_app_switch && !merged.lock_on_app_switch ? s.autoLockChangeSwitch : "",
+      !chosen.count_activity_anywhere && merged.count_activity_anywhere ? s.autoLockChangeActivity : "",
+    ].filter(Boolean);
+    if (changes.length) setPending({ settings: merged, generation: status.session_generation, text: changes.join(" ") });
+    else run(() => save(merged));
+  };
+  const closeReauth = () => {
+    if (!submitting.current) {
+      setPending(null);
+    }
+  };
+  const disabled = saving || pending !== null;
 
   return (
     <section className="page stack">
       <section className="section">
         <h2>{s.autoLockTitle}</h2>
         <div className="card stack">
-          <Choice label={s.autoLockAfter} options={MINUTES} value={chosen.idle_minutes} onChange={(m) => change({ idle_minutes: m })} />
+          <Choice label={s.autoLockAfter} options={MINUTES} value={chosen.idle_minutes} disabled={disabled} onChange={(m) => change({ idle_minutes: m })} />
           <Switch
             label={s.lockOnSwitch}
             hint={s.lockOnSwitchHint}
+            disabled={disabled}
             checked={chosen.lock_on_app_switch}
             onChange={(on) => change({ lock_on_app_switch: on })}
           />
@@ -67,15 +98,18 @@ export function Settings({ status, onKit, onOperationOutcome }: { status: AppSta
             <Switch
               label={s.countActivityAnywhere}
               hint={s.countActivityAnywhereHint(chosen.lock_on_app_switch)}
+              disabled={disabled}
               checked={chosen.count_activity_anywhere}
               onChange={(on) => change({ count_activity_anywhere: on })}
             />
           )}
           <p className="hint">{status.lock_events_unavailable.length ? s.lockEventsDegraded : s.alwaysLocks}</p>
+          <p className="hint">{s.autoLockReauthLimit}</p>
           <div className="setting">
             <Choice
               label={s.clipboardClearAfter}
               options={CLIPBOARD_SECONDS}
+              disabled={disabled}
               value={chosen.clipboard_clear_seconds}
               onChange={(n) => change({ clipboard_clear_seconds: n })}
             />
@@ -142,6 +176,7 @@ export function Settings({ status, onKit, onOperationOutcome }: { status: AppSta
         ))}
       </details>
 
+      {pending && <PasswordModal title={s.autoLockConfirmTitle} text={pending.text} submitLabel={s.applyAutoLock} retryInMs={status.retry_in_ms} onSubmit={(password) => save(pending.settings, password, pending.generation)} onClose={closeReauth} />}
       {flow === "password" && <ChangePassword onKit={onKit} onClose={closeFlow} onOperationOutcome={onOperationOutcome} />}
       {flow === "open" && <ReplaceVault onClose={closeFlow} onOperationOutcome={onOperationOutcome} />}
       {typeof flow === "object" && flow && <ReplaceVault copy={flow} onClose={closeFlow} onOperationOutcome={onOperationOutcome} />}
@@ -149,8 +184,15 @@ export function Settings({ status, onKit, onOperationOutcome }: { status: AppSta
   );
 }
 
+const lockChoices = (settings: SettingsView) => ({
+  idle_minutes: settings.idle_minutes,
+  lock_on_app_switch: settings.lock_on_app_switch,
+  clipboard_clear_seconds: settings.clipboard_clear_seconds ?? 30,
+  count_activity_anywhere: settings.count_activity_anywhere ?? false,
+});
+
 /** A setting drawn as a row with a switch, and one line under it saying what it does. */
-function Switch(props: { label: string; hint: string; checked: boolean; onChange: (on: boolean) => void }) {
+function Switch(props: { label: string; hint: string; checked: boolean; disabled?: boolean; onChange: (on: boolean) => void }) {
   const hint = useId();
   return (
     <div className="setting">
@@ -160,6 +202,7 @@ function Switch(props: { label: string; hint: string; checked: boolean; onChange
         <input
           type="checkbox"
           {...{ switch: "" }}
+          disabled={props.disabled}
           checked={props.checked}
           aria-describedby={hint}
           onChange={(e) => props.onChange(e.target.checked)}

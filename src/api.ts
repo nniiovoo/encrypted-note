@@ -85,6 +85,9 @@ export interface Settings {
 /** What setSettings takes. The lock rule is always sent. Each of the two newer settings may be
  *  left out, which keeps the value it has. */
 export interface SettingsInput {
+  /** Required only when loosening Auto-lock; sent once, never an approval token. */
+  master_password?: string | undefined;
+  session_generation?: number | undefined;
   idle_minutes: number;
   lock_on_app_switch: boolean;
   /** 30 or 60; anything else becomes 30. */
@@ -92,7 +95,16 @@ export interface SettingsInput {
   count_activity_anywhere?: boolean;
 }
 
+/** Visible metadata captured with a successful clipboard write. Never the copied value. */
+export interface ClipboardSource {
+  title: string;
+  kind: Kind;
+  field: string;
+}
+
 export interface AppStatus {
+  /** Non-secret stale-prompt guard: a lock followed by another unlock changes it. */
+  session_generation: number;
   /** Monotonic server sequence; late polls and events cannot roll the screen back. */
   revision: number;
   phase: Phase;
@@ -111,6 +123,8 @@ export interface AppStatus {
    *  clear that is being tried again has more). A lock doesn't reset it. Rust always sends
    *  it. */
   copies?: number;
+  /** Gone on lock, Sharing Guard or clipboard clear. */
+  clipboard_source?: ClipboardSource | null;
   /** The currently shown Hidden Field, if any (screens hide anything else). */
   reveal: {
     note_id: string;
@@ -353,7 +367,7 @@ export const restoreSafetyCopy = () => invoke<void>("restore_safety_copy");
  *  to show, and phase -> confirm_recovery_kit. */
 export const changePassword = (currentPassword: string, newPassword: string, rotate: boolean) =>
   invoke<{ recovery_key: string | null }>("change_password", { currentPassword, newPassword, rotate });
-export const setSettings = (settings: SettingsInput) => invoke<void>("set_settings", { settings });
+export const setSettings = (settings: SettingsInput) => invoke<Settings>("set_settings", { settings });
 export const markSeedExplainerSeen = () => invoke<void>("mark_seed_explainer_seen");
 /** The folder this computer's Vault file and Safety Copies are in, as text to show (built like
  *  PickedFile.display_path). Not a secret; works in every phase. */

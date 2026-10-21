@@ -12,6 +12,8 @@ Cmd on Mac, Ctrl on Windows.
 | Cmd/Ctrl+S or Cmd/Ctrl+Enter | Save |
 | Cmd/Ctrl+Shift+C | Copy the open Note's first Hidden Field |
 
+Copy feedback names the Note and field that reached the clipboard. The shortcut still targets the open Note while search highlights another Note. Lock and Sharing Guard remove the source title from feedback.
+
 ## If the app won't open
 
 Your Notes are still in the Vault file, and the Emergency Reader reads it without the app.
