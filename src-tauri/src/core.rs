@@ -1030,6 +1030,9 @@ impl AppCore {
             self.open()?.doc.reveal(id, field)
         }
         .map_err(notes_error)?;
+        self.session
+            .admit_hidden_field(id, field, self.clock.now_ms())
+            .map_err(reveal_refused)?;
         self.copy_out(&value, wallet_kind)
     }
 
@@ -1075,6 +1078,9 @@ impl AppCore {
         if chosen.is_empty() {
             return Err(err("not_found", MSG_EMPTY_LINE));
         }
+        self.session
+            .admit_hidden_field(id, field, self.clock.now_ms())
+            .map_err(reveal_refused)?;
         self.copy_out(chosen, false)
     }
 
@@ -1099,6 +1105,9 @@ impl AppCore {
             .reveal(id, notes::field::KEY)
             .map_err(notes_error)?;
         let line = env_line(name, &key)?;
+        self.session
+            .admit_hidden_field(id, notes::field::KEY, self.clock.now_ms())
+            .map_err(reveal_refused)?;
         self.copy_out(&line, false)
     }
 
@@ -2028,7 +2037,7 @@ fn reveal_refused(refused: RevealRefused) -> ApiError {
             ApiError {
                 code: "too_many",
                 message: format!(
-                    "Too many different values were shown in a short time. Wait {seconds} {unit}, then try again."
+                    "Too many different values were shown or copied in a short time. Wait {seconds} {unit}, then try again."
                 ),
             }
         }
