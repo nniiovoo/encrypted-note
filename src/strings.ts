@@ -317,6 +317,12 @@ export const strings = {
 
   // Settings
   autoLockTitle: "Auto-lock",
+  autoLockConfirmTitle: "Confirm Auto-lock change",
+  applyAutoLock: "Apply change",
+  autoLockChangeIdle: (minutes: number) => `Lock after ${minutes} minutes without use.`,
+  autoLockChangeSwitch: "Stop locking when you switch to another app.",
+  autoLockChangeActivity: "Count activity anywhere on this computer to keep the app Unlocked.",
+  autoLockReauthLimit: "Loosening Auto-lock needs your Master Password again. This helps prevent accidental or unattended changes. A password typed in this window cannot protect against software that has compromised the window.",
   autoLockAfter: "Lock after this long without use",
   minutes: (m: number) => `${m} min`,
   lockOnSwitch: "Lock when I switch to another app",
