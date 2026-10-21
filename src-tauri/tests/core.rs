@@ -4192,6 +4192,7 @@ fn auto_lock_reauthentication_keeps_the_existing_wrong_password_delays() {
     unlocked(&mut app);
     let generation = app.core.app_status().session_generation;
     for _ in 0..5 {
+        app.advance(app.core.app_status().retry_in_ms.unwrap_or(0));
         let request = settings(
             json!({"idle_minutes": 10, "lock_on_app_switch": false, "master_password": WRONG_PASSWORD, "session_generation": generation}),
         );
@@ -4200,6 +4201,7 @@ fn auto_lock_reauthentication_keeps_the_existing_wrong_password_delays() {
             "wrong_credential"
         );
     }
+    assert_eq!(app.core.app_status().failed_attempts, 5);
     let request = settings(
         json!({"idle_minutes": 10, "lock_on_app_switch": false, "master_password": PASSWORD, "session_generation": generation}),
     );
