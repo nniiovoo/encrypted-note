@@ -1664,6 +1664,7 @@ fn status_has_the_shape_api_ts_expects() {
         "lock_in_ms",
         "clipboard_clear_in_ms",
         "copies",
+        "clipboard_source",
         "reveal",
         "failed_attempts",
         "retry_in_ms",
@@ -1696,6 +1697,7 @@ fn status_has_the_shape_api_ts_expects() {
     assert_eq!(status["sharing_guard"], json!({"up": false, "apps": []}));
     assert_eq!(status["revision"], 0);
     assert_eq!(status["copies"], 0);
+    assert_eq!(status["clipboard_source"], Value::Null);
     assert_eq!(status["purge_trash_failed"], false);
     assert_eq!(status["settings_unreadable"], false);
 }
@@ -2105,7 +2107,7 @@ fn a_ninth_different_hidden_field_within_a_minute_is_not_shown() {
     );
     // One already shown can be shown again, and so can a new one once the minute has passed.
     app.core.show_field(&ids[0], "password").unwrap();
-    app.advance(52_000);
+    app.advance(53_000);
     app.core.activity();
     assert_eq!(
         app.core.show_field(&ids[8], "password").unwrap().as_str(),
@@ -2843,6 +2845,252 @@ fn clipboard_changes(app: &App) -> u64 {
     app.board.lock().unwrap().change_count
 }
 
+fn disclosure_budget_notes(app: &mut App) -> Vec<String> {
+    (0..9)
+        .map(|i| {
+            app.core
+                .create_note(
+                    input(
+                        "api_key",
+                        &format!("Fake budget {i}"),
+                        json!({"service": format!("fake-service-{i}"), "env_var": format!("FAKE_KEY_{i}")}),
+                        json!({"key": format!("fake-key-{i}"), "secret": format!("fake-secret-{i}\nfake-second-line-{i}")}),
+                    ),
+                    None,
+                )
+                .unwrap()
+        })
+        .collect()
+}
+
+#[test]
+fn show_and_all_hidden_copy_paths_share_one_distinct_field_budget() {
+    let mut app = App::new();
+    unlocked(&mut app);
+    let ids = disclosure_budget_notes(&mut app);
+    // Two fields of one Note are distinct; different copy formats of one field are not.
+    let fields = [
+        (&ids[0], "key"),
+        (&ids[0], "secret"),
+        (&ids[1], "key"),
+        (&ids[2], "key"),
+        (&ids[3], "key"),
+        (&ids[4], "key"),
+        (&ids[5], "key"),
+        (&ids[6], "key"),
+    ];
+    for (i, (id, field)) in fields.into_iter().enumerate() {
+        match i % 4 {
+            0 => {
+                app.core.show_field(id, field).unwrap();
+                app.core.hide_field();
+            }
+            1 => app.core.copy_field(id, field, None).unwrap(),
+            2 => app.core.copy_field_line(id, field, 0).unwrap(),
+            _ => app.core.copy_field_env(id).unwrap(),
+        }
+        assert_eq!(app.core.app_status().reveal, None);
+    }
+    // Repeated use works at the limit across every representation of the same field.
+    app.core.copy_field(&ids[0], "key", None).unwrap();
+    app.core.copy_field_line(&ids[0], "key", 0).unwrap();
+    app.core.copy_field_env(&ids[0]).unwrap();
+    app.core.show_field(&ids[0], "key").unwrap();
+    let shown = app.core.app_status().reveal;
+    app.core.copy_field(&ids[0], "secret", None).unwrap();
+    app.core.copy_field_line(&ids[0], "secret", 1).unwrap();
+    assert_eq!(app.core.app_status().reveal, shown);
+    app.core.hide_field();
+    // Visible metadata neither uses a slot nor is blocked by the Hidden Field budget.
+    for id in &ids {
+        app.core.copy_visible_field(id, "service").unwrap();
+    }
+    let before = clipboard_changes(&app);
+    let copies = app.core.app_status().copies;
+    assert_eq!(code(app.core.show_field(&ids[7], "key")), "too_many");
+    assert_eq!(code(app.core.copy_field(&ids[7], "key", None)), "too_many");
+    assert_eq!(
+        code(app.core.copy_field_line(&ids[7], "key", 0)),
+        "too_many"
+    );
+    assert_eq!(code(app.core.copy_field_env(&ids[7])), "too_many");
+    assert_eq!(clipboard_changes(&app), before);
+    assert_eq!(app.core.app_status().copies, copies);
+    assert_eq!(app.core.app_status().reveal, None);
+    // The exact expiry boundary frees a slot, and copying still starts no reveal.
+    app.advance(session::REVEAL_WINDOW_MS - 1);
+    assert_eq!(code(app.core.copy_field_env(&ids[7])), "too_many");
+    app.advance(1);
+    app.core.copy_field_env(&ids[7]).unwrap();
+    assert_eq!(app.clipboard().as_deref(), Some("FAKE_KEY_7=fake-key-7"));
+    assert_eq!(app.core.app_status().reveal, None);
+    assert_eq!(app.core.app_status().clipboard_clear_in_ms, Some(30_000));
+    app.advance(30_000);
+    app.core.tick();
+    assert!(nothing_copied(&app));
+}
+
+#[test]
+fn invalid_or_unauthorized_disclosures_do_not_use_the_hidden_field_budget() {
+    let mut app = App::new();
+    unlocked(&mut app);
+    let ids = disclosure_budget_notes(&mut app);
+    let n = sample_notes(&mut app);
+    for id in &ids {
+        assert_eq!(code(app.core.show_field(id, "service")), "invalid_input");
+        assert_eq!(
+            code(app.core.copy_field(id, "password", None)),
+            "invalid_input"
+        );
+        assert_eq!(
+            code(app.core.copy_field_line(id, "key", usize::MAX)),
+            "not_found"
+        );
+    }
+    assert_eq!(
+        code(app.core.copy_field(&n.api, "secret", None)),
+        "not_found"
+    );
+    assert_eq!(code(app.core.show_field(&n.api, "secret")), "not_found");
+    assert_eq!(
+        code(app.core.copy_field_line(&n.text, "body", 2)),
+        "not_found"
+    );
+    assert_eq!(
+        code(app.core.copy_field(&"0".repeat(32), "key", None)),
+        "not_found"
+    );
+    let unquotable = app
+        .core
+        .create_note(
+            input(
+                "api_key",
+                "Fake unquotable",
+                json!({"env_var": "FAKE_KEY"}),
+                json!({"key": "fake'key"}),
+            ),
+            None,
+        )
+        .unwrap();
+    assert_eq!(code(app.core.copy_field_env(&unquotable)), "invalid_input");
+    let unnamed = app
+        .core
+        .create_note(
+            input(
+                "api_key",
+                "Fake unnamed",
+                json!({}),
+                json!({"key": "fake-key"}),
+            ),
+            None,
+        )
+        .unwrap();
+    assert_eq!(code(app.core.copy_field_env(&unnamed)), "invalid_input");
+    assert_eq!(
+        code(app.core.copy_field(&n.pk, "key", None)),
+        "invalid_input"
+    );
+    assert_eq!(
+        code(app.core.copy_field(&n.pk, "key", Some(pw(WRONG_PASSWORD)))),
+        "wrong_credential"
+    );
+    assert_eq!(
+        code(
+            app.core
+                .show_wallet_field(&n.pk, "key", pw(WRONG_PASSWORD), ShowMode::Held)
+        ),
+        "wrong_credential"
+    );
+    assert_eq!(
+        code(
+            app.core
+                .show_and_copy_wallet_field(&n.pk, "key", pw(WRONG_PASSWORD))
+        ),
+        "wrong_credential"
+    );
+    // Lock and Sharing Guard refusals also leave the allowance untouched.
+    app.core.lock();
+    assert_eq!(code(app.core.show_field(&ids[0], "key")), "locked");
+    assert_eq!(code(app.core.copy_field(&ids[0], "key", None)), "locked");
+    assert_eq!(code(app.core.copy_field_line(&ids[0], "key", 0)), "locked");
+    assert_eq!(code(app.core.copy_field_env(&ids[0])), "locked");
+    app.advance(1_000);
+    app.core.unlock(password(PASSWORD)).unwrap();
+    app.core.guard_update(&zoom());
+    assert_eq!(
+        code(app.core.show_field(&ids[0], "key")),
+        "sharing_guard_up"
+    );
+    assert_eq!(
+        code(app.core.copy_field(&ids[0], "key", None)),
+        "sharing_guard_up"
+    );
+    assert_eq!(
+        code(app.core.copy_field_line(&ids[0], "key", 0)),
+        "sharing_guard_up"
+    );
+    assert_eq!(code(app.core.copy_field_env(&ids[0])), "sharing_guard_up");
+    app.core.guard_update(&[]);
+    assert!(nothing_copied(&app));
+    assert_eq!(app.core.app_status().reveal, None);
+    // All eight real admissions are still available after the rejected requests.
+    for id in &ids[..8] {
+        app.core.copy_field(id, "key", None).unwrap();
+    }
+    assert_eq!(code(app.core.copy_field(&ids[8], "key", None)), "too_many");
+    app.core.lock();
+    app.core.unlock(password(PASSWORD)).unwrap();
+    assert_eq!(code(app.core.copy_field(&ids[8], "key", None)), "too_many");
+}
+
+#[test]
+fn admitted_clipboard_failures_use_slots_but_never_show_or_count_a_copy() {
+    let mut app = App::new();
+    unlocked(&mut app);
+    let ids = disclosure_budget_notes(&mut app);
+    let n = sample_notes(&mut app);
+    // Each path fails twice on the same field: five distinct admissions, not ten.
+    app.board.lock().unwrap().write_failures = 10;
+    for _ in 0..2 {
+        assert_eq!(code(app.core.copy_field(&ids[0], "key", None)), "io");
+        assert_eq!(code(app.core.copy_field_line(&ids[1], "key", 0)), "io");
+        assert_eq!(code(app.core.copy_field_env(&ids[2])), "io");
+        assert_eq!(
+            code(app.core.copy_field(&n.pk, "key", Some(pw(PASSWORD)))),
+            "io"
+        );
+        assert_eq!(
+            code(
+                app.core
+                    .show_and_copy_wallet_field(&n.seed, "words", pw(PASSWORD))
+            ),
+            "io"
+        );
+        assert_eq!(app.core.app_status().reveal, None);
+        assert_eq!(app.core.app_status().copies, 0);
+        assert!(nothing_copied(&app));
+    }
+    for id in &ids[3..6] {
+        app.core.show_field(id, "key").unwrap();
+        app.core.hide_field();
+    }
+    let before = clipboard_changes(&app);
+    assert_eq!(code(app.core.copy_field_env(&ids[6])), "too_many");
+    assert_eq!(clipboard_changes(&app), before);
+    // A retry of an admitted field remains allowed, but still needs Wallet authorization.
+    assert_eq!(
+        code(app.core.copy_field(&n.pk, "key", None)),
+        "invalid_input"
+    );
+    app.core
+        .copy_field(&n.pk, "key", Some(pw(PASSWORD)))
+        .unwrap();
+    assert_eq!(app.core.app_status().copies, 1);
+    assert_eq!(app.core.app_status().reveal, None);
+    assert_eq!(app.core.app_status().clipboard_clear_in_ms, Some(30_000));
+    assert_eq!(code(app.core.show_field(&ids[6], "key")), "too_many");
+}
+
 #[test]
 fn a_visible_field_is_copied_and_cleared_like_a_hidden_one() {
     let mut app = App::new();
@@ -3068,6 +3316,9 @@ fn an_api_key_is_copied_as_a_name_equals_value_line() {
     app.advance(30_000);
     app.core.tick();
     assert!(nothing_copied(&app));
+
+    // The next copies belong to a new disclosure window.
+    app.advance(30_000);
 
     // A key with a single quote or a line break can't be written on one quoted line.
     for key in [
@@ -4043,6 +4294,96 @@ fn a_private_key_is_checked_under_whatever_chain_name_the_note_has() {
         code(app.core.check_private_key("Fake Chain", not_a_key)),
         "locked"
     );
+}
+
+#[test]
+fn copy_feedback_names_only_the_source_metadata_of_each_successful_write() {
+    let mut app = App::new();
+    unlocked(&mut app);
+    let n = sample_notes(&mut app);
+    let source = |app: &App| serde_json::to_value(app.core.app_status().clipboard_source).unwrap();
+    let expected = |title: &str, kind: &str, field: &str| json!({"title": title, "kind": kind, "field": field});
+
+    app.core.copy_field(&n.login, "password", None).unwrap();
+    assert_eq!(source(&app), expected("Fake login", "login", "password"));
+    app.core.copy_visible_field(&n.pk, "address").unwrap();
+    assert_eq!(
+        source(&app),
+        expected("Fake private key", "private_key", "address")
+    );
+    app.core.copy_field_line(&n.text, "body", 0).unwrap();
+    assert_eq!(source(&app), expected("Fake text", "text", "body"));
+    app.core.copy_field_env(&n.api).unwrap();
+    assert_eq!(source(&app), expected("Fake API key", "api_key", "key"));
+    let status = serde_json::to_string(&app.core.app_status()).unwrap();
+    for value in [
+        "fake-api-key-0000",
+        "FAKE_DEPLOY_KEY",
+        "fake-login-pass",
+        BODY,
+    ] {
+        assert!(!status.contains(value));
+    }
+    app.core
+        .copy_field(&n.seed, "passphrase", Some(pw(PASSWORD)))
+        .unwrap();
+    assert_eq!(
+        source(&app),
+        expected("Fake seed", "seed_phrase", "passphrase")
+    );
+    drop(
+        app.core
+            .show_and_copy_wallet_field(&n.pk, "key", pw(PASSWORD))
+            .unwrap(),
+    );
+    assert_eq!(
+        source(&app),
+        expected("Fake private key", "private_key", "key")
+    );
+
+    // Failed writes and validation failures cannot announce a new copy or relabel the last one.
+    let before = (app.core.app_status().copies, source(&app));
+    app.board.lock().unwrap().write_failures = 1;
+    assert_eq!(code(app.core.copy_field(&n.login, "password", None)), "io");
+    assert_eq!(code(app.core.copy_field_env(&n.login)), "invalid_input");
+    assert_eq!((app.core.app_status().copies, source(&app)), before);
+
+    // Back-to-back copies describe the last completed write, never the Note currently open.
+    app.core.copy_field(&n.login, "password", None).unwrap();
+    app.core.copy_field_env(&n.api).unwrap();
+    app.core.get_note(&n.login).unwrap();
+    assert_eq!(source(&app), expected("Fake API key", "api_key", "key"));
+}
+
+#[test]
+fn copy_feedback_forgets_titles_on_clear_sharing_guard_and_every_lock() {
+    let mut app = App::new();
+    unlocked(&mut app);
+    let n = sample_notes(&mut app);
+    app.core.copy_field(&n.login, "password", None).unwrap();
+    app.advance(30_000);
+    app.core.tick();
+    assert_eq!(app.core.app_status().clipboard_source, None);
+
+    app.core.copy_field(&n.login, "password", None).unwrap();
+    app.core.guard_update(&zoom());
+    assert_eq!(app.core.app_status().clipboard_source, None);
+    app.core.dismiss_sharing_guard();
+    assert_eq!(app.core.app_status().clipboard_source, None);
+    app.core.guard_update(&[]);
+
+    set_lock_on_app_switch(&mut app);
+    app.core.copy_field(&n.login, "password", None).unwrap();
+    app.core.os_event(OsEvent::FocusLost);
+    assert_eq!(app.phase(), "locked");
+    // App-switch lock preserves the paste timer, but never its source title.
+    assert!(app.core.app_status().clipboard_clear_in_ms.is_some());
+    assert_eq!(app.core.app_status().clipboard_source, None);
+    app.core.unlock(password(PASSWORD)).unwrap();
+    assert_eq!(app.core.app_status().clipboard_source, None);
+    app.core.copy_field(&n.login, "password", None).unwrap();
+    app.core.lock();
+    assert_eq!(app.core.app_status().clipboard_source, None);
 }
 
 #[test]
