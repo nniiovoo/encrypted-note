@@ -16,6 +16,7 @@ mod kat;
 mod keys;
 mod limits;
 mod padding;
+mod quick_unlock;
 mod recovery_key;
 mod reopen;
 mod roundtrip;
