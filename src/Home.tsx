@@ -642,8 +642,7 @@ function Trash(props: {
   const [confirm, setConfirm] = useState<string | null>(null);
   // The same, once confirmed, when a Seed Phrase or Private Key would go: that needs the Master
   // Password, like every other change to one.
-  const [askPassword, setAskPassword] = useState<string | null>(null);
-  const holdsWallet = (id: string) => !!notes?.some((n) => (!id || n.id === id) && isWalletKind(n.kind));
+  const [askPassword, setAskPassword] = useState<{ id: string; titles: string[] } | null>(null);
   const { error, run } = useAction();
   // The keyboard follows into a Note opened from a row, not into one restored after a lock.
   const back = useRef<HTMLButtonElement>(null);
@@ -769,7 +768,8 @@ function Trash(props: {
           confirmLabel={confirm ? s.deleteForever : s.emptyTrash}
           onConfirm={() => {
             setConfirm(null);
-            if (holdsWallet(confirm)) setAskPassword(confirm);
+            const removing = notes?.filter((n) => !confirm || n.id === confirm) ?? [];
+            if (removing.some((n) => isWalletKind(n.kind))) setAskPassword({ id: confirm, titles: removing.map((n) => n.title) });
             else act(() => (confirm ? deleteForever(confirm) : emptyTrash()), confirm);
           }}
           onClose={() => setConfirm(null)}
@@ -777,13 +777,13 @@ function Trash(props: {
       )}
       {askPassword !== null && (
         <PasswordModal
-          title={askPassword ? s.deleteForever : s.emptyTrash}
-          text={askPassword ? s.walletDeleteText : s.walletEmptyTrashText}
-          submitLabel={askPassword ? s.deleteForever : s.emptyTrash}
+          title={askPassword.id ? s.noteAction(s.deleteForever, askPassword.titles[0]!) : s.emptyTrash}
+          text={askPassword.id ? s.walletDeleteText : s.walletEmptyTrashText(askPassword.titles)}
+          submitLabel={askPassword.id ? s.deleteForever : s.emptyTrash}
           onSubmit={async (password) => {
-            await (askPassword ? deleteForever(askPassword, password) : emptyTrash(password));
+            await (askPassword.id ? deleteForever(askPassword.id, password) : emptyTrash(password));
             props.onChanged();
-            if (askPassword && askPassword === openId) leave(true);
+            if (askPassword.id && askPassword.id === openId) leave(true);
           }}
           onClose={() => setAskPassword(null)}
           retryInMs={props.status.retry_in_ms}
