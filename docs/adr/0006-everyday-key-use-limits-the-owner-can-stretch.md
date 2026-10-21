@@ -17,11 +17,31 @@ What changed:
 ## Consequences
 
 - A 60-second clipboard and an extended reveal are longer exposures. Both happen only after an explicit choice by the owner, and the defaults are the old values.
-- "Count activity anywhere" means someone else using the computer keeps the app **Unlocked** for up to 60 minutes after the owner last touched it. The Settings text says so, and the status line shows when it is on. Like the idle time itself, it can be switched from the WebView without the **Master Password**; that is an accepted limit of the current design, not something this option fixes.
+- "Count activity anywhere" means someone else using the computer keeps the app **Unlocked** for up to 60 minutes after the owner last touched it. The Settings text says so, and the status line shows when it is on. The original decision allowed this and the idle rule to change from the WebView without the **Master Password**. The owner superseded that authorization policy on 21 October 2026, as recorded below; the implementation is tracked separately.
 - While the shield is up, a typed but unsaved **Login** password, **API Key** or **Text** stays in WebView memory. Before this it was discarded the moment the shield appeared. Nothing is drawn or listening behind the shield.
 - A **Vault** that uses any schema-2 part opens only in a current app and a current **Emergency Reader**. Builds from before 12 October 2026 call it damaged. A **Vault** that uses none of them is still written as schema 1.
 - Anything typed into a visible part is not protected like a **Hidden Field**. The Editor warns when a visible box holds something shaped like a key or a **Seed Phrase**.
 - The management address of an **API Key** is text to copy. The app never opens it (ADR-0001).
+
+## Auto-lock authorization: owner decision, 21 October 2026
+
+The owner approved requiring the **Master Password** again before loosening **Auto-lock**. This supersedes the earlier acceptance of unauthenticated changes to these rules. This documentation records the policy; it does not change the running app. [Issue #30](https://github.com/nniiovoo/encrypted-note/issues/30) covers Rust enforcement, the Settings caller and transition tests. Until that implementation ships, these settings still change without reauthentication.
+
+Compare the current rule with the complete effective proposed rule, after existing normalization, omitted-value defaults and platform support checks:
+
+| Transition | Authorization |
+| --- | --- |
+| Increase the idle minutes | Master Password again |
+| Turn off "Lock when I switch to another app" | Master Password again |
+| Turn on "Count activity anywhere" | Master Password again |
+| Decrease the idle minutes, turn on app-switch locking, or turn off activity anywhere | No reauthentication |
+| Leave every Auto-lock rule unchanged | No reauthentication |
+
+A request that loosens any rule requires reauthentication even if it tightens another. An unsupported activity-anywhere request stays off. A missing or wrong password, cancellation, a lock while the prompt is open, or a failed save must not leave a looser rule active. Every caller goes through the same Rust check; a UI-only prompt is insufficient.
+
+The clipboard choice remains 30 or 60 seconds under its existing policy, and a **Wallet Kind** copy remains 30 seconds. Clipboard time is not an Auto-lock rule and is outside this decision. Sleep, screen lock and user switch still lock at once, and the activity-anywhere 60-minute cap stays fixed.
+
+Re-entering a password in the same WebView helps prevent an accidental or unattended settings change. It is not independent protection from compromised renderer code, which could observe or replay that entry. Moving password entry into Rust-owned native UI remains [issue #13](https://github.com/nniiovoo/encrypted-note/issues/13); this decision does not claim that trust boundary is already fixed.
 
 ## Considered Options
 
