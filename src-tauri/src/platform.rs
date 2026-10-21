@@ -374,6 +374,88 @@ mod mac {
     }
 }
 
+// Only a complete scan may replace what the Sharing Guard knew; discard partial results.
+#[cfg(any(windows, test))]
+fn collect_running_apps(
+    mut next: impl FnMut(bool) -> Result<Option<guard::RunningApp>, ()>,
+) -> Option<Vec<guard::RunningApp>> {
+    let mut apps = Vec::new();
+    while let Some(app) = next(apps.is_empty()).ok()? {
+        apps.push(app);
+    }
+    Some(apps)
+}
+
+#[cfg(test)]
+mod process_scan_tests {
+    use super::collect_running_apps;
+    use guard::{GuardState, Platform, RunningApp};
+
+    fn app(exe: &str) -> RunningApp {
+        RunningApp {
+            bundle_id: None,
+            exe_name: Some(exe.to_owned()),
+        }
+    }
+
+    #[test]
+    fn first_entry_failure_is_not_an_empty_scan() {
+        assert_eq!(
+            collect_running_apps(|first| {
+                assert!(first);
+                Err(())
+            }),
+            None
+        );
+    }
+
+    #[test]
+    fn mid_list_failure_discards_partial_results() {
+        let mut calls = 0;
+        assert_eq!(
+            collect_running_apps(|first| {
+                calls += 1;
+                assert_eq!(first, calls == 1);
+                if first {
+                    Ok(Some(app("FakeEditor.exe")))
+                } else {
+                    Err(())
+                }
+            }),
+            None
+        );
+        assert_eq!(calls, 2);
+    }
+
+    #[test]
+    fn a_complete_empty_scan_is_successful() {
+        assert_eq!(
+            collect_running_apps(|first| {
+                assert!(first);
+                Ok(None)
+            }),
+            Some(Vec::new())
+        );
+    }
+
+    #[test]
+    fn guard_stays_up_on_failure_and_recovers_after_a_complete_scan() {
+        let mut guard = GuardState::new();
+        assert!(guard.update(&["Zoom"]));
+        let mut steps = [Ok(Some(app("FakeEditor.exe"))), Err(())].into_iter();
+        let incomplete = collect_running_apps(|_| steps.next().unwrap());
+        assert!(incomplete.is_none());
+        // The existing background caller updates the guard only when the scan is Some.
+        if let Some(apps) = incomplete {
+            guard.update(&guard::detect(Platform::Windows, &apps));
+        }
+        assert!(!guard.shield_apps().is_empty());
+        let mut steps = [Ok(Some(app("FakeEditor.exe"))), Ok(None)].into_iter();
+        let complete = collect_running_apps(|_| steps.next().unwrap()).unwrap();
+        assert!(!guard.update(&guard::detect(Platform::Windows, &complete)));
+    }
+}
+
 #[cfg(windows)]
 mod win {
     use std::path::{Path, PathBuf};
@@ -384,7 +466,8 @@ mod win {
     use session::OsEvent;
     use tauri::{AppHandle, Manager, Runtime, WebviewWindow};
     use windows::Win32::Foundation::{
-        COLORREF, CloseHandle, GlobalFree, HANDLE, HWND, LPARAM, LRESULT, WPARAM,
+        COLORREF, CloseHandle, ERROR_NO_MORE_FILES, GlobalFree, HANDLE, HWND, LPARAM, LRESULT,
+        WPARAM,
     };
     use windows::Win32::System::DataExchange::{
         CloseClipboard, EmptyClipboard, GetClipboardOwner, GetClipboardSequenceNumber,
@@ -455,7 +538,6 @@ mod win {
     /// could not be read: that says nothing about what is running, so the Sharing Guard keeps
     /// what it knew.
     pub fn running_apps() -> Option<Vec<guard::RunningApp>> {
-        let mut apps = Vec::new();
         // SAFETY: plain call with no pointers; the snapshot handle is closed below.
         let Ok(snapshot) = (unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }) else {
             return None;
@@ -464,22 +546,31 @@ mod win {
             dwSize: size_of::<PROCESSENTRY32W>() as u32,
             ..Default::default()
         };
-        // SAFETY: `snapshot` is the live snapshot handle and `entry` a writable PROCESSENTRY32W
-        // with `dwSize` set, as Process32FirstW requires.
-        let mut more = unsafe { Process32FirstW(snapshot, &mut entry) }.is_ok();
-        while more {
-            let name = &entry.szExeFile;
-            let len = name.iter().position(|&c| c == 0).unwrap_or(name.len());
-            apps.push(guard::RunningApp {
-                bundle_id: None,
-                exe_name: Some(String::from_utf16_lossy(&name[..len])),
-            });
-            // SAFETY: as for Process32FirstW above.
-            more = unsafe { Process32NextW(snapshot, &mut entry) }.is_ok();
-        }
-        // SAFETY: `snapshot` is our handle, closed exactly once.
+        let apps = super::collect_running_apps(|first| {
+            // SAFETY: `snapshot` is live and `entry` is writable with `dwSize` set.
+            let result = unsafe {
+                if first {
+                    Process32FirstW(snapshot, &mut entry)
+                } else {
+                    Process32NextW(snapshot, &mut entry)
+                }
+            };
+            match result {
+                Ok(()) => {
+                    let name = &entry.szExeFile;
+                    let len = name.iter().position(|&c| c == 0).unwrap_or(name.len());
+                    Ok(Some(guard::RunningApp {
+                        bundle_id: None,
+                        exe_name: Some(String::from_utf16_lossy(&name[..len])),
+                    }))
+                }
+                Err(error) if error.code() == ERROR_NO_MORE_FILES.to_hresult() => Ok(None),
+                Err(_) => Err(()),
+            }
+        });
+        // SAFETY: `snapshot` is our handle, closed exactly once, also after enumeration errors.
         let _ = unsafe { CloseHandle(snapshot) };
-        Some(apps)
+        apps
     }
 
     /// Not done on Windows yet: a copy left on the clipboard by a run that crashed stays until
