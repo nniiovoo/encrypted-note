@@ -55,7 +55,7 @@ _Avoid_: emergency kit, backup sheet
 ### Working with AI agents
 
 **Agent Key**:
-A separate credential the owner creates at a service only for AI agent work, with narrow provider-enforced permissions, expiry, revocation and hard spending/usage caps. It is never a copy of an owner's existing key and never enters the **Vault**. This boundary is approved; no provider or pilot is selected ([ADR-0007](docs/adr/0007-agents-use-separate-restricted-keys.md)).
+A separate credential the owner creates at a service only for AI agent work, with narrow provider-enforced permissions, expiry, revocation and hard spending/usage caps. It is never a copy of an owner's existing key and never enters the **Vault**. This boundary is approved. The selected first task is OpenAI text generation with one fixed model through a separate local stdio companion; protected custody, provider controls and any real-key pilot remain unverified ([ADR-0007](docs/adr/0007-agents-use-separate-restricted-keys.md), [ADR-0008](docs/adr/0008-agent-gateway-awaits-a-concrete-api.md)).
 _Avoid_: sharing an owner key, agent access to the Vault
 
 ### Screen privacy
