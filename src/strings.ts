@@ -156,6 +156,7 @@ export const strings = {
         ? `${plural(past, "API Key is past its expiry date", "API Keys are past their expiry date")}.`
         : `${plural(soon, "API Key expires", "API Keys expire")} within ${days} days.`,
   showApiKeys: "Show API Keys",
+  showAllApiKeys: "Show all API Keys",
   captureOn: (mac: boolean) => (mac ? "Screen-capture protection: on (best-effort on Mac)" : "Screen-capture protection: on"),
   captureOff: "Screen-capture protection is off. Avoid sharing your screen while this app is open.",
   captureUnknown: "Screen-capture protection: can't check on this computer",
