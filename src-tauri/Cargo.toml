@@ -50,10 +50,13 @@ objc2-foundation = { version = "=0.3.2", default-features = false, features = [
     "std",
     "block2",
     "NSArray",
+    "NSGeometry",
     "NSData",
     "NSDistributedNotificationCenter",
     "NSNotification",
     "NSOperation",
+    "NSRunLoop",
+    "NSObjCRuntime",
     "NSString",
 ] }
 objc2-core-foundation = { version = "=0.3.2", default-features = false, features = [
@@ -70,6 +73,20 @@ objc2-core-graphics = { version = "=0.3.2", default-features = false, features =
 objc2-app-kit = { version = "=0.3.2", default-features = false, features = [
     "std",
     "NSApplication",
+    "NSButtonCell",
+    "NSFontDescriptor",
+    "objc2-core-foundation",
+    "NSFont",
+    "NSColor",
+    "NSText",
+    "NSControl",
+    "NSButton",
+    "NSSecureTextField",
+    "NSTextField",
+    "NSView",
+    "NSScrollView",
+    "NSClipView",
+    "NSTextView",
     "NSPasteboard",
     "NSResponder",
     "NSRunningApplication",
@@ -83,6 +100,9 @@ objc2-app-kit = { version = "=0.3.2", default-features = false, features = [
 [target.'cfg(windows)'.dependencies]
 windows = { version = "=0.62.2", default-features = false, features = [
     "Win32_Foundation",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Controls",
+    "Win32_System_Threading",
     "Win32_System_DataExchange",
     "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_Memory",
@@ -97,8 +117,7 @@ windows = { version = "=0.62.2", default-features = false, features = [
 vault-format = { workspace = true, features = ["insecure-test-params"] }
 tempfile.workspace = true
 
-# Workspace lints, except that `unsafe_code` is `deny` rather than `forbid` so that exactly three
-# modules (platform.rs, hardening.rs, wipe_on_free.rs) can opt in with `#[allow(unsafe_code)]`.
+# Workspace lints, except that reviewed OS/allocator adapters can opt in to unsafe FFI.
 [lints.rust]
 unsafe_code = "deny"
 

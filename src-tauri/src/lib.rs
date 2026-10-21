@@ -20,6 +20,8 @@ pub mod core;
 #[allow(unsafe_code)]
 mod hardening;
 #[allow(unsafe_code)]
+pub mod native_credential;
+#[allow(unsafe_code)]
 mod platform;
 pub mod quick_unlock;
 #[allow(unsafe_code)]
