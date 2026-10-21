@@ -631,14 +631,87 @@ fn a_ninth_different_field_within_a_minute_is_refused() {
         s.start_reveal("note-x", "password", RevealMode::Timed, now),
         Err(RevealRefused::TooMany(_))
     ));
-    // A minute after the first one, there is room again.
+    // The repeated field renewed its slot; the second field is now the first to expire.
+    assert_eq!(
+        s.start_reveal(
+            "note-x",
+            "password",
+            RevealMode::Timed,
+            T0 + REVEAL_WINDOW_MS
+        ),
+        Err(RevealRefused::TooMany(SEC))
+    );
     s.start_reveal(
         "note-x",
         "password",
         RevealMode::Timed,
-        T0 + REVEAL_WINDOW_MS,
+        T0 + REVEAL_WINDOW_MS + SEC,
     )
     .unwrap();
+}
+
+#[test]
+fn disclosure_admission_checks_access_without_starting_a_reveal() {
+    let mut s = Session::new(LockSettings::default());
+    assert_eq!(
+        s.admit_hidden_field("note-1", "key", T0),
+        Err(RevealRefused::Locked)
+    );
+    s.unlocked(T0);
+    s.set_sharing_guard(true);
+    assert_eq!(
+        s.admit_hidden_field("note-1", "key", T0),
+        Err(RevealRefused::SharingGuardUp)
+    );
+    s.set_sharing_guard(false);
+    s.admit_hidden_field("note-1", "key", T0).unwrap();
+    assert_eq!(s.current_reveal(), None);
+    s.start_reveal("note-1", "key", RevealMode::Timed, T0)
+        .unwrap();
+    let shown = s.current_reveal().cloned();
+    // Field names matter as well as Note ids, and copies leave the shown field alone.
+    for i in 1..MAX_FIELDS_PER_WINDOW {
+        s.admit_hidden_field("note-1", &format!("field-{i}"), T0)
+            .unwrap();
+    }
+    assert_eq!(s.current_reveal().cloned(), shown);
+    assert_eq!(
+        s.admit_hidden_field("note-2", "key", T0),
+        Err(RevealRefused::TooMany(REVEAL_WINDOW_MS))
+    );
+    assert_eq!(
+        s.admit_hidden_field("note-1", "key", T0 + 5 * MIN),
+        Err(RevealRefused::Locked)
+    );
+}
+
+#[test]
+fn repeating_fields_renews_their_slots_without_allowing_a_rolling_window_bypass() {
+    let mut s = default_unlocked();
+    for i in 0..MAX_FIELDS_PER_WINDOW {
+        s.admit_hidden_field(&format!("note-{i}"), "key", T0)
+            .unwrap();
+    }
+    // Reusing every field costs no extra slots, but keeps each in the rolling window.
+    for i in 0..MAX_FIELDS_PER_WINDOW {
+        s.start_reveal(
+            &format!("note-{i}"),
+            "key",
+            RevealMode::Timed,
+            T0 + REVEAL_WINDOW_MS - SEC,
+        )
+        .unwrap();
+    }
+    assert_eq!(
+        s.admit_hidden_field("note-x", "key", T0 + REVEAL_WINDOW_MS),
+        Err(RevealRefused::TooMany(REVEAL_WINDOW_MS - SEC))
+    );
+    assert_eq!(
+        s.admit_hidden_field("note-x", "key", T0 + 2 * REVEAL_WINDOW_MS - SEC - 1),
+        Err(RevealRefused::TooMany(1))
+    );
+    s.admit_hidden_field("note-x", "key", T0 + 2 * REVEAL_WINDOW_MS - SEC)
+        .unwrap();
 }
 
 #[test]

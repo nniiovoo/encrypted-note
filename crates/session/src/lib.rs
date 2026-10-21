@@ -25,7 +25,8 @@
 //!   `Held` lasts until `end_reveal`, or 2 minutes if the release never arrives. Any shown value
 //!   is hidden on: lock, opening another Note, `FocusLost`, or the Sharing Guard going up. While
 //!   the guard is up or the app is Locked, a new reveal is refused. So is a 9th different field
-//!   within a minute: the screens never ask for that, so something else is asking.
+//!   within a minute, across Show and copying together. Repeats keep the same slot for 60 s
+//!   after its latest use. Valid clipboard attempts count even if the write fails.
 //! * More time: a value that is still shown can be given its time again, counted from the
 //!   moment of asking. `Timed` gets another 30 s as often as asked. `Accessible` gets another
 //!   20 s at most three times; after that the value has to be shown again, which takes the
@@ -46,7 +47,7 @@ pub const TIMED_REVEAL_MS: Millis = 30_000;
 pub const ACCESSIBLE_REVEAL_MS: Millis = 20_000;
 /// Backstop for a `Held` reveal whose release the screens never saw (e.g. a lost key-up).
 pub const HELD_REVEAL_MAX_MS: Millis = 120_000;
-/// At most [`MAX_FIELDS_PER_WINDOW`] different Hidden Fields may be shown within this long.
+/// At most [`MAX_FIELDS_PER_WINDOW`] different Hidden Fields may be shown or copied within this long.
 pub const REVEAL_WINDOW_MS: Millis = 60_000;
 pub const MAX_FIELDS_PER_WINDOW: usize = 8;
 /// How many times one `Accessible` reveal can be given another 20 s.
@@ -190,9 +191,9 @@ pub struct Session {
     reveal: Option<Reveal>,
     /// When a `Held` reveal is hidden even without `end_reveal`.
     held_until: Option<Millis>,
-    /// (first shown at, note id, field) for each field shown within [`REVEAL_WINDOW_MS`]. Kept
+    /// (last admitted at, note id, field) for each field shown or copied within [`REVEAL_WINDOW_MS`]. Kept
     /// across locks, so locking and unlocking again doesn't start a fresh allowance.
-    recently_shown: Vec<(Millis, String, String)>,
+    recently_disclosed: Vec<(Millis, String, String)>,
     sharing_guard_up: bool,
     clipboard: Option<PendingClear>,
 }
@@ -231,7 +232,7 @@ impl Session {
             last_failure_at: 0,
             reveal: None,
             held_until: None,
-            recently_shown: Vec::new(),
+            recently_disclosed: Vec::new(),
             sharing_guard_up: false,
             clipboard: None,
         }
@@ -382,6 +383,41 @@ impl Session {
         self.failures >= FREE_ATTEMPTS
     }
 
+    /// Admit a validated Hidden Field for Show or copying, without changing what is shown.
+    /// Call only after input validation and any Wallet authorization. An admitted clipboard
+    /// attempt counts even if its write fails. Repeats share a slot and renew its 60 s window.
+    pub fn admit_hidden_field(
+        &mut self,
+        note_id: &str,
+        field: &str,
+        now: Millis,
+    ) -> Result<(), RevealRefused> {
+        if !self.is_unlocked() || self.auto_lock_due(now) {
+            return Err(RevealRefused::Locked);
+        }
+        if self.sharing_guard_up {
+            return Err(RevealRefused::SharingGuardUp);
+        }
+        self.recently_disclosed
+            .retain(|(at, ..)| now < at.saturating_add(REVEAL_WINDOW_MS));
+        if let Some((at, ..)) = self
+            .recently_disclosed
+            .iter_mut()
+            .find(|(_, n, f)| n == note_id && f == field)
+        {
+            *at = now;
+        } else {
+            if self.recently_disclosed.len() >= MAX_FIELDS_PER_WINDOW {
+                let oldest = self.recently_disclosed.iter().map(|(at, ..)| *at).min();
+                let free_at = oldest.unwrap_or(now).saturating_add(REVEAL_WINDOW_MS);
+                return Err(RevealRefused::TooMany(free_at.saturating_sub(now).max(1)));
+            }
+            self.recently_disclosed
+                .push((now, note_id.to_owned(), field.to_owned()));
+        }
+        Ok(())
+    }
+
     /// Shows a Hidden Field. Refused while Locked (including once the Auto-lock is due at `now`,
     /// even if the tick that carries it out has not run yet) or while the Sharing Guard is up.
     ///
@@ -395,27 +431,7 @@ impl Session {
         mode: RevealMode,
         now: Millis,
     ) -> Result<(), RevealRefused> {
-        if !self.is_unlocked() || self.auto_lock_due(now) {
-            return Err(RevealRefused::Locked);
-        }
-        if self.sharing_guard_up {
-            return Err(RevealRefused::SharingGuardUp);
-        }
-        self.recently_shown
-            .retain(|(at, ..)| now < at.saturating_add(REVEAL_WINDOW_MS));
-        let shown_before = self
-            .recently_shown
-            .iter()
-            .any(|(_, n, f)| n == note_id && f == field);
-        if !shown_before {
-            if self.recently_shown.len() >= MAX_FIELDS_PER_WINDOW {
-                let oldest = self.recently_shown.iter().map(|(at, ..)| *at).min();
-                let free_at = oldest.unwrap_or(now).saturating_add(REVEAL_WINDOW_MS);
-                return Err(RevealRefused::TooMany(free_at.saturating_sub(now).max(1)));
-            }
-            self.recently_shown
-                .push((now, note_id.to_owned(), field.to_owned()));
-        }
+        self.admit_hidden_field(note_id, field, now)?;
         let expires_at = match mode {
             RevealMode::Timed => Some(now.saturating_add(TIMED_REVEAL_MS)),
             RevealMode::Accessible => Some(now.saturating_add(ACCESSIBLE_REVEAL_MS)),
