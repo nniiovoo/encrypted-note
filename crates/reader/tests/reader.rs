@@ -1189,6 +1189,55 @@ fn a_wallet_field_that_fails_to_decrypt_is_marked_and_exits_2() {
 // --- Usage and I/O errors ---
 
 #[test]
+fn sparse_files_at_the_size_boundary_are_checked_before_credentials() {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("enote-reader-size-boundary-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("fake-sparse.vault");
+    let file = std::fs::File::create(&path).unwrap();
+    for (length, code, message) in [
+        (64 * 1024 * 1024, 2, "damaged"),
+        (64 * 1024 * 1024 + 1, 3, "larger than 64 MiB"),
+    ] {
+        file.set_len(length).unwrap();
+        let output = reader(&dir)
+            .args(["fake-sparse.vault", "--credential-stdin"])
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(code));
+        assert!(output.stdout.is_empty());
+        assert!(String::from_utf8(output.stderr).unwrap().contains(message));
+        assert_eq!(file.metadata().unwrap().len(), length);
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+    }
+    drop(file);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn a_directory_is_rejected_before_credentials() {
+    let run = run_with_stdin("directory-input", None, &[".", "--credential-stdin"], b"");
+    assert_exit(&run, 3);
+    assert!(run.stdout.is_empty());
+    assert!(run.stderr.contains("not an ordinary file"));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_special_file_is_rejected_before_credentials() {
+    let run = run_with_stdin(
+        "device-input",
+        None,
+        &["/dev/null", "--credential-stdin"],
+        b"",
+    );
+    assert_exit(&run, 3);
+    assert!(run.stdout.is_empty());
+    assert!(run.stderr.contains("not an ordinary file"));
+}
+
+#[test]
 fn a_missing_file_exits_3() {
     let run = run_with_stdin(
         "missing-file",

@@ -5,8 +5,8 @@ mod credential;
 mod report;
 
 use std::ffi::{OsStr, OsString};
-use std::io::{self, IsTerminal, Write};
-use std::path::PathBuf;
+use std::io::{self, IsTerminal, Read, Write};
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use notes::{Document, NotesError, WalletCipher};
@@ -49,6 +49,9 @@ Exit codes: 0 ok, 1 wrong credential, 2 damaged or unsupported file, 3 usage or 
 ";
 
 const DAMAGED: &str = "This Vault file is damaged. Restore a Safety Copy or Backup.";
+
+/// Same input limit as store::MAX_FILE_BYTES, without depending on the app's storage crate.
+const MAX_FILE_BYTES: u64 = 64 * 1024 * 1024;
 
 const REVEAL_NEEDS_TERMINAL: &str = "\
 Nothing was printed. --reveal prints passwords, keys and Seed Phrases as plain text, and the \
@@ -104,7 +107,7 @@ fn run() -> Result<(), Failure> {
          redirect or pipe the output into a file."
     );
 
-    let bytes = std::fs::read(&options.file).map_err(|e| {
+    let bytes = read_file(&options.file, open_file).map_err(|e| {
         Failure::UsageOrIo(format!("Couldn't read {}: {e}.", options.file.display()))
     })?;
     // A damaged or unsupported file is reported before the owner types anything.
@@ -154,6 +157,48 @@ fn run() -> Result<(), Failure> {
             if n == 1 { "it" } else { "them" },
         ))),
     }
+}
+
+fn read_file(
+    path: &Path,
+    open: impl FnOnce(&Path) -> io::Result<std::fs::File>,
+) -> io::Result<Vec<u8>> {
+    check_file(&std::fs::metadata(path)?)?;
+    let file = open(path)?;
+    check_file(&file.metadata()?)?;
+    read_bounded(file)
+}
+
+fn open_file(path: &Path) -> io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // The path can change to a FIFO after the preliminary metadata check.
+        options.custom_flags(libc::O_NONBLOCK);
+    }
+    options.open(path)
+}
+
+fn check_file(metadata: &std::fs::Metadata) -> io::Result<()> {
+    if !metadata.is_file() {
+        return Err(io::Error::other("not an ordinary file"));
+    }
+    if metadata.len() > MAX_FILE_BYTES {
+        return Err(io::Error::other("the file is larger than 64 MiB"));
+    }
+    Ok(())
+}
+
+fn read_bounded(input: impl Read) -> io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    // Metadata is only a preliminary check: the open file can grow while it is read.
+    input.take(MAX_FILE_BYTES + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_FILE_BYTES {
+        return Err(io::Error::other("the file is larger than 64 MiB"));
+    }
+    Ok(bytes)
 }
 
 /// `None` for `--help`. Flags may come before or after the file; `--` ends the flags (for a
@@ -324,6 +369,101 @@ mod tests {
 
     use super::*;
     use report::Numbered;
+
+    #[cfg(unix)]
+    #[test]
+    fn a_file_swapped_for_a_fifo_is_rejected_without_waiting() {
+        use std::process::{Command, Stdio};
+        use std::time::{Duration, Instant};
+
+        const CHILD: &str = "ENOTE_READER_TEST_FIFO_SWAP";
+        if std::env::var_os(CHILD).is_some() {
+            let dir =
+                std::env::temp_dir().join(format!("enote-reader-fake-fifo-{}", std::process::id()));
+            std::fs::create_dir(&dir).unwrap();
+            let path = dir.join("fake-input.vault");
+            std::fs::write(&path, b"fake regular file before replacement").unwrap();
+            let result = read_file(&path, |path| {
+                std::fs::remove_file(path)?;
+                assert!(Command::new("mkfifo").arg(path).status().unwrap().success());
+                open_file(path)
+            });
+            std::fs::remove_dir_all(dir).unwrap();
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("not an ordinary file")
+            );
+            return;
+        }
+
+        // A blocking-open regression must fail the test instead of hanging the test suite.
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tests::a_file_swapped_for_a_fifo_is_rejected_without_waiting",
+            ])
+            .env(CHILD, "1")
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap();
+        let started = Instant::now();
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                assert!(status.success());
+                break;
+            }
+            if started.elapsed() > Duration::from_secs(5) {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                panic!("opening a swapped FIFO blocked");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn the_actual_read_is_bounded_even_if_the_file_grows() {
+        let mut growing = io::repeat(0).take(MAX_FILE_BYTES + 100);
+        assert!(read_bounded(&mut growing).is_err());
+        assert_eq!(growing.limit(), 99);
+    }
+
+    #[test]
+    fn bounded_reads_preserve_short_reads_and_errors() {
+        struct ShortReads(bool);
+        impl Read for ShortReads {
+            fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+                if self.0 || out.is_empty() {
+                    return Ok(0);
+                }
+                self.0 = true;
+                out[0] = b'x';
+                Ok(1)
+            }
+        }
+        assert_eq!(read_bounded(ShortReads(false)).unwrap(), b"x");
+
+        struct FailsAfterData(bool);
+        impl Read for FailsAfterData {
+            fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+                if self.0 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "fake read error",
+                    ));
+                }
+                self.0 = true;
+                out[0] = b'x';
+                Ok(1)
+            }
+        }
+        assert_eq!(
+            read_bounded(FailsAfterData(false)).unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
+        );
+    }
 
     fn options(args: &[&str]) -> Options {
         match parse(args.iter().map(OsString::from)) {

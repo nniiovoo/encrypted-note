@@ -1017,6 +1017,7 @@ dependencies = [
 name = "enote-reader"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "notes",
  "rpassword",
  "secrecy",
