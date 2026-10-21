@@ -175,6 +175,7 @@ export const strings = {
   add: "Add",
   // What a screen reader says for a button repeated on every row, e.g. "Copy Password".
   fieldAction: (action: string, field: string) => `${action} ${field}`,
+  noteAction: (action: string, title: string) => `${action}: “${title}”`,
   // One line of a shown value of several lines. `line` counts from 1; never what the line holds.
   copyLine: (line: number, field: string) => `Copy line ${line} of ${field}`,
   // An API Key with a variable name: the name is a visible part of the Note, the key is not shown.
@@ -185,7 +186,8 @@ export const strings = {
   moveToTrash: "Move to Trash",
   walletTrashText: "Moving a Seed Phrase or Private Key to Trash needs your Master Password, like every other change to one.",
   walletDeleteText: "Deleting a Seed Phrase or Private Key for good needs your Master Password.",
-  walletEmptyTrashText: "Trash holds a Seed Phrase or Private Key, so emptying it needs your Master Password.",
+  walletEmptyTrashText: (titles: string[]) =>
+    `Enter your Master Password to delete these Notes forever: ${listed(titles.map((title) => `“${title}”`), "and")}.`,
   crashTitle: "Something went wrong",
   crashText: "encrypted-note couldn't draw this screen, so it locked your Vault. Nothing was changed. Unlock to carry on.",
   crashContinue: "Continue",
@@ -209,7 +211,6 @@ export const strings = {
     n > 0 ? `${plural(n, "time", "times")} left` : "No more time can be added. Enter your Master Password to show it again.",
   copyTitle: (field: string) => `Copy ${field}`,
   copyText: (s: number) => `Enter your Master Password to copy. The clipboard clears after ${s} seconds.`,
-  copySeedTitle: "Copy this Seed Phrase?",
   copySeedText: "Seed phrases are safest typed by hand. Copy anyway?",
   copyAnyway: "Copy anyway",
   wordN: (n: number) => `Word ${n}`,
@@ -272,7 +273,6 @@ export const strings = {
   discardTitle: "Discard unsaved changes?",
   discardText: "What you typed in this Note hasn't been saved yet.",
   discard: "Discard",
-  savePasswordTitle: "Confirm with your Master Password",
   savePasswordText: "Seed Phrases and Private Keys need your Master Password to save.",
   explainerTitle: "A quick word about Seed Phrases",
   explainerText:
