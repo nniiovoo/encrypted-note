@@ -22,9 +22,11 @@ const LockLink = ({ label = s.lock }: { label?: string }) => (
 export function NoVault({ onKit, onOperationOutcome }: { onKit: (recoveryKey: string) => void; onOperationOutcome: (message: string) => void }) {
   const [step, setStep] = useState<"welcome" | "create" | "open">("welcome");
   // No Vault file, but Safety Copies: this is not a first run. Say so, before the owner
-  // concludes their Notes are gone and creates a new Vault over them.
+  // concludes their Notes are gone and creates a new Vault over them. Until the first list
+  // arrives, say it is still looking: that is not the same as none.
   const safety = useSafetyCopies();
   const copies = safety.copies ?? [];
+  const looking = safety.copies === null && !safety.error;
   const [copy, setCopy] = useState<SafetyCopy | null>(null);
   useEffect(safety.reload, []);
   if (step === "create")
@@ -59,6 +61,7 @@ export function NoVault({ onKit, onOperationOutcome }: { onKit: (recoveryKey: st
           </section>
         ))}
       </div>
+      {looking && <p className="hint">{s.lookingForSafetyCopies}</p>}
       {copies.length > 0 && (
         <section className="card stack">
           <h2>{s.vaultWasHereTitle}</h2>
