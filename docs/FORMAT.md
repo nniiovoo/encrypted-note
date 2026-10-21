@@ -697,7 +697,10 @@ enote-reader <vault-or-backup-file> [--recovery-key] [--note <number>] [--reveal
 ```
 
 * It asks for the Master Password (or the Recovery Key with `--recovery-key`) without echo.
-  `--credential-stdin` reads it from the first line of stdin instead, for scripts.
+  `--credential-stdin` reads it from the first UTF-8 line of a pipe or file instead, for scripts:
+  at most 4,096 content bytes, with an optional LF or CRLF ending. An empty stream is an error;
+  an empty first line is an empty credential. A terminal is refused; omit the flag to use the
+  no-echo terminal prompt.
 * It always uses the limits of section 4, and reads document schema 1 and 2 (section 8). A
   newer schema is reported as such, with exit code 2.
 * On its own it lists every Note with a number, Trash included and marked: Kind, title,
@@ -718,6 +721,12 @@ enote-reader <vault-or-backup-file> [--recovery-key] [--note <number>] [--reveal
   invisible Unicode format characters are printed as `�`, so nothing stored in a Note can
   drive the terminal or reorder the text.
 * It writes nothing to disk, and warns on stderr not to redirect its output to a file.
+* For `--credential-stdin`, the Reader duplicates the OS input handle and reads directly into
+  a fixed wiping buffer, avoiding Rust's shared stdin read-ahead buffer. It wipes this buffer
+  on success and error, and holds the UTF-8 credential in wiping types. This is best effort:
+  it cannot wipe copies in the producing program, OS pipe/terminal buffers, swap, crash dumps,
+  registers or other process-memory copies made by the compiler or libraries. It does not
+  promise complete memory erasure or protection from software that can read process memory.
 * Exit codes: 0 ok, 1 wrong Master Password or Recovery Key, 2 damaged or unsupported file,
   3 usage or I/O error, 4 no Note has the number given with `--note` (it says which numbers
   exist and prints no Note). If one Wallet Kind field fails to decrypt, it prints everything
