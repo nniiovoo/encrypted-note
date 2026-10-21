@@ -2,7 +2,7 @@
 
 Status: Deferred; the owner has not selected a first service or operation. Refs [issue #28](https://github.com/nniiovoo/encrypted-note/issues/28).
 
-The owner approved separate restricted Agent Keys and no owner-Vault access ([ADR-0007 proposal](https://github.com/nniiovoo/encrypted-note/pull/32)). That boundary does not approve a remote gateway. No API, network service, hosting account, repository or deployment has been chosen.
+The owner approved separate restricted Agent Keys and no owner-Vault access ([ADR-0007](0007-agents-use-separate-restricted-keys.md)). That boundary does not approve a remote gateway. No API, network service, hosting account, repository or deployment has been chosen.
 
 ## Decision gate
 
