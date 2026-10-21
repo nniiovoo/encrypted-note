@@ -15,6 +15,8 @@
 
 #![deny(unsafe_code)]
 
+#[allow(unsafe_code)]
+pub mod biometry;
 mod commands;
 pub mod core;
 #[allow(unsafe_code)]
