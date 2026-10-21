@@ -1099,6 +1099,27 @@ fn empty_stdin_is_a_usage_error() {
     assert!(run.stdout.is_empty());
 }
 
+#[test]
+fn stdin_credentials_are_bounded_and_never_printed() {
+    for (length, code) in [(4096, 1), (4097, 3)] {
+        for (suffix, ending) in [("eof", ""), ("lf", "\n"), ("crlf", "\r\n")] {
+            let fake = "x".repeat(length);
+            let run = run_with_stdin(
+                &format!("credential-bound-{length}-{suffix}"),
+                Some(&text_and_login().bytes),
+                &["test.vault", "--credential-stdin"],
+                format!("{fake}{ending}").as_bytes(),
+            );
+            assert_exit(&run, code);
+            assert!(run.stdout.is_empty());
+            assert!(!run.stderr.contains(&fake));
+            if code == 3 {
+                assert!(run.stderr.contains("longer than 4096"));
+            }
+        }
+    }
+}
+
 // --- Damaged and unsupported files ---
 
 #[test]

@@ -41,7 +41,7 @@ Options:
   --allow-non-terminal  With --reveal, print even when the output is redirected or piped.
                         Whatever receives it then holds your secrets as plain text.
   --credential-stdin    Read the Master Password or Recovery Key from the first line of
-                        stdin instead of asking (for scripts).
+                        a pipe or file on stdin instead of asking (for scripts).
   -h, --help            Show this help.
 
 Exit codes: 0 ok, 1 wrong credential, 2 damaged or unsupported file, 3 usage or I/O error,
