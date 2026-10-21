@@ -334,7 +334,17 @@ export const strings = {
     `With this on, using the keyboard or mouse in any app counts as use, so the app stays Unlocked while this computer is in use. It still locks after 60 minutes without activity in its own window, and at once when the computer sleeps, the screen locks or you switch users.${
       locksOnSwitch ? " It also still locks when you switch to another app, as chosen above." : ""
     }`,
-  alwaysLocks: "It always locks when your computer sleeps, the screen locks, the lid closes or you switch users.",
+  lockEventNames: {
+    sleep: "sleep",
+    screen_lock: "screen lock",
+    user_switch: "user switch",
+    display_off: "the display turning off",
+    lid_close: "lid close",
+  },
+  lockEventsUnavailable: (events: string) =>
+    `Automatic locking is unavailable for: ${events}. Idle Auto-lock still works. Lock the app before these events.`,
+  lockEventsDegraded: "Some automatic lock events are unavailable; see the warning above. Idle Auto-lock still works.",
+  alwaysLocks: "Auto-lock also responds to sleep, screen lock, lid close and user switch.",
   clipboardClearAfter: "Clear a copy from the clipboard after",
   clipboardSeconds: (n: number) => `${n} seconds`,
   walletCopiesClearAfter30: "Copies of Seed Phrases and Private Keys always clear after 30 seconds.",

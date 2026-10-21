@@ -132,6 +132,8 @@ pub struct AppStatus {
     pub phase: &'static str,
     pub platform: &'static str,
     pub capture_hiding_active: Option<bool>,
+    /// OS events whose lock notifications could not be installed on Windows.
+    pub lock_events_unavailable: Vec<&'static str>,
     pub sharing_guard: GuardView,
     pub lock_in_ms: Option<u64>,
     pub clipboard_clear_in_ms: Option<u64>,
@@ -427,6 +429,7 @@ pub struct AppCore {
     guard: guard::GuardState,
     detected: Vec<&'static str>,
     capture_hiding_active: Option<bool>,
+    lock_events_unavailable: Vec<&'static str>,
     phase: Phase,
     settings: StoredSettings,
     settings_unreadable: bool,
@@ -480,6 +483,7 @@ impl AppCore {
             guard: guard::GuardState::new(),
             detected: Vec::new(),
             capture_hiding_active: None,
+            lock_events_unavailable: Vec::new(),
             phase,
             settings,
             settings_unreadable,
@@ -510,6 +514,7 @@ impl AppCore {
             },
             platform: PLATFORM,
             capture_hiding_active: self.capture_hiding_active,
+            lock_events_unavailable: self.lock_events_unavailable.clone(),
             sharing_guard: GuardView {
                 up: !shield.is_empty(),
                 apps: shield.into_iter().collect(),
@@ -628,6 +633,10 @@ impl AppCore {
         }
         let effects = self.session.set_sharing_guard(up);
         self.apply(effects);
+    }
+
+    pub fn set_lock_events_unavailable(&mut self, events: Vec<&'static str>) {
+        self.lock_events_unavailable = events;
     }
 
     /// Latest Capture Hiding self-check (`None`: can't tell on this platform).

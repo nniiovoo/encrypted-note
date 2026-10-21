@@ -141,7 +141,7 @@ fn is_app_url(url: &Url, dev_url: Option<&Url>) -> bool {
 fn setup(app: &AppHandle) {
     // Before anything else can be copied: a copy the last run left behind (crash, force quit).
     platform::clear_leftover_copy();
-    let core = data_dir(app)
+    let mut core = data_dir(app)
         .and_then(|data_dir| {
             let home_dir = match platform::real_home_dir() {
                 Some(home) => home,
@@ -160,6 +160,7 @@ fn setup(app: &AppHandle) {
             .map_err(|e| e.message)
         })
         .unwrap_or_else(|message| fatal(&message));
+    core.set_lock_events_unavailable(platform::lock_events_unavailable());
     app.manage(CoreState(Mutex::new(core)));
 
     let handle = app.clone();
@@ -241,6 +242,7 @@ fn background(app: &AppHandle) {
             None
         };
         let mut core = commands::core(app);
+        core.set_lock_events_unavailable(platform::lock_events_unavailable());
         if let Some((apps, capture_hiding_active)) = probe {
             // A list that couldn't be read says nothing: the Sharing Guard keeps what it knew.
             if let Some(apps) = apps {

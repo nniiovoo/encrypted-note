@@ -111,6 +111,7 @@ export interface AppStatus {
   platform: "mac" | "windows" | "other";
   /** Result of the Capture Hiding self-check (ADR-0002). null = can't tell on this platform. */
   capture_hiding_active: boolean | null;
+  lock_events_unavailable: ("sleep" | "screen_lock" | "user_switch" | "display_off" | "lid_close")[];
   sharing_guard: { up: boolean; apps: string[] };
   /** Milliseconds until Auto-lock, null when not unlocked. */
   lock_in_ms: number | null;

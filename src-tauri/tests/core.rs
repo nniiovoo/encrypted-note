@@ -1642,6 +1642,33 @@ fn an_unconfirmed_key_rotation_changes_nothing() {
     app.core.unlock(recovery(&old_key)).unwrap();
 }
 
+#[test]
+fn degraded_os_lock_notifications_preserve_idle_locking_and_status() {
+    let mut app = App::new();
+    unlocked(&mut app);
+    app.core
+        .set_lock_events_unavailable(vec!["screen_lock", "user_switch"]);
+    let status = app.core.app_status();
+    assert_eq!(
+        status.lock_events_unavailable,
+        ["screen_lock", "user_switch"]
+    );
+    assert_eq!(
+        serde_json::to_value(&status).unwrap()["lock_events_unavailable"],
+        json!(["screen_lock", "user_switch"])
+    );
+    assert_eq!(status.lock_in_ms, Some(5 * 60_000));
+    app.advance(5 * 60_000);
+    app.core.tick();
+    assert_eq!(app.phase(), "locked");
+    assert_eq!(
+        app.core.app_status().lock_events_unavailable,
+        ["screen_lock", "user_switch"]
+    );
+    app.core.set_lock_events_unavailable(Vec::new());
+    assert!(app.core.app_status().lock_events_unavailable.is_empty());
+}
+
 // ---------- API shapes ----------
 
 #[test]
@@ -1660,6 +1687,7 @@ fn status_has_the_shape_api_ts_expects() {
         "phase",
         "platform",
         "capture_hiding_active",
+        "lock_events_unavailable",
         "sharing_guard",
         "lock_in_ms",
         "clipboard_clear_in_ms",

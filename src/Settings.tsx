@@ -103,7 +103,7 @@ export function Settings({ status, onKit, onOperationOutcome }: { status: AppSta
               onChange={(on) => change({ count_activity_anywhere: on })}
             />
           )}
-          <p className="hint">{s.alwaysLocks}</p>
+          <p className="hint">{status.lock_events_unavailable.length ? s.lockEventsDegraded : s.alwaysLocks}</p>
           <p className="hint">{s.autoLockReauthLimit}</p>
           <div className="setting">
             <Choice
