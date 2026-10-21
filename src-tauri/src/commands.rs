@@ -21,7 +21,8 @@ use zeroize::Zeroizing;
 
 use crate::core::{
     ApiError, AppCore, AppStatus, AssessmentView, BackupWritten, CredentialInput, NoteEditInput,
-    NoteInput, PickedFile, RecoveryKeyShown, SafetyCopy, SettingsInput, ShowMode, VaultPreview,
+    NoteInput, PickedFile, RecoveryKeyShown, SafetyCopy, SettingsInput, SettingsView, ShowMode,
+    VaultPreview,
 };
 
 pub const STATUS_EVENT: &str = "status-changed";
@@ -441,9 +442,12 @@ pub async fn change_password(
     .await
 }
 
-#[tauri::command(async)]
-pub fn set_settings(app: AppHandle, settings: SettingsInput) -> Result<(), ApiError> {
-    with_core(&app, |core| core.set_settings(settings))
+#[tauri::command]
+pub async fn set_settings(
+    app: AppHandle,
+    settings: SettingsInput,
+) -> Result<SettingsView, ApiError> {
+    blocking(app, move |core| core.set_settings(settings)).await
 }
 
 #[tauri::command(async)]

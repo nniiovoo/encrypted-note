@@ -103,6 +103,9 @@ export function App() {
       <TitlebarDrag />
       {status?.save_durability_uncertain && <p className="warn">{s.saveDurabilityWarning}</p>}
       {status?.settings_unreadable && <p className="warn">{s.settingsUnreadable}</p>}
+      {status && status.lock_events_unavailable.length > 0 && (
+        <p className="warn" role="alert">{s.lockEventsUnavailable(status.lock_events_unavailable.map((event) => s.lockEventNames[event]).join(", "))}</p>
+      )}
       {operationOutcome && <p className="warn" role="status">{operationOutcome}<button className="small" onClick={() => setOperationOutcome(null)}>{s.dismiss}</button></p>}
       {status && (
         <Screen

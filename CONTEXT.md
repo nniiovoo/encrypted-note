@@ -52,6 +52,12 @@ _Avoid_: biometric login, fingerprint login
 The sheet (printed or handwritten) the owner keeps somewhere physical, carrying the **Recovery Key**.
 _Avoid_: emergency kit, backup sheet
 
+### Working with AI agents
+
+**Agent Key**:
+A separate credential the owner creates at a service only for AI agent work, with narrow provider-enforced permissions, expiry, revocation and hard spending/usage caps. It is never a copy of an owner's existing key and never enters the **Vault**. This boundary is approved; no provider or pilot is selected ([ADR-0007](docs/adr/0007-agents-use-separate-restricted-keys.md)).
+_Avoid_: sharing an owner key, agent access to the Vault
+
 ### Screen privacy
 
 **Capture Hiding**:
@@ -114,6 +120,9 @@ _Avoid_: pinned, bookmarked, starred item
 ## Relationships
 
 - The owner has one **Vault**; it moves between computers only when the owner copies the file by hand.
+- AI agents have no access to the **Vault**, its **Notes**, their metadata, **Backups**, **Safety Copies**, or the **Emergency Reader**. The **Master Password**, **Recovery Key** and **Wallet Kinds** never take part in agent work.
+- Any future **Agent Key** integration is separate from this offline app. Hiding the key still lets an agent perform every operation its provider scope permits, within its enforced limits; only the owner can independently approve scope or limit changes ([ADR-0007](docs/adr/0007-agents-use-separate-restricted-keys.md)).
+- Results from an external agent's allowed service actions may leave this computer, including for a cloud model provider; no Vault content or metadata may enter that route.
 - Moving a **Vault** to the other computer means opening a **Backup** there. There is no separate "export" or "sync" concept.
 - The app nudges the owner when changes have gone 7+ days without a **Backup**, and warns if a **Backup** is saved into a cloud-synced folder.
 - Copying a **Vault** replaces the copy on the other computer; the two are never merged.

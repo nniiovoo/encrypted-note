@@ -147,6 +147,7 @@ export function Choice<T extends string | number>(props: {
   label: string;
   options: readonly (readonly [T, string])[];
   value: T;
+  disabled?: boolean;
   onChange: (value: T) => void;
 }) {
   const name = useId();
@@ -158,7 +159,7 @@ export function Choice<T extends string | number>(props: {
       <div className="segmented">
         {props.options.map(([value, text]) => (
           <label key={value}>
-            <input type="radio" name={name} checked={value === props.value} onChange={() => props.onChange(value)} />
+            <input type="radio" name={name} disabled={props.disabled} checked={value === props.value} onChange={() => props.onChange(value)} />
             {text}
           </label>
         ))}
