@@ -74,6 +74,12 @@ macro_rules! redacted_debug {
     )+};
 }
 
+mod quick_unlock;
+pub use quick_unlock::{
+    QUICK_UNLOCK_PAYLOAD_LEN, QuickUnlockBinding, QuickUnlockKey, enroll_quick_unlock,
+    open_with_quick_unlock, quick_unlock_binding,
+};
+
 pub mod recovery_key;
 pub use recovery_key::{RecoveryKey, RecoveryKeyError};
 

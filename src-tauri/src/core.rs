@@ -30,6 +30,13 @@ use store::{CloudProvider, SafetyKind, StoreError, VaultDir};
 use vault_format::{Credential, KdfParams, Limits, RecoveryKey, UnlockedVault, WalletKey};
 use zeroize::Zeroizing;
 
+pub mod native;
+mod quick_unlock;
+pub use quick_unlock::{
+    QuickUnlockCompletion, QuickUnlockEnrollment, QuickUnlockEnrollmentCompletion, QuickUnlockJob,
+    QuickUnlockStatus,
+};
+
 // ---------- injected dependencies ----------
 
 /// Time, injected so tests can move it.
@@ -38,6 +45,10 @@ pub trait Clock: Send {
     fn now_ms(&self) -> u64;
     /// Wall-clock Unix seconds (timestamps stored in the Vault and settings).
     fn unix_secs(&self) -> i64;
+    /// Clock that keeps counting through sleep; missing support disables Quick Unlock.
+    fn continuous_ms(&self) -> Option<u64> {
+        None
+    }
 }
 
 /// The system clipboard. Implementations never read what's on it.
@@ -153,6 +164,7 @@ pub struct AppStatus {
     /// The settings file was there but unreadable, so the strictest lock rules are in force.
     pub settings_unreadable: bool,
     pub settings: SettingsView,
+    pub quick_unlock: QuickUnlockStatus,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -317,6 +329,8 @@ struct StoredSettings {
     clipboard_clear_seconds: u32,
     /// The owner's choice to count hardware input anywhere on the computer as activity.
     count_activity_anywhere: bool,
+    /// Header fingerprint only; authorization deadlines never persist.
+    quick_unlock_binding: Option<[u8; 32]>,
 }
 
 impl Default for StoredSettings {
@@ -331,6 +345,7 @@ impl Default for StoredSettings {
             trash_expiry_seen_at: None,
             clipboard_clear_seconds: session::DEFAULT_CLIPBOARD_CLEAR_SECONDS,
             count_activity_anywhere: false,
+            quick_unlock_binding: None,
         }
     }
 }
@@ -439,6 +454,16 @@ pub struct AppCore {
     inspected: Option<Inspected>,
     purge_trash_failed: bool,
     save_durability_uncertain: bool,
+    native_pending: Option<native::Pending>,
+    native_sequence: u64,
+    native_epoch: u64,
+    /// Only populated during one checked native completion; never an authentication cache.
+    native_wallet: Option<Wallet>,
+    quick_unlock: crate::quick_unlock::QuickUnlockGate,
+    quick_unlock_available: bool,
+    quick_unlock_reason: Option<&'static str>,
+    quick_pending: Option<u64>,
+    quick_cleanup_needed: bool,
 }
 
 impl AppCore {
@@ -470,7 +495,7 @@ impl AppCore {
         } else {
             Phase::NoVault
         };
-        Ok(AppCore {
+        let mut core = AppCore {
             dir,
             home_dir: config.home_dir,
             limits: config.limits,
@@ -493,7 +518,18 @@ impl AppCore {
             inspected: None,
             purge_trash_failed: false,
             save_durability_uncertain: false,
-        })
+            native_pending: None,
+            native_sequence: 0,
+            native_epoch: 0,
+            native_wallet: None,
+            quick_unlock: crate::quick_unlock::QuickUnlockGate::default(),
+            quick_unlock_available: false,
+            quick_unlock_reason: None,
+            quick_pending: None,
+            quick_cleanup_needed: false,
+        };
+        core.load_quick_unlock_registration();
+        Ok(core)
     }
 
     // ---------- status & events ----------
@@ -551,6 +587,7 @@ impl AppCore {
             purge_trash_failed: self.purge_trash_failed,
             save_durability_uncertain: self.save_durability_uncertain,
             settings_unreadable: self.settings_unreadable,
+            quick_unlock: self.quick_unlock_status(),
             settings: SettingsView {
                 idle_minutes: lock.idle_minutes,
                 lock_on_app_switch: lock.lock_on_app_switch,
@@ -597,6 +634,11 @@ impl AppCore {
     /// second by the app, and at the start of every command.
     pub fn tick(&mut self) {
         let now = self.clock.now_ms();
+        self.native_tick(now);
+        let quick_authorized = self.quick_unlock.tick(self.clock.continuous_ms());
+        if !quick_authorized && self.quick_pending.is_some() {
+            self.invalidate_native();
+        }
         let effects = self.session.tick(now);
         self.apply(effects);
         self.inspected.take_if(|i| now >= i.expires_at);
@@ -611,6 +653,9 @@ impl AppCore {
 
     /// Sleep, screen lock, user switch, quit, focus changes.
     pub fn os_event(&mut self, event: OsEvent) {
+        if !matches!(event, OsEvent::FocusGained) {
+            self.invalidate_native();
+        }
         let effects = self.session.os_event(event, self.clock.now_ms());
         self.apply(effects);
         // Also when no Vault is open (e.g. a pending inspection with no Vault on this computer).
@@ -629,6 +674,7 @@ impl AppCore {
         self.detected = guard::detect(GUARD_PLATFORM, apps);
         let up = self.guard.update(&self.detected);
         if up {
+            self.invalidate_native();
             self.clipboard_source = None;
         }
         let effects = self.session.set_sharing_guard(up);
@@ -737,6 +783,9 @@ impl AppCore {
             return Err(not_now());
         }
         let cred = parse_credential(credential)?;
+        if matches!(cred, Cred::Key(_)) {
+            self.invalidate_quick_unlock_registration()?;
+        }
         let bytes = self.dir.read_vault().map_err(store_error)?;
         let limits = self.limits;
         let opened = attempt(&mut self.session, &*self.clock, &cred, || {
@@ -759,6 +808,7 @@ impl AppCore {
     /// After a Recovery Key unlock: re-wrap the password slot, save, unlock.
     pub fn set_new_password(&mut self, master_password: Zeroizing<String>) -> Result<(), ApiError> {
         self.tick();
+        self.invalidate_quick_unlock_registration()?;
         let Phase::NeedsNewPassword { open, recovery_key } = &mut self.phase else {
             return Err(not_now());
         };
@@ -1029,6 +1079,7 @@ impl AppCore {
     }
 
     pub fn hide_field(&mut self) {
+        self.invalidate_native();
         let effects = self.session.end_reveal();
         self.apply(effects);
     }
@@ -1234,6 +1285,7 @@ impl AppCore {
     /// The tauri layer's open dialog returned `path`.
     pub fn set_backup_to_open(&mut self, path: PathBuf) -> Result<PickedFile, ApiError> {
         self.backups_allowed()?;
+        self.invalidate_native();
         let picked = self.picked(&path);
         self.backup_to_open = Some(path);
         self.inspected = None;
@@ -1256,6 +1308,7 @@ impl AppCore {
 
     /// The owner closed the preview without installing it: forget the decrypted copy now.
     pub fn discard_inspection(&mut self) {
+        self.invalidate_native();
         self.inspected = None;
         self.backup_to_open = None;
     }
@@ -1308,6 +1361,7 @@ impl AppCore {
     ) -> Result<RecoveryKeyShown, ApiError> {
         self.tick();
         self.open()?;
+        self.invalidate_quick_unlock_registration()?;
         check_strength(&new_password)?;
         let (current, new) = (
             Cred::Password(secret(&current_password)),
@@ -1415,6 +1469,7 @@ impl AppCore {
         }
         // Never activate an unpersisted rule, including when a write fails after authentication.
         self.session.set_settings(proposed);
+        self.invalidate_native();
         Ok(self.app_status().settings)
     }
 
@@ -1453,6 +1508,7 @@ impl AppCore {
 
     /// Drop every decrypted Vault (keys and document) and forget a Sharing Guard dismissal.
     fn forget_open_vaults(&mut self) {
+        self.invalidate_native();
         self.clipboard_source = None;
         self.phase = match std::mem::replace(&mut self.phase, Phase::Locked) {
             Phase::NoVault
@@ -1469,6 +1525,7 @@ impl AppCore {
     /// Every phase change drops a pending Backup or Safety Copy: its preview (and its "older"
     /// warning) described what it would have replaced before the change.
     fn set_phase(&mut self, phase: Phase) {
+        self.invalidate_native();
         self.clipboard_source = None;
         self.phase = phase;
         self.inspected = None;
@@ -1550,6 +1607,9 @@ impl AppCore {
 
     /// The Wallet Key for one action, from the Master Password (fresh Argon2id run).
     fn wallet(&mut self, master_password: Option<Zeroizing<String>>) -> Result<Wallet, ApiError> {
+        if let Some(wallet) = self.native_wallet.take() {
+            return Ok(wallet);
+        }
         let password = Cred::Password(secret(
             &master_password.ok_or_else(|| err("invalid_input", MSG_NEEDS_PASSWORD))?,
         ));
@@ -1583,6 +1643,7 @@ impl AppCore {
         if open.doc.change_counter() == counter {
             return Ok(out);
         }
+        self.invalidate_native();
         // A pending preview's "older than current" no longer holds.
         self.inspected = None;
         if let Err(e) = self.save() {
@@ -1805,6 +1866,7 @@ impl AppCore {
         let Some(inspected) = self.inspected.take_if(|i| i.source == source) else {
             return Err(err("invalid_input", MSG_INSPECT_FIRST));
         };
+        self.invalidate_quick_unlock_registration()?;
         let result = {
             let verify = |written: &[u8]| verified_count(&inspected.open.vault, written).is_some();
             self.dir

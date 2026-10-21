@@ -21,6 +21,7 @@ pub mod core;
 mod hardening;
 #[allow(unsafe_code)]
 mod platform;
+pub mod quick_unlock;
 #[allow(unsafe_code)]
 mod wipe_on_free;
 

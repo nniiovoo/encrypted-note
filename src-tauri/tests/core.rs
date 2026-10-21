@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use encrypted_note_app::core::native::{NativeAction, NativeCredentials, NativeResult};
 use encrypted_note_app::core::{
     ApiError, AppCore, Clipboard, Clock, Config, CredentialInput, NoteEditInput, NoteInput,
     SettingsInput, ShowMode,
@@ -1702,6 +1703,7 @@ fn status_has_the_shape_api_ts_expects() {
         "save_durability_uncertain",
         "settings_unreadable",
         "settings",
+        "quick_unlock",
     ];
     expected.sort_unstable();
     let mut keys = keys;
@@ -1728,6 +1730,16 @@ fn status_has_the_shape_api_ts_expects() {
     assert_eq!(status["clipboard_source"], Value::Null);
     assert_eq!(status["purge_trash_failed"], false);
     assert_eq!(status["settings_unreadable"], false);
+    let quick = status["quick_unlock"].as_object().unwrap();
+    let mut keys: Vec<&str> = quick.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(keys, ["available", "can_unlock", "enabled", "reason"]);
+    assert_eq!(quick["available"], false);
+    assert_eq!(quick["enabled"], false);
+    assert_eq!(quick["can_unlock"], false);
+    assert!(quick["reason"].is_null() || quick["reason"].is_string());
+    // The exact public shape excludes keys, header bindings, credentials and native requests.
+    assert!(!status["quick_unlock"].to_string().contains(PASSWORD));
 }
 
 #[test]
@@ -4607,4 +4619,483 @@ fn a_failed_settings_save_never_activates_or_later_persists_a_looser_rule() {
     assert_eq!(applied.idle_minutes, 1);
     assert!(applied.lock_on_app_switch);
     assert!(!applied.count_activity_anywhere);
+}
+
+fn native_run(
+    core: &mut AppCore,
+    action: NativeAction,
+    credentials: NativeCredentials,
+) -> Result<NativeResult, ApiError> {
+    let operation = core.begin_native(action)?;
+    let job = core.prepare_native(operation.id, credentials)?;
+    core.finish_native(job.run())
+}
+
+fn native_new_password(password: &str) -> NativeCredentials {
+    NativeCredentials::NewPassword {
+        password: pw(password),
+        confirmation: pw(password),
+    }
+}
+
+#[test]
+fn native_setup_recovery_reset_and_password_change_keep_credentials_in_rust() {
+    let mut app = App::new();
+    let result = native_run(
+        &mut app.core,
+        NativeAction::CreateVault {
+            params: KdfParams::TESTING,
+        },
+        native_new_password(PASSWORD),
+    )
+    .unwrap();
+    let NativeResult::RecoveryKit(shown) = result else {
+        panic!("native kit expected")
+    };
+    let key = shown.recovery_key.unwrap();
+    assert!(!vault_file(&app).exists());
+    assert_eq!(
+        code(native_run(
+            &mut app.core,
+            NativeAction::ConfirmRecoveryKit,
+            NativeCredentials::KitConfirmation(pw("fake-wrong-groups"))
+        )),
+        "invalid_input"
+    );
+    assert!(!vault_file(&app).exists());
+    native_run(
+        &mut app.core,
+        NativeAction::ConfirmRecoveryKit,
+        NativeCredentials::KitConfirmation(pw(&last_groups(&key))),
+    )
+    .unwrap();
+    app.core.lock();
+    native_run(
+        &mut app.core,
+        NativeAction::Unlock { recovery: true },
+        NativeCredentials::RecoveryKey(pw(&key)),
+    )
+    .unwrap();
+    assert_eq!(app.phase(), "needs_new_password");
+    native_run(
+        &mut app.core,
+        NativeAction::SetNewPassword,
+        native_new_password(NEW_PASSWORD),
+    )
+    .unwrap();
+    assert_eq!(app.phase(), "unlocked");
+    native_run(
+        &mut app.core,
+        NativeAction::ChangePassword { rotate: false },
+        NativeCredentials::PasswordChange {
+            current: pw(NEW_PASSWORD),
+            password: pw(PASSWORD),
+            confirmation: pw(PASSWORD),
+        },
+    )
+    .unwrap();
+    app.core.lock();
+    native_run(
+        &mut app.core,
+        NativeAction::Unlock { recovery: false },
+        NativeCredentials::Password(pw(PASSWORD)),
+    )
+    .unwrap();
+    let status = serde_json::to_string(&app.core.app_status()).unwrap();
+    for credential in [PASSWORD, NEW_PASSWORD, key.as_str()] {
+        assert!(!status.contains(credential));
+    }
+}
+
+#[test]
+fn native_panel_rejects_overlap_and_locks_during_an_owned_derivation_job() {
+    let mut app = App::new();
+    unlocked(&mut app);
+    let n = sample_notes(&mut app);
+    app.core.show_field(&n.login, "password").unwrap();
+    let operation = app
+        .core
+        .begin_native(NativeAction::CopyField {
+            id: n.pk,
+            field: "key".into(),
+        })
+        .unwrap();
+    assert!(app.core.app_status().reveal.is_none());
+    assert_eq!(operation.action, "copy_field");
+    assert_eq!(operation.target.as_deref(), Some("Fake private key"));
+    assert_eq!(operation.field.as_deref(), Some("key"));
+    assert!(operation.requires_credentials);
+    assert_eq!(
+        code(app.core.begin_native(NativeAction::EmptyTrash)),
+        "invalid_input"
+    );
+    let job = app
+        .core
+        .prepare_native(operation.id, NativeCredentials::Password(pw(PASSWORD)))
+        .unwrap();
+    // No CoreState or AppCore borrow remains in the worker; lock can run before it completes.
+    app.core.lock();
+    let completion = job.run();
+    assert_eq!(code(app.core.finish_native(completion)), "invalid_input");
+    assert_eq!(app.phase(), "locked");
+    assert!(app.clipboard().is_none());
+}
+
+#[test]
+fn native_held_release_and_note_mutation_discard_late_authentication() {
+    let mut app = App::new();
+    unlocked(&mut app);
+    let n = sample_notes(&mut app);
+    let operation = app
+        .core
+        .begin_native(NativeAction::ShowWalletField {
+            id: n.pk.clone(),
+            field: "key".into(),
+            mode: ShowMode::Held,
+        })
+        .unwrap();
+    let job = app
+        .core
+        .prepare_native(operation.id, NativeCredentials::Password(pw(PASSWORD)))
+        .unwrap();
+    app.core.hide_field();
+    assert_eq!(code(app.core.finish_native(job.run())), "invalid_input");
+    assert!(app.core.app_status().reveal.is_none());
+
+    let operation = app
+        .core
+        .begin_native(NativeAction::CopyField {
+            id: n.pk,
+            field: "key".into(),
+        })
+        .unwrap();
+    let job = app
+        .core
+        .prepare_native(operation.id, NativeCredentials::Password(pw(PASSWORD)))
+        .unwrap();
+    let completion = job.run();
+    app.core.set_favorite(&n.login, true).unwrap();
+    assert_eq!(code(app.core.finish_native(completion)), "invalid_input");
+    assert!(app.clipboard().is_none());
+}
+
+#[test]
+fn native_guard_arrival_and_timeout_cancel_without_counting_password_failures() {
+    let mut app = App::new();
+    unlocked(&mut app);
+    let n = sample_notes(&mut app);
+    let operation = app
+        .core
+        .begin_native(NativeAction::CopyField {
+            id: n.pk.clone(),
+            field: "key".into(),
+        })
+        .unwrap();
+    let job = app
+        .core
+        .prepare_native(
+            operation.id,
+            NativeCredentials::Password(pw(WRONG_PASSWORD)),
+        )
+        .unwrap();
+    app.core.guard_update(&zoom());
+    assert_eq!(code(app.core.finish_native(job.run())), "invalid_input");
+    assert_eq!(app.core.app_status().failed_attempts, 0);
+    app.core.guard_update(&[]);
+    app.core.dismiss_sharing_guard();
+    let operation = app
+        .core
+        .begin_native(NativeAction::CopyField {
+            id: n.pk,
+            field: "key".into(),
+        })
+        .unwrap();
+    let job = app
+        .core
+        .prepare_native(operation.id, NativeCredentials::Password(pw(PASSWORD)))
+        .unwrap();
+    app.advance(120_001);
+    assert_eq!(code(app.core.finish_native(job.run())), "invalid_input");
+    assert!(app.clipboard().is_none());
+}
+
+#[test]
+fn native_wallet_authentication_is_one_action_and_retains_disclosure_accounting() {
+    let mut app = App::new();
+    unlocked(&mut app);
+    let n = sample_notes(&mut app);
+    native_run(
+        &mut app.core,
+        NativeAction::CopyField {
+            id: n.pk.clone(),
+            field: "key".into(),
+        },
+        NativeCredentials::Password(pw(PASSWORD)),
+    )
+    .unwrap();
+    assert_eq!(app.clipboard().as_deref(), Some("fake-private-key"));
+    assert_eq!(
+        code(app.core.copy_field(&n.pk, "key", None)),
+        "invalid_input"
+    );
+    assert!(app.core.app_status().reveal.is_none());
+    assert_eq!(app.core.app_status().copies, 1);
+    let operation = app
+        .core
+        .begin_native(NativeAction::CopyField {
+            id: n.login.clone(),
+            field: "password".into(),
+        })
+        .unwrap();
+    assert!(!operation.requires_credentials);
+    let job = app
+        .core
+        .prepare_native(operation.id, NativeCredentials::None)
+        .unwrap();
+    app.core.finish_native(job.run()).unwrap();
+    assert_eq!(app.clipboard().as_deref(), Some("fake-login-pass"));
+}
+
+#[test]
+fn native_wrong_password_throttle_survives_restart_and_cancel_does_not_bypass_it() {
+    let mut app = App::new();
+    unlocked(&mut app);
+    app.core.lock();
+    for _ in 0..5 {
+        app.advance(60_000);
+        assert_eq!(
+            code(native_run(
+                &mut app.core,
+                NativeAction::Unlock { recovery: false },
+                NativeCredentials::Password(pw(WRONG_PASSWORD))
+            )),
+            "wrong_credential"
+        );
+    }
+    let mut app = app.restart();
+    let operation = app
+        .core
+        .begin_native(NativeAction::Unlock { recovery: false })
+        .unwrap();
+    assert_eq!(
+        code(
+            app.core
+                .prepare_native(operation.id, NativeCredentials::Password(pw(PASSWORD)))
+        ),
+        "retry_later"
+    );
+    app.core.cancel_native(operation.id);
+    assert_eq!(app.core.app_status().failed_attempts, 5);
+    app.advance(60_000);
+    native_run(
+        &mut app.core,
+        NativeAction::Unlock { recovery: false },
+        NativeCredentials::Password(pw(PASSWORD)),
+    )
+    .unwrap();
+}
+
+#[test]
+fn native_setup_rejects_mismatch_and_weak_password_without_a_vault() {
+    let mut app = App::new();
+    assert_eq!(
+        code(native_run(
+            &mut app.core,
+            NativeAction::CreateVault {
+                params: KdfParams::TESTING
+            },
+            NativeCredentials::NewPassword {
+                password: pw(PASSWORD),
+                confirmation: pw(NEW_PASSWORD)
+            }
+        )),
+        "invalid_input"
+    );
+    assert_eq!(
+        code(native_run(
+            &mut app.core,
+            NativeAction::CreateVault {
+                params: KdfParams::TESTING
+            },
+            native_new_password("fake")
+        )),
+        "weak_password"
+    );
+    assert!(!vault_file(&app).exists());
+    assert_eq!(app.phase(), "no_vault");
+}
+
+#[test]
+fn native_inspection_rejects_changed_picked_bytes_then_installs_only_checked_source() {
+    let mut app = App::new();
+    unlocked(&mut app);
+    let path = app.temp.path().join("fake-native-backup.enote");
+    app.core.set_backup_destination(path.clone()).unwrap();
+    app.core.write_backup().unwrap();
+    app.core.set_backup_to_open(path.clone()).unwrap();
+    let operation = app
+        .core
+        .begin_native(NativeAction::InspectBackup { recovery: false })
+        .unwrap();
+    let job = app
+        .core
+        .prepare_native(operation.id, NativeCredentials::Password(pw(PASSWORD)))
+        .unwrap();
+    let completion = job.run();
+    let bytes = std::fs::read(&path).unwrap();
+    std::fs::write(&path, b"fake-invalid-backup").unwrap();
+    assert_eq!(code(app.core.finish_native(completion)), "invalid_input");
+    assert_eq!(code(app.core.replace_with_backup()), "invalid_input");
+    std::fs::write(&path, bytes).unwrap();
+    let result = native_run(
+        &mut app.core,
+        NativeAction::InspectBackup { recovery: false },
+        NativeCredentials::Password(pw(PASSWORD)),
+    )
+    .unwrap();
+    assert!(matches!(result, NativeResult::Preview(_)));
+    app.core.replace_with_backup().unwrap();
+}
+
+#[test]
+fn native_password_change_failure_preserves_the_saved_and_live_password() {
+    let mut app = App::new();
+    unlocked(&mut app);
+    let operation = app
+        .core
+        .begin_native(NativeAction::ChangePassword { rotate: false })
+        .unwrap();
+    let job = app
+        .core
+        .prepare_native(
+            operation.id,
+            NativeCredentials::PasswordChange {
+                current: pw(PASSWORD),
+                password: pw(NEW_PASSWORD),
+                confirmation: pw(NEW_PASSWORD),
+            },
+        )
+        .unwrap();
+    let completion = job.run();
+    // The source snapshot still matches; fail only the save's wall-clock-triggered write.
+    app.break_vault_on_next_wall_clock_read();
+    assert_eq!(code(app.core.finish_native(completion)), "io");
+    let file = vault_file(&app);
+    std::fs::remove_dir(&file).unwrap();
+    std::fs::rename(file.with_extension("saved"), &file).unwrap();
+    let n = sample_notes(&mut app); // A later save must keep the old slot too.
+    app.core
+        .copy_field(&n.pk, "key", Some(pw(PASSWORD)))
+        .unwrap();
+    app.core.lock();
+    app.core.unlock(password(PASSWORD)).unwrap();
+}
+
+#[test]
+fn native_settings_freezes_effective_rules_and_rejects_reunlock_races() {
+    let mut app = App::new();
+    unlocked(&mut app);
+    app.core.set_settings(lock_rule(1, true)).unwrap();
+    let generation = app.core.app_status().session_generation;
+    let request = || {
+        settings(
+            json!({"idle_minutes": 5, "lock_on_app_switch": false, "session_generation": generation}),
+        )
+    };
+    let operation = app
+        .core
+        .begin_native(NativeAction::SetSettings(request()))
+        .unwrap();
+    assert!(operation.requires_credentials);
+    let job = app
+        .core
+        .prepare_native(operation.id, NativeCredentials::Password(pw(PASSWORD)))
+        .unwrap();
+    app.core.lock();
+    app.core.unlock(password(PASSWORD)).unwrap();
+    assert_eq!(code(app.core.finish_native(job.run())), "invalid_input");
+    assert_eq!(app.core.app_status().settings.idle_minutes, 1);
+    let generation = app.core.app_status().session_generation;
+    let request = settings(
+        json!({"idle_minutes": 5, "lock_on_app_switch": false, "session_generation": generation}),
+    );
+    native_run(
+        &mut app.core,
+        NativeAction::SetSettings(request),
+        NativeCredentials::Password(pw(PASSWORD)),
+    )
+    .unwrap();
+    assert_eq!(app.core.app_status().settings.idle_minutes, 5);
+}
+
+#[test]
+fn native_late_cancelled_job_cannot_cancel_a_new_panel() {
+    let mut app = App::new();
+    unlocked(&mut app);
+    app.core.lock();
+    let old = app
+        .core
+        .begin_native(NativeAction::Unlock { recovery: false })
+        .unwrap();
+    let job = app
+        .core
+        .prepare_native(old.id, NativeCredentials::Password(pw(PASSWORD)))
+        .unwrap();
+    app.core.cancel_native(old.id);
+    let current = app
+        .core
+        .begin_native(NativeAction::Unlock { recovery: false })
+        .unwrap();
+    assert_eq!(code(app.core.finish_native(job.run())), "invalid_input");
+    assert_eq!(app.core.native_pending_id(), Some(current.id));
+    let job = app
+        .core
+        .prepare_native(current.id, NativeCredentials::Password(pw(PASSWORD)))
+        .unwrap();
+    app.core.finish_native(job.run()).unwrap();
+    assert_eq!(app.phase(), "unlocked");
+}
+
+#[test]
+fn native_input_panel_expires_even_without_a_credential_callback() {
+    let mut app = App::new();
+    unlocked(&mut app);
+    app.core.lock();
+    let operation = app
+        .core
+        .begin_native(NativeAction::Unlock { recovery: false })
+        .unwrap();
+    assert_eq!(app.core.native_pending_id(), Some(operation.id));
+    app.advance(120_000);
+    app.core.tick();
+    assert_eq!(app.core.native_pending_id(), None);
+    assert_eq!(app.core.app_status().failed_attempts, 0);
+    assert_eq!(app.phase(), "locked");
+}
+
+#[test]
+fn document_mutations_invalidate_native_readouts_without_restarting_the_session() {
+    let mut app = App::new();
+    unlocked(&mut app);
+    let id = app
+        .core
+        .create_note(
+            input(
+                "text",
+                "Fake epoch target",
+                json!({}),
+                json!({"body": "fake initial text"}),
+            ),
+            None,
+        )
+        .unwrap();
+    let generation = app.core.app_status().session_generation;
+    let before_favorite = app.core.native_operation_epoch();
+    app.core.set_favorite(&id, true).unwrap();
+    assert!(app.core.native_operation_epoch() > before_favorite);
+    assert_eq!(app.core.app_status().session_generation, generation);
+    let before_append = app.core.native_operation_epoch();
+    app.core.append_text(&id, pw("fake appended text")).unwrap();
+    assert!(app.core.native_operation_epoch() > before_append);
+    assert_eq!(app.core.app_status().session_generation, generation);
 }

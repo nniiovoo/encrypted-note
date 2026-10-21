@@ -1273,3 +1273,17 @@ fn backup_reminder_due_at_seven_days() {
 fn backup_reminder_with_change_in_the_future_is_not_due() {
     assert!(!backup_reminder_due(Some(T0 + MIN), T0));
 }
+
+#[test]
+fn quick_unlock_starts_idle_timing_without_erasing_password_backoff() {
+    let mut s = Session::new(LockSettings::default());
+    for _ in 0..4 {
+        s.failed_attempt(T0);
+    }
+    let before = s.attempt_allowed(T0);
+    s.quick_unlocked(T0);
+    assert!(s.is_unlocked());
+    assert_eq!(s.lock_deadline(), Some(T0 + 5 * MIN));
+    assert_eq!(s.failed_attempts(), 4);
+    assert_eq!(s.attempt_allowed(T0), before);
+}

@@ -496,11 +496,11 @@ impl TempFile {
                 .write(true)
                 .open(target)
                 .and_then(|file| file.sync_all());
-            return Ok(if flushed.is_ok() {
+            Ok(if flushed.is_ok() {
                 CommitStatus::Durable
             } else {
                 CommitStatus::Uncertain
-            });
+            })
         }
         #[cfg(not(any(unix, windows)))]
         {

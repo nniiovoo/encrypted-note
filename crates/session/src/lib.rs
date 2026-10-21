@@ -254,9 +254,14 @@ impl Session {
 
     /// Credential accepted: become Unlocked, reset failures, start the idle timer.
     pub fn unlocked(&mut self, now: Millis) {
+        self.quick_unlocked(now);
+        self.failures = 0;
+    }
+
+    /// A protected Vault Key was released. Start idle timing without forgiving failed passwords.
+    pub fn quick_unlocked(&mut self, now: Millis) {
         self.last_activity = Some(now);
         self.last_elsewhere = None;
-        self.failures = 0;
     }
 
     /// Owner pressed Lock (or an Effect::Lock is being carried out). Returns HideReveal /
