@@ -1,0 +1,6 @@
+node_modules/
+.env*
+*.secret
+*.log
+.DS_Store
+.scratch/

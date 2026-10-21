@@ -1,0 +1,13 @@
+{
+  "name": "encrypted-note-agent-companion",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test test/generate.test.mjs",
+    "check": "node --check src/generate.mjs && node --check src/config.mjs && node --test test/generate.test.mjs"
+  }
+}
