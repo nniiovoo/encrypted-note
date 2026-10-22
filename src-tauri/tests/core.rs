@@ -1807,6 +1807,57 @@ fn closing_a_preview_forgets_the_decrypted_copy_at_once() {
     assert_eq!(app.phase(), "no_vault");
 }
 
+fn assert_a_locked_backup_pick_is_forgotten(event: Option<OsEvent>) {
+    let (_source, backup) = a_backup();
+    let mut app = App::new();
+    unlocked(&mut app);
+    app.core.lock();
+    app.core.set_backup_to_open(backup.clone()).unwrap();
+
+    match event {
+        Some(event) => app.core.os_event(event),
+        None => app.core.lock(),
+    }
+    assert_eq!(app.phase(), "locked");
+    assert_eq!(
+        code(
+            app.core
+                .begin_native(NativeAction::InspectBackup { recovery: false })
+        ),
+        "invalid_input",
+        "{event:?} must require a new Backup pick before native authentication"
+    );
+    assert_eq!(
+        code(app.core.inspect_backup(password(PASSWORD))),
+        "invalid_input",
+        "{event:?} must also forget the Backup for internal callers"
+    );
+
+    app.core.set_backup_to_open(backup).unwrap();
+    assert_eq!(
+        app.core
+            .inspect_backup(password(PASSWORD))
+            .unwrap()
+            .note_count,
+        1
+    );
+}
+
+#[test]
+fn owner_lock_forgets_a_backup_picked_while_locked() {
+    assert_a_locked_backup_pick_is_forgotten(None);
+}
+
+#[test]
+fn sleep_forgets_a_backup_picked_while_locked() {
+    assert_a_locked_backup_pick_is_forgotten(Some(OsEvent::Sleep));
+}
+
+#[test]
+fn screen_lock_forgets_a_backup_picked_while_locked() {
+    assert_a_locked_backup_pick_is_forgotten(Some(OsEvent::ScreenLocked));
+}
+
 #[test]
 fn an_inspection_is_dropped_when_the_phase_changes_or_the_vault_changes() {
     let (_source, backup) = a_backup();
@@ -4965,6 +5016,112 @@ fn native_inspection_rejects_changed_picked_bytes_then_installs_only_checked_sou
     .unwrap();
     assert!(matches!(result, NativeResult::Preview(_)));
     app.core.replace_with_backup().unwrap();
+}
+
+fn native_safety_preview_with_another_copy() -> (App, String) {
+    let mut app = App::new();
+    unlocked(&mut app);
+    for title in ["Fake first version", "Fake second version"] {
+        app.core
+            .create_note(
+                input("text", title, json!({}), json!({"body": "fake body"})),
+                None,
+            )
+            .unwrap();
+    }
+    let copies = app.core.list_safety_copies().unwrap();
+    assert!(copies.len() >= 2);
+    native_run(
+        &mut app.core,
+        NativeAction::InspectSafetyCopy {
+            id: copies[0].id.clone(),
+            recovery: false,
+        },
+        NativeCredentials::Password(pw(PASSWORD)),
+    )
+    .unwrap();
+    (app, copies[1].id.clone())
+}
+
+#[test]
+fn native_inspection_revokes_previous_preview_after_cancel_or_wrong_credential() {
+    for cancel in [true, false] {
+        let (mut app, next) = native_safety_preview_with_another_copy();
+        let before = std::fs::read(vault_file(&app)).unwrap();
+        let operation = app
+            .core
+            .begin_native(NativeAction::InspectSafetyCopy {
+                id: next,
+                recovery: false,
+            })
+            .unwrap();
+        if cancel {
+            app.core.cancel_native(operation.id);
+        } else {
+            let job = app
+                .core
+                .prepare_native(
+                    operation.id,
+                    NativeCredentials::Password(pw(WRONG_PASSWORD)),
+                )
+                .unwrap();
+            assert_eq!(code(app.core.finish_native(job.run())), "wrong_credential");
+        }
+        assert_eq!(code(app.core.restore_safety_copy()), "invalid_input");
+        assert_eq!(std::fs::read(vault_file(&app)).unwrap(), before);
+    }
+}
+
+#[test]
+fn native_inspection_revokes_previous_preview_before_safety_source_read() {
+    let (mut app, next) = native_safety_preview_with_another_copy();
+    let before = std::fs::read(vault_file(&app)).unwrap();
+    std::fs::remove_file(app.data_dir().join("safety").join(&next)).unwrap();
+    assert_eq!(
+        code(app.core.begin_native(NativeAction::InspectSafetyCopy {
+            id: next,
+            recovery: false
+        })),
+        "not_found"
+    );
+    assert_eq!(code(app.core.restore_safety_copy()), "invalid_input");
+    assert_eq!(std::fs::read(vault_file(&app)).unwrap(), before);
+}
+
+#[test]
+fn native_inspection_revokes_previous_preview_before_backup_read_and_keeps_the_pick() {
+    let (_source, backup) = a_backup();
+    let bytes = std::fs::read(&backup).unwrap();
+    let mut app = App::new();
+    app.core.set_backup_to_open(backup.clone()).unwrap();
+    native_run(
+        &mut app.core,
+        NativeAction::InspectBackup { recovery: false },
+        NativeCredentials::Password(pw(PASSWORD)),
+    )
+    .unwrap();
+    std::fs::remove_file(&backup).unwrap();
+    assert_eq!(
+        code(
+            app.core
+                .begin_native(NativeAction::InspectBackup { recovery: false })
+        ),
+        "io"
+    );
+    assert_eq!(code(app.core.replace_with_backup()), "invalid_input");
+    assert!(!vault_file(&app).exists());
+
+    // Retrying the selected file inspects it again; clearing the old preview must not clear
+    // this request's core-owned picker selection.
+    std::fs::write(&backup, bytes).unwrap();
+    native_run(
+        &mut app.core,
+        NativeAction::InspectBackup { recovery: false },
+        NativeCredentials::Password(pw(PASSWORD)),
+    )
+    .unwrap();
+    app.core.replace_with_backup().unwrap();
+    assert_eq!(app.phase(), "unlocked");
 }
 
 #[test]
