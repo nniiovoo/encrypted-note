@@ -123,9 +123,9 @@ fn schedule_cleanup(app: &AppHandle) {
     let app = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let result = biometry::remove(&app.state::<QuickRuntime>().path);
-        if result.is_err() {
-            commands::with_core(&app, |core| core.quick_unlock_cleanup_failed());
-        }
+        commands::with_core(&app, |core| {
+            core.quick_unlock_cleanup_finished(result.is_ok());
+        });
         app.state::<QuickRuntime>()
             .busy
             .store(false, Ordering::SeqCst);
@@ -177,7 +177,11 @@ pub async fn enable(app: AppHandle) -> Result<(), ApiError> {
         }
         let state = worker_app.state::<QuickRuntime>();
         if state.cleanup.swap(false, Ordering::SeqCst) {
-            biometry::remove(&state.path)?;
+            let result = biometry::remove(&state.path);
+            commands::with_core(&worker_app, |core| {
+                core.quick_unlock_cleanup_finished(result.is_ok());
+            });
+            result?;
         }
         let payload = enrollment
             .key

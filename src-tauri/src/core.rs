@@ -464,6 +464,7 @@ pub struct AppCore {
     quick_unlock_reason: Option<&'static str>,
     quick_pending: Option<u64>,
     quick_cleanup_needed: bool,
+    quick_cleanup_failed: bool,
 }
 
 impl AppCore {
@@ -527,6 +528,7 @@ impl AppCore {
             quick_unlock_reason: None,
             quick_pending: None,
             quick_cleanup_needed: false,
+            quick_cleanup_failed: false,
         };
         core.load_quick_unlock_registration();
         Ok(core)

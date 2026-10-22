@@ -51,6 +51,8 @@ export const strings = {
   quickUnlockWalletLimit: "Seed Phrases and Private Keys still require your Master Password for every protected action.",
   enableTouchId: "Enable Touch ID",
   disableTouchId: "Disable Touch ID",
+  quickUnlockCleanupFailed: "The old Touch ID registration could not be removed. Retry cleanup; Touch ID stays disabled.",
+  retryTouchIdCleanup: "Retry cleanup",
   title: "Title",
 
   // Welcome
