@@ -1530,6 +1530,7 @@ impl AppCore {
             _ => Phase::Locked,
         };
         self.inspected = None;
+        self.backup_to_open = None;
         self.backup_destination = None;
         self.reset_guard();
     }
