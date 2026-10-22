@@ -11,6 +11,7 @@ pub struct QuickUnlockStatus {
     pub available: bool,
     pub enabled: bool,
     pub can_unlock: bool,
+    pub cleanup_failed: bool,
     pub reason: Option<&'static str>,
 }
 
@@ -147,6 +148,7 @@ impl AppCore {
             available,
             enabled,
             can_unlock,
+            cleanup_failed: self.quick_cleanup_failed,
             reason,
         }
     }
@@ -162,9 +164,12 @@ impl AppCore {
     }
 
     pub fn quick_unlock_cleanup_failed(&mut self) {
-        self.quick_unlock_reason = Some(
-            "The old Touch ID registration could not be removed. Use your Master Password and retry cleanup.",
-        );
+        self.quick_unlock_cleanup_finished(false);
+    }
+
+    /// Only a completed exact-file removal changes this warning; queuing a retry does not.
+    pub fn quick_unlock_cleanup_finished(&mut self, succeeded: bool) {
+        self.quick_cleanup_failed = !succeeded;
     }
 
     pub fn disable_quick_unlock(&mut self) -> Result<(), ApiError> {
@@ -262,7 +267,6 @@ impl AppCore {
             self.quick_cleanup_needed = true;
             return Err(error);
         }
-        self.quick_unlock_reason = None;
         Ok(())
     }
 

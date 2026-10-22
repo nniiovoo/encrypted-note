@@ -340,12 +340,69 @@ fn disable_persists_before_cleanup_and_surviving_items_are_unusable() {
     assert!(app.settings()["quick_unlock_binding"].is_null());
     assert!(app.core.take_quick_unlock_cleanup());
     app.core.quick_unlock_cleanup_failed();
-    assert!(app.core.app_status().quick_unlock.reason.is_some());
+    assert!(app.core.app_status().quick_unlock.cleanup_failed);
+    assert!(app.core.app_status().quick_unlock.reason.is_none());
     let mut app = app.restart();
     assert!(!app.core.app_status().quick_unlock.enabled);
     app.native_unlock();
     app.core.lock();
     assert!(app.unlock_with(&payload).is_err());
+}
+
+#[test]
+fn cleanup_retry_stays_disabled_until_removal_success_clears_the_warning() {
+    let mut app = App::new();
+    let payload = app.enroll();
+    app.core.disable_quick_unlock().unwrap();
+    assert!(app.core.take_quick_unlock_cleanup());
+    app.core.quick_unlock_cleanup_failed();
+    assert!(app.core.app_status().quick_unlock.cleanup_failed);
+
+    // Retrying uses the same disable path and remains a cleanup request, never enrollment.
+    app.core.disable_quick_unlock().unwrap();
+    assert!(app.settings()["quick_unlock_binding"].is_null());
+    assert!(app.core.take_quick_unlock_cleanup());
+    assert!(!app.core.take_quick_unlock_cleanup());
+    let pending = app.core.app_status().quick_unlock;
+    assert!(pending.cleanup_failed);
+    assert!(!pending.enabled);
+    assert!(!pending.can_unlock);
+
+    app.core.quick_unlock_cleanup_finished(true);
+    let cleaned = app.core.app_status().quick_unlock;
+    assert!(!cleaned.cleanup_failed);
+    assert!(cleaned.reason.is_none());
+    assert!(!cleaned.enabled);
+    assert!(!cleaned.can_unlock);
+    app.core.lock();
+    assert!(app.unlock_with(&payload).is_err());
+}
+
+#[test]
+fn cleanup_retry_preserves_independent_unavailable_hardware_reason() {
+    const REASON: &str = "Touch ID is unavailable on this fictional test computer.";
+    let mut app = App::new();
+    let _ = app.enroll();
+    app.core.set_quick_unlock_availability(false, Some(REASON));
+    app.core.disable_quick_unlock().unwrap();
+    assert!(app.core.take_quick_unlock_cleanup());
+    app.core.quick_unlock_cleanup_failed();
+    let failed = app.core.app_status().quick_unlock;
+    assert!(failed.cleanup_failed);
+    assert_eq!(failed.reason, Some(REASON));
+    assert!(!failed.available);
+
+    // Hardware availability is not needed to persist disabled policy and requeue removal.
+    app.core.disable_quick_unlock().unwrap();
+    assert!(app.core.take_quick_unlock_cleanup());
+    assert!(app.core.app_status().quick_unlock.cleanup_failed);
+    app.core.quick_unlock_cleanup_finished(true);
+    let cleaned = app.core.app_status().quick_unlock;
+    assert!(!cleaned.cleanup_failed);
+    assert_eq!(cleaned.reason, Some(REASON));
+    assert!(!cleaned.available);
+    assert!(!cleaned.enabled);
+    assert!(!cleaned.can_unlock);
 }
 
 #[test]

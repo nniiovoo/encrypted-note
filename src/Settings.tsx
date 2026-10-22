@@ -433,8 +433,9 @@ function QuickUnlock({ status }: { status: AppStatus }) {
         <p>{s.quickUnlockText}</p>
         <p className="hint">{s.quickUnlockWalletLimit}</p>
         {quick.reason && <p className="hint">{quick.reason}</p>}
-        <button disabled={busy || (!quick.enabled && !quick.available)} onClick={() => run(quick.enabled ? disableQuickUnlock : enableQuickUnlock)}>
-          {busy ? s.checking : quick.enabled ? s.disableTouchId : s.enableTouchId}
+        {quick.cleanup_failed && <p className="hint">{s.quickUnlockCleanupFailed}</p>}
+        <button disabled={busy || (!quick.cleanup_failed && !quick.enabled && !quick.available)} onClick={() => run(quick.cleanup_failed || quick.enabled ? disableQuickUnlock : enableQuickUnlock)}>
+          {busy ? s.checking : quick.cleanup_failed ? s.retryTouchIdCleanup : quick.enabled ? s.disableTouchId : s.enableTouchId}
         </button>
         <ErrorLine error={error} />
       </div>
