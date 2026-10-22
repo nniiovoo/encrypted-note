@@ -1,0 +1,51 @@
+name: App checks
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Check (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, windows-2025]
+    defaults:
+      run:
+        shell: bash
+    env:
+      RUSTUP_TOOLCHAIN: "1.96.0"
+    steps:
+      - name: Keep shell scripts in LF form
+        run: git config --global core.autocrlf false
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "26.8.2"
+          package-manager-cache: false
+      - name: Set up Rust
+        run: rustup toolchain install 1.96.0 --profile minimal --component rustfmt --component clippy
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --version 0.20.2 --locked
+      - name: Install frontend dependencies
+        run: npm ci --ignore-scripts
+      # Automated checks do not establish physical native UI, capture or biometric acceptance.
+      - name: Run unified checks
+        run: bash scripts/check.sh
