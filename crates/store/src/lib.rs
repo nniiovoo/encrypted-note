@@ -532,11 +532,13 @@ impl TempFile {
 
 #[cfg(test)]
 mod tests {
-    use super::{CommitStatus, StoreError, TempFile, write_new_backup_without_folder_access};
+    use super::{StoreError, write_new_backup_without_folder_access};
 
     #[cfg(unix)]
     #[test]
     fn post_rename_flush_failure_reports_uncertain_without_losing_installed_file() {
+        use super::{CommitStatus, TempFile};
+
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("vault.enote");
         std::fs::write(&target, b"fake old vault").unwrap();
