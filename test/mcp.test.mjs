@@ -9,7 +9,7 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import { createGenerator, POLICY } from '../src/generate.mjs';
 import { createMcpServer } from '../src/mcp.mjs';
 import { boundedInput, startStdio } from '../src/stdio.mjs';
-import { startHttpServer } from '../src/http.mjs';
+import { startHttpServer, stopHttpServer } from '../src/http.mjs';
 
 const TOKEN = 'FAKE_HTTP_TOKEN_FOR_TESTS_ONLY_1234567890';
 const KEY = 'FAKE_OPENAI_AGENT_KEY_FOR_TESTS_ONLY';
@@ -258,4 +258,48 @@ test('abrupt stdio input close cancels an admitted provider request', async () =
     await Promise.race([cancelled, new Promise((_, reject) =>
       setTimeout(() => reject(new Error('stdio did not cancel')), 500))]);
   } finally { await server.close(); input.destroy(); output.destroy(); }
+});
+
+test('HTTP shutdown cancels an admitted operation and closes active connections promptly', { timeout: 5000 }, async () => {
+  let start;
+  let abort;
+  let capturedSignal;
+  const started = new Promise(resolve => { start = resolve; });
+  const aborted = new Promise(resolve => { abort = resolve; });
+  const generate = createGenerator({ apiKey: KEY, transport: async ({ signal }) => {
+    capturedSignal = signal;
+    signal.addEventListener('abort', abort, { once: true });
+    start();
+    return new Promise(() => {});
+  } });
+  const server = await startHttpServer({ generate, bearerToken: TOKEN, port: 0 });
+  const address = 'http://127.0.0.1:' + server.address().port + '/mcp';
+  const closed = new Promise(resolve => server.once('close', resolve));
+  const pending = fetch(address, {
+    method: 'POST',
+    headers: { authorization: 'Bearer ' + TOKEN, 'content-type': 'application/json',
+      accept: 'application/json, text/event-stream' },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 'fictional-shutdown-request', method: 'tools/call',
+      params: { name: 'generate_text', arguments: { text: 'Fictional pending operation.' } } }),
+  }).then(response => response.arrayBuffer(), error => error);
+  let timer;
+  try {
+    await started;
+    stopHttpServer(server);
+    await Promise.race([
+      Promise.all([aborted, closed]),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error('HTTP shutdown left an admitted operation or connection open.')), 500);
+      }),
+    ]);
+    assert.equal(capturedSignal.aborted, true);
+    assert.equal(server.listening, false);
+    assert.equal(await new Promise((resolve, reject) => server.getConnections((error, count) =>
+      error ? reject(error) : resolve(count))), 0);
+    await pending;
+  } finally {
+    clearTimeout(timer);
+    stopHttpServer(server);
+    await pending;
+  }
 });

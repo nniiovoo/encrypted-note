@@ -111,12 +111,18 @@ export async function startHttpServer({ generate, bearerToken, port = 8789 }) {
   });
   return server;
 }
+// Closing active responses propagates cancellation to admitted MCP calls.
+export function stopHttpServer(server) {
+  server.close();
+  server.closeAllConnections();
+}
+
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   try {
     const { apiKey, bearerToken } = readRuntimeConfig(process.env, { requireHttpToken: true });
     const server = await startHttpServer({ generate: createGenerator({ apiKey }), bearerToken });
     process.stderr.write('Companion HTTP transport is listening on loopback port 8789.\n');
-    for (const event of ['SIGINT', 'SIGTERM']) process.once(event, () => server.close());
+    for (const event of ['SIGINT', 'SIGTERM']) process.once(event, () => stopHttpServer(server));
   } catch {
     process.stderr.write('Companion could not start. Check the separate Agent Key and HTTP authorization configuration.\n');
     process.exitCode = 1;

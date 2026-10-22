@@ -20,14 +20,14 @@ export async function launchOwnerBroker(plan, { credentialFile, tokenFile, outpu
   // An independent owner preflight must already trust this launcher and its Node runtime.
   // Delay application/SDK imports until the remaining protected tree checks complete.
   const { createGenerator } = await import('../src/generate.mjs');
-  const { startHttpServer } = await import('../src/http.mjs');
+  const { startHttpServer, stopHttpServer } = await import('../src/http.mjs');
   let apiKey = await readConfirmedCredential(credentialFile, plan.ownerUid);
   const bearerToken = await readAgentToken(tokenFile, plan.ownerUid);
   if (apiKey === bearerToken) { apiKey = ''; throw new Error('Separate credentials are required.'); }
   const generate = createGenerator({ apiKey });
   apiKey = ''; // Best effort only; JavaScript strings cannot be guaranteed erased.
   const server = await startHttpServer({ generate, bearerToken, port: plan.brokerPort });
-  const stop = () => { server.close(); server.closeAllConnections(); };
+  const stop = () => stopHttpServer(server);
   // Supplemental lifetime, never a substitute for provider-enforced one-hour expiry.
   const lifetime = setTimeout(stop, plan.credentialExpirySeconds * 1000);
   for (const event of ['SIGINT', 'SIGTERM']) process.once(event, stop);
