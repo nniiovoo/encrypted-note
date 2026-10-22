@@ -1479,6 +1479,18 @@ impl AppCore {
         self.dir.root().display().to_string()
     }
 
+    /// Rust-only custody location; canonicalization errors must never select a fallback path.
+    pub(crate) fn quick_unlock_path(&self) -> Result<PathBuf, ApiError> {
+        self.dir
+            .root()
+            .canonicalize()
+            .map(|root| root.join("quick-unlock.sealed"))
+            .map_err(|_| ApiError {
+                code: "internal",
+                message: "The local Touch ID storage folder could not be opened.".to_owned(),
+            })
+    }
+
     pub fn mark_seed_explainer_seen(&mut self) -> Result<(), ApiError> {
         self.tick();
         self.open()?;

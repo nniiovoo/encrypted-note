@@ -13,16 +13,17 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
+use crate::core::native::{NativeAction, NativeResult};
 use notes::seed::SeedCheck;
 use notes::{Filter, NoteSummary, NoteView};
+use serde::Deserialize;
 use session::OsEvent;
-use tauri::{AppHandle, Emitter, Manager, Runtime};
+use tauri::{AppHandle, Emitter, Manager};
 use zeroize::Zeroizing;
 
 use crate::core::{
-    ApiError, AppCore, AppStatus, AssessmentView, BackupWritten, CredentialInput, NoteEditInput,
-    NoteInput, PickedFile, RecoveryKeyShown, SafetyCopy, SettingsInput, SettingsView, ShowMode,
-    VaultPreview,
+    ApiError, AppCore, AppStatus, BackupWritten, NoteEditInput, NoteInput, PickedFile, SafetyCopy,
+    SettingsInput, SettingsView, ShowMode, VaultPreview,
 };
 
 pub const STATUS_EVENT: &str = "status-changed";
@@ -34,9 +35,6 @@ pub struct CoreState(pub Mutex<AppCore>);
 /// not count as switching to another app (that could lock the Vault mid-backup).
 pub static DIALOG_OPEN: AtomicBool = AtomicBool::new(false);
 static STATUS_REVISION: AtomicU64 = AtomicU64::new(0);
-/// True while `create_vault` is calibrating the KDF: one calibration at a time (each run takes
-/// up to 512 MiB).
-static CALIBRATING: AtomicBool = AtomicBool::new(false);
 
 pub fn status(core: &AppCore) -> AppStatus {
     let mut status = core.app_status();
@@ -46,7 +44,7 @@ pub fn status(core: &AppCore) -> AppStatus {
     status
 }
 
-pub fn core<R: Runtime>(app: &AppHandle<R>) -> MutexGuard<'_, AppCore> {
+pub fn core(app: &AppHandle) -> MutexGuard<'_, AppCore> {
     app.state::<CoreState>()
         .inner()
         .0
@@ -55,14 +53,16 @@ pub fn core<R: Runtime>(app: &AppHandle<R>) -> MutexGuard<'_, AppCore> {
 }
 
 /// Run `f` on the core, then tell the screens the new status.
-pub fn with_core<R: Runtime, T>(app: &AppHandle<R>, f: impl FnOnce(&mut AppCore) -> T) -> T {
+pub fn with_core<T>(app: &AppHandle, f: impl FnOnce(&mut AppCore) -> T) -> T {
     let mut core = core(app);
     let out = f(&mut core);
+    crate::native_coordinator::sync(app, &mut core);
+    crate::quick_runtime::sync(app, &mut core);
     let _ = app.emit(STATUS_EVENT, status(&core));
     out
 }
 
-/// [`with_core`] on the blocking pool.
+/// Disk-only work waits off the UI thread; credential derivation uses the native coordinator.
 async fn blocking<T: Send + 'static>(
     app: AppHandle,
     f: impl FnOnce(&mut AppCore) -> Result<T, ApiError> + Send + 'static,
@@ -79,7 +79,11 @@ fn internal() -> ApiError {
     }
 }
 
-pub fn os_event<R: Runtime>(app: &AppHandle<R>, event: OsEvent) {
+pub fn os_event(app: &AppHandle, event: OsEvent) {
+    if !matches!(event, OsEvent::FocusGained) {
+        crate::native_coordinator::cancel(app);
+        crate::quick_runtime::cancel(app);
+    }
     with_core(app, |core| core.os_event(event));
 }
 
@@ -95,70 +99,101 @@ pub fn activity(app: AppHandle) {
     core(&app).activity();
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CredentialKind {
+    Password,
+    Recovery,
+}
+impl CredentialKind {
+    fn is_recovery(&self) -> bool {
+        matches!(self, Self::Recovery)
+    }
+}
+
+/// Credentials are deliberately absent; unknown legacy password input is rejected.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SettingsRequest {
+    #[serde(default)]
+    session_generation: Option<u64>,
+    idle_minutes: u32,
+    lock_on_app_switch: bool,
+    #[serde(default)]
+    clipboard_clear_seconds: Option<u32>,
+    #[serde(default)]
+    count_activity_anywhere: Option<bool>,
+}
+impl From<SettingsRequest> for SettingsInput {
+    fn from(value: SettingsRequest) -> Self {
+        Self {
+            master_password: None,
+            session_generation: value.session_generation,
+            idle_minutes: value.idle_minutes,
+            lock_on_app_switch: value.lock_on_app_switch,
+            clipboard_clear_seconds: value.clipboard_clear_seconds,
+            count_activity_anywhere: value.count_activity_anywhere,
+        }
+    }
+}
+async fn native_unit(app: AppHandle, action: NativeAction) -> Result<(), ApiError> {
+    match crate::native_coordinator::run(app, action).await? {
+        NativeResult::Unit => Ok(()),
+        _ => Err(internal()),
+    }
+}
+#[tauri::command(async)]
+pub fn cancel_native_operation(app: AppHandle) {
+    crate::native_coordinator::cancel(&app);
+    crate::quick_runtime::cancel(&app);
+}
+
+#[tauri::command]
+pub async fn enable_quick_unlock(app: AppHandle) -> Result<(), ApiError> {
+    crate::quick_runtime::enable(app).await
+}
+#[tauri::command]
+pub async fn disable_quick_unlock(app: AppHandle) -> Result<(), ApiError> {
+    crate::quick_runtime::disable(app).await
+}
+#[tauri::command]
+pub async fn quick_unlock(app: AppHandle) -> Result<(), ApiError> {
+    crate::quick_runtime::unlock(app).await
+}
+
 // ---------- setup, unlock, lock ----------
 
 // These two need no Vault and no state, so they don't wait for the core: scoring a long
 // password can take a while, and nothing that locks may queue behind it.
 
-#[tauri::command(async)]
-pub fn suggest_passphrase() -> Zeroizing<String> {
-    policy::suggest_passphrase()
-}
-
-#[tauri::command(async)]
-pub fn assess_password(password: Zeroizing<String>) -> AssessmentView {
-    crate::core::assess_password(&password)
-}
-
 #[tauri::command]
-pub async fn create_vault(
-    app: AppHandle,
-    master_password: Zeroizing<String>,
-) -> Result<RecoveryKeyShown, ApiError> {
-    // Only when a Vault can be created now, and never two at once: each calibration runs
-    // several Argon2id derivations of up to 512 MiB.
-    core(&app).create_vault_allowed()?;
-    if CALIBRATING.swap(true, Ordering::SeqCst) {
-        return Err(ApiError {
-            code: "invalid_input",
-            message: "encrypted-note is already setting up your Vault. Give it a moment."
-                .to_owned(),
-        });
+pub async fn create_vault(app: AppHandle) -> Result<(), ApiError> {
+    match crate::native_coordinator::create(app).await? {
+        NativeResult::Unit => Ok(()),
+        _ => Err(internal()),
     }
-    // Calibrate without holding the core: the screens keep polling the status meanwhile.
-    let limits = vault_format::Limits::PRODUCTION;
-    let params = tauri::async_runtime::spawn_blocking(move || {
-        vault_format::calibrate(&limits, vault_format::measure_kdf)
-    })
-    .await;
-    CALIBRATING.store(false, Ordering::SeqCst);
-    let params = params.map_err(|_| internal())?;
-    blocking(app, move |core| core.create_vault(master_password, params)).await
-}
-
-#[tauri::command(async)]
-pub fn confirm_recovery_kit(
-    app: AppHandle,
-    last_groups: Zeroizing<String>,
-) -> Result<(), ApiError> {
-    with_core(&app, |core| core.confirm_recovery_kit(&last_groups))
 }
 
 #[tauri::command]
-pub async fn unlock(app: AppHandle, credential: CredentialInput) -> Result<(), ApiError> {
-    blocking(app, move |core| core.unlock(credential)).await
+pub async fn unlock(app: AppHandle, kind: CredentialKind) -> Result<(), ApiError> {
+    native_unit(
+        app,
+        NativeAction::Unlock {
+            recovery: kind.is_recovery(),
+        },
+    )
+    .await
 }
 
 #[tauri::command]
-pub async fn set_new_password(
-    app: AppHandle,
-    master_password: Zeroizing<String>,
-) -> Result<(), ApiError> {
-    blocking(app, move |core| core.set_new_password(master_password)).await
+pub async fn set_new_password(app: AppHandle) -> Result<(), ApiError> {
+    native_unit(app, NativeAction::SetNewPassword).await
 }
 
 #[tauri::command(async)]
 pub fn lock(app: AppHandle) {
+    crate::native_coordinator::cancel(&app);
+    crate::quick_runtime::cancel(&app);
     with_core(&app, AppCore::lock);
 }
 
@@ -179,34 +214,21 @@ pub fn get_note(app: AppHandle, id: String) -> Result<NoteView, ApiError> {
 }
 
 #[tauri::command]
-pub async fn create_note(
-    app: AppHandle,
-    input: NoteInput,
-    master_password: Option<Zeroizing<String>>,
-) -> Result<String, ApiError> {
-    blocking(app, move |core| core.create_note(input, master_password)).await
+pub async fn create_note(app: AppHandle, input: NoteInput) -> Result<String, ApiError> {
+    match crate::native_coordinator::run(app, NativeAction::CreateNote(input)).await? {
+        NativeResult::NoteId(id) => Ok(id),
+        _ => Err(internal()),
+    }
 }
 
 #[tauri::command]
-pub async fn update_note(
-    app: AppHandle,
-    id: String,
-    input: NoteEditInput,
-    master_password: Option<Zeroizing<String>>,
-) -> Result<(), ApiError> {
-    blocking(app, move |core| {
-        core.update_note(&id, input, master_password)
-    })
-    .await
+pub async fn update_note(app: AppHandle, id: String, input: NoteEditInput) -> Result<(), ApiError> {
+    native_unit(app, NativeAction::UpdateNote { id, input }).await
 }
 
 #[tauri::command]
-pub async fn trash_note(
-    app: AppHandle,
-    id: String,
-    master_password: Option<Zeroizing<String>>,
-) -> Result<(), ApiError> {
-    blocking(app, move |core| core.trash_note(&id, master_password)).await
+pub async fn trash_note(app: AppHandle, id: String) -> Result<(), ApiError> {
+    native_unit(app, NativeAction::TrashNote { id }).await
 }
 
 #[tauri::command(async)]
@@ -215,20 +237,16 @@ pub fn restore_note(app: AppHandle, id: String) -> Result<(), ApiError> {
 }
 
 #[tauri::command]
-pub async fn delete_forever(
-    app: AppHandle,
-    id: String,
-    master_password: Option<Zeroizing<String>>,
-) -> Result<(), ApiError> {
-    blocking(app, move |core| core.delete_forever(&id, master_password)).await
+pub async fn delete_forever(app: AppHandle, id: String) -> Result<(), ApiError> {
+    native_unit(app, NativeAction::DeleteForever { id }).await
 }
 
 #[tauri::command]
-pub async fn empty_trash(
-    app: AppHandle,
-    master_password: Option<Zeroizing<String>>,
-) -> Result<usize, ApiError> {
-    blocking(app, move |core| core.empty_trash(master_password)).await
+pub async fn empty_trash(app: AppHandle) -> Result<usize, ApiError> {
+    match crate::native_coordinator::run(app, NativeAction::EmptyTrash).await? {
+        NativeResult::Count(count) => Ok(count),
+        _ => Err(internal()),
+    }
 }
 
 #[tauri::command(async)]
@@ -257,13 +275,9 @@ pub async fn show_wallet_field(
     app: AppHandle,
     id: String,
     field: String,
-    master_password: Zeroizing<String>,
     mode: ShowMode,
-) -> Result<Zeroizing<String>, ApiError> {
-    blocking(app, move |core| {
-        core.show_wallet_field(&id, &field, master_password, mode)
-    })
-    .await
+) -> Result<(), ApiError> {
+    native_unit(app, NativeAction::ShowWalletField { id, field, mode }).await
 }
 
 #[tauri::command]
@@ -271,16 +285,13 @@ pub async fn show_and_copy_wallet_field(
     app: AppHandle,
     id: String,
     field: String,
-    master_password: Zeroizing<String>,
-) -> Result<Zeroizing<String>, ApiError> {
-    blocking(app, move |core| {
-        core.show_and_copy_wallet_field(&id, &field, master_password)
-    })
-    .await
+) -> Result<(), ApiError> {
+    native_unit(app, NativeAction::ShowAndCopyWalletField { id, field }).await
 }
 
 #[tauri::command(async)]
 pub fn hide_field(app: AppHandle) {
+    crate::native_coordinator::cancel(&app);
     with_core(&app, AppCore::hide_field);
 }
 
@@ -290,16 +301,8 @@ pub fn extend_reveal(app: AppHandle) -> Result<(), ApiError> {
 }
 
 #[tauri::command]
-pub async fn copy_field(
-    app: AppHandle,
-    id: String,
-    field: String,
-    master_password: Option<Zeroizing<String>>,
-) -> Result<(), ApiError> {
-    blocking(app, move |core| {
-        core.copy_field(&id, &field, master_password)
-    })
-    .await
+pub async fn copy_field(app: AppHandle, id: String, field: String) -> Result<(), ApiError> {
+    native_unit(app, NativeAction::CopyField { id, field }).await
 }
 
 #[tauri::command(async)]
@@ -393,9 +396,19 @@ pub async fn pick_backup_to_open(app: AppHandle) -> Result<PickedFile, ApiError>
 #[tauri::command]
 pub async fn inspect_backup(
     app: AppHandle,
-    credential: CredentialInput,
+    kind: CredentialKind,
 ) -> Result<VaultPreview, ApiError> {
-    blocking(app, move |core| core.inspect_backup(credential)).await
+    match crate::native_coordinator::run(
+        app,
+        NativeAction::InspectBackup {
+            recovery: kind.is_recovery(),
+        },
+    )
+    .await?
+    {
+        NativeResult::Preview(preview) => Ok(preview),
+        _ => Err(internal()),
+    }
 }
 
 #[tauri::command(async)]
@@ -417,9 +430,20 @@ pub fn list_safety_copies(app: AppHandle) -> Result<Vec<SafetyCopy>, ApiError> {
 pub async fn inspect_safety_copy(
     app: AppHandle,
     id: String,
-    credential: CredentialInput,
+    kind: CredentialKind,
 ) -> Result<VaultPreview, ApiError> {
-    blocking(app, move |core| core.inspect_safety_copy(&id, credential)).await
+    match crate::native_coordinator::run(
+        app,
+        NativeAction::InspectSafetyCopy {
+            id,
+            recovery: kind.is_recovery(),
+        },
+    )
+    .await?
+    {
+        NativeResult::Preview(preview) => Ok(preview),
+        _ => Err(internal()),
+    }
 }
 
 #[tauri::command(async)]
@@ -430,24 +454,19 @@ pub fn restore_safety_copy(app: AppHandle) -> Result<(), ApiError> {
 // ---------- account care & settings ----------
 
 #[tauri::command]
-pub async fn change_password(
-    app: AppHandle,
-    current_password: Zeroizing<String>,
-    new_password: Zeroizing<String>,
-    rotate: bool,
-) -> Result<RecoveryKeyShown, ApiError> {
-    blocking(app, move |core| {
-        core.change_password(current_password, new_password, rotate)
-    })
-    .await
+pub async fn change_password(app: AppHandle, rotate: bool) -> Result<(), ApiError> {
+    native_unit(app, NativeAction::ChangePassword { rotate }).await
 }
 
 #[tauri::command]
 pub async fn set_settings(
     app: AppHandle,
-    settings: SettingsInput,
+    settings: SettingsRequest,
 ) -> Result<SettingsView, ApiError> {
-    blocking(app, move |core| core.set_settings(settings)).await
+    match crate::native_coordinator::run(app, NativeAction::SetSettings(settings.into())).await? {
+        NativeResult::Settings(settings) => Ok(settings),
+        _ => Err(internal()),
+    }
 }
 
 #[tauri::command(async)]
@@ -513,7 +532,18 @@ fn civil_date(unix_secs: i64) -> (i64, i64, i64) {
 
 #[cfg(test)]
 mod tests {
-    use super::backup_file_name;
+    use super::{SettingsRequest, backup_file_name};
+
+    #[test]
+    fn webview_settings_cannot_supply_a_master_password() {
+        let ordinary = serde_json::json!({"idle_minutes":10,"lock_on_app_switch":false});
+        assert!(serde_json::from_value::<SettingsRequest>(ordinary.clone()).is_ok());
+        for name in ["master_password", "recovery_key"] {
+            let mut credential_bearing = ordinary.clone();
+            credential_bearing[name] = serde_json::json!("obviously-fake-credential");
+            assert!(serde_json::from_value::<SettingsRequest>(credential_bearing).is_err());
+        }
+    }
 
     #[test]
     fn backup_file_names_carry_the_utc_date() {

@@ -2,6 +2,7 @@
 
 import { Fragment, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent as KeyEvent } from "react";
 import {
+  cancelNativeOperation,
   copyField,
   deleteForever,
   emptyTrash,
@@ -17,7 +18,7 @@ import {
   type NoteSummary,
   type NoteView,
 } from "./api";
-import { Choice, cmdKey, Confirm, daysUntil, dragRegion, ErrorLine, expiry, formatDate, mac, minSec, noAssist, PasswordModal, seconds, TitlebarDrag, useAction } from "./components";
+import { Choice, cmdKey, Confirm, daysUntil, dragRegion, ErrorLine, expiry, formatDate, mac, minSec, noAssist, NativeActionModal, seconds, TitlebarDrag, useAction } from "./components";
 import { Icon, KIND_ICONS, KindBadge, type IconName } from "./icons";
 import { Detail, Editor, type Draft, type Prefill } from "./Note";
 import { Settings } from "./Settings";
@@ -88,7 +89,7 @@ export interface Place {
 }
 export const START: Place = { nav: ALL, noteId: null, sort: "recent" };
 
-export function Home({ status, place, onPlace, readDraft, onDraft, onLock, onKit, onOperationOutcome }: {
+export function Home({ status, place, onPlace, readDraft, onDraft, onLock, onOperationOutcome }: {
   status: AppStatus;
   /** Where to start, and how to tell App where the owner is now. */
   place: Place;
@@ -101,7 +102,6 @@ export function Home({ status, place, onPlace, readDraft, onDraft, onLock, onKit
   onDraft: (draft: Draft | null) => void;
   /** The Lock button. */
   onLock: () => void;
-  onKit: (recoveryKey: string) => void;
   onOperationOutcome: (message: string) => void;
 }) {
   const [nav, setNav] = useState(place.nav);
@@ -156,6 +156,7 @@ export function Home({ status, place, onPlace, readDraft, onDraft, onLock, onKit
   const copiesWas = useRef(status.copies);
   const changed = () => setVersion((v) => v + 1);
   const open = (next: Pane) => {
+    void cancelNativeOperation().catch(() => {});
     dirty.current = false;
     // Whatever Editor was open is saved, cancelled or discarded by now: App lets go of its draft.
     onDraft(null);
@@ -185,6 +186,7 @@ export function Home({ status, place, onPlace, readDraft, onDraft, onLock, onKit
   };
   const go = (n: Nav, expiring = false) => {
     if (sameNav(n, nav) && expiryOnly === expiring) return;
+    void cancelNativeOperation().catch(() => {});
     setCopyError(null);
     // Among All, Favorites and the Kinds the search stays, and so does a Note that still belongs.
     const keepSearch = listed(n) && listed(nav);
@@ -511,7 +513,7 @@ export function Home({ status, place, onPlace, readDraft, onDraft, onLock, onKit
         )}
         {status.purge_trash_failed && <div className="banner" role="alert">{s.trashPurgeFailed}</div>}
         {nav.type === "settings" ? (
-          <Settings status={status} onKit={onKit} onOperationOutcome={onOperationOutcome} />
+          <Settings status={status} onOperationOutcome={onOperationOutcome} />
         ) : nav.type === "trash" ? (
           <Trash
             notes={notes}
@@ -778,12 +780,12 @@ function Trash(props: {
         />
       )}
       {askPassword !== null && (
-        <PasswordModal
+        <NativeActionModal
           title={askPassword.id ? s.noteAction(s.deleteForever, askPassword.titles[0]!) : s.emptyTrash}
           text={askPassword.id ? s.walletDeleteText : s.walletEmptyTrashText(askPassword.titles)}
           submitLabel={askPassword.id ? s.deleteForever : s.emptyTrash}
-          onSubmit={async (password) => {
-            await (askPassword.id ? deleteForever(askPassword.id, password) : emptyTrash(password));
+          onSubmit={async () => {
+            await (askPassword.id ? deleteForever(askPassword.id) : emptyTrash());
             props.onChanged();
             if (askPassword.id && askPassword.id === openId) leave(true);
           }}

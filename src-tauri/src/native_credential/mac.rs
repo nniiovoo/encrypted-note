@@ -17,8 +17,8 @@ use objc2_foundation::{
 use zeroize::Zeroizing;
 
 use super::{
-    Activity, Callback, PresentationState, PresentationUpdate, Prompt, PromptError, Reply, Request,
-    RevealMode, readout_text,
+    Activity, Authorization, Callback, PresentationState, PresentationUpdate, Prompt, PromptError,
+    Reply, Request, RevealMode, readout_text,
 };
 
 thread_local! { static ACTIVE: RefCell<Option<Panel>> = const { RefCell::new(None) }; }
@@ -75,7 +75,10 @@ define_class!(
             else { false }
         }
         #[unsafe(method(controlTextDidChange:))]
-        fn changed(&self, _notification: &AnyObject) { forget_suggestion(); activity(true); }
+        fn changed(&self, _notification: &AnyObject) {
+            forget_suggestion();
+            activity(edit_activity_is_genuine());
+        }
         #[unsafe(method(controlTextDidBeginEditing:))]
         fn editing(&self, _notification: &AnyObject) {
             ACTIVE.with(|active| {
@@ -533,10 +536,19 @@ fn activity(genuine: bool) -> bool {
         return false;
     };
     let authorization = hook(genuine);
-    let update = ACTIVE.with(|active| {
+    let restored = ACTIVE.with(|active| {
         let mut active = active.try_borrow_mut().ok()?;
         let panel = active.as_mut().filter(|panel| panel.id == id)?;
         panel.activity = Some(hook);
+        Some(())
+    });
+    restored.is_some() && apply_authorization(id, authorization)
+}
+
+fn apply_authorization(id: u64, authorization: Authorization) -> bool {
+    let update = ACTIVE.with(|active| {
+        let mut active = active.try_borrow_mut().ok()?;
+        let panel = active.as_mut().filter(|panel| panel.id == id)?;
         let update = panel.presentation.authorize(authorization);
         match update {
             PresentationUpdate::Clear => {
@@ -593,6 +605,27 @@ fn activity(genuine: bool) -> bool {
         update,
         Some(PresentationUpdate::Keep | PresentationUpdate::Restore)
     )
+}
+
+fn edit_activity_is_genuine() -> bool {
+    // Only input events can renew an edit lease; programmatic notifications revalidate.
+    // SAFETY: AppKit invokes the text-field delegate on the main thread; currentEvent
+    // is an optional live NSEvent, and isARepeat is queried only for a key-down event.
+    unsafe {
+        let app: Retained<AnyObject> = msg_send![class!(NSApplication), sharedApplication];
+        let event: Option<Retained<AnyObject>> = msg_send![&app, currentEvent];
+        let Some(event) = event else {
+            return false;
+        };
+        let kind: usize = msg_send![&event, type];
+        let repeated = kind == 10 && msg_send![&event, isARepeat];
+        edit_event_is_genuine(Some(kind), repeated)
+    }
+}
+
+fn edit_event_is_genuine(kind: Option<usize>, repeated: bool) -> bool {
+    // NSEventType: keyDown, or mouse buttons used by native context-menu Paste.
+    matches!(kind, Some(1 | 2 | 3 | 4 | 25 | 26)) || kind == Some(10) && !repeated
 }
 
 fn anchor(view: &NSView) {
@@ -815,7 +848,7 @@ fn extend() {
         extend.take().map(|hook| (panel.id, hook))
     });
     if let Some((id, hook)) = pending {
-        let allowed = hook();
+        let authorization = hook();
         let present = ACTIVE.with(|active| {
             let mut active = active.borrow_mut();
             let Some(panel) = active.as_mut().filter(|panel| panel.id == id) else {
@@ -824,14 +857,13 @@ fn extend() {
             if let Request::Reveal { extend, .. } = &mut panel.prompt {
                 *extend = Some(hook);
             }
-            if allowed {
+            if authorization == Authorization::Allowed {
                 panel.extensions += 1;
                 panel.expires = Some(Instant::now() + Duration::from_secs(20));
             }
             true
         });
-        if present && !allowed {
-            finish(Err(PromptError::Cancelled));
+        if present && !apply_authorization(id, authorization) {
             return;
         }
     }
@@ -959,4 +991,21 @@ pub(super) fn cancel(id: u64) -> bool {
         finish(Err(PromptError::Cancelled));
     }
     matches
+}
+
+#[cfg(test)]
+mod tests {
+    use super::edit_event_is_genuine;
+
+    #[test]
+    fn credential_edits_count_input_but_not_repeats_or_programmatic_notifications() {
+        assert!(edit_event_is_genuine(Some(10), false));
+        for event in [1, 2, 3, 4, 25, 26] {
+            assert!(edit_event_is_genuine(Some(event), false));
+        }
+        assert!(!edit_event_is_genuine(Some(10), true));
+        for event in [None, Some(11), Some(13), Some(15)] {
+            assert!(!edit_event_is_genuine(event, false));
+        }
+    }
 }

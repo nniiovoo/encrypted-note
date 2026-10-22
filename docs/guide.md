@@ -14,6 +14,18 @@ Cmd on Mac, Ctrl on Windows.
 
 Copy feedback names the Note and field that reached the clipboard. The shortcut still targets the open Note while search highlights another Note. Lock and Sharing Guard remove the source title from feedback.
 
+## Opening the Vault and Wallet values
+
+The app collects your Master Password and Recovery Key in native controls. New-password suggestion, strength feedback, confirmation and your Recovery Kit stay there too. Wallet values already stored in the Vault use native readouts after a fresh Master Password check; copying happens inside the Rust core. New or edited Hidden Field values still use the Note editor in the WebView.
+
+On a supported Mac, open Settings → Touch ID → Enable Touch ID. Enter the current Vault's Master Password in the native panel, then complete the protected Touch ID read-back. This local route uses the Secure Enclave and an encrypted private file; it needs no account, server or Apple Developer membership/profile. If the hardware or its enrolled biometric protection is unavailable, use your Master Password.
+
+After every app restart, use your Master Password before Touch ID. Enter it again at least every seven days; Touch ID never moves that deadline. Password/recovery changes, Key Rotation and installing a Backup or Safety Copy turn the registration off and require explicit enrollment again. Wallet actions continue to require their own fresh Master Password.
+
+Disable Touch ID in the same Settings section to turn app policy off and remove its current encrypted registration. A cleanup error leaves it disabled and asks you to retry. Old system backups or copied registration files are not assured erased. Apps with the same user's file access are outside a Keychain application-access-group boundary; approve only biometric prompts you intentionally requested.
+
+The native/Touch ID implementation is present in source; its physical hardware, accessibility and capture acceptance are still pending. See the [security model](security-model.md) and [Quick Unlock acceptance record](quick-unlock-design.md#boundaries-and-acceptance-still-pending). Windows Hello remains later.
+
 ## If the app won't open
 
 Your Notes are still in the Vault file, and the Emergency Reader reads it without the app.

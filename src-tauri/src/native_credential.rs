@@ -78,7 +78,7 @@ enum Request {
     Entry(Prompt),
     Reveal {
         reveal: Reveal,
-        extend: Option<Box<dyn Fn() -> bool + Send>>,
+        extend: Option<Box<dyn Fn() -> Authorization + Send>>,
     },
 }
 
@@ -224,7 +224,7 @@ pub fn present_reveal(
     window: &tauri::WebviewWindow,
     id: u64,
     reveal: Reveal,
-    on_extend: Box<dyn Fn() -> bool + Send>,
+    on_extend: Box<dyn Fn() -> Authorization + Send>,
     activity: Activity,
     completion: Box<dyn FnOnce() + Send>,
 ) -> Result<(), PromptError> {
