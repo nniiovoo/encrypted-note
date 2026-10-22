@@ -34,7 +34,7 @@ async function readBody(request) {
     if (size > POLICY.maxMcpMessageBytes) throw new Error('body');
     chunks.push(chunk);
   }
-  return JSON.parse(Buffer.concat(chunks).toString('utf8'));
+  return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks)));
 }
 export async function startHttpServer({ generate, bearerToken, port = 8789 }) {
   if (typeof bearerToken !== 'string' || !/^[A-Za-z0-9_-]{32,256}$/.test(bearerToken) ||

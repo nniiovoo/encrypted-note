@@ -118,6 +118,48 @@ test('optional HTTP denies missing/wrong authorization, unsafe Host/Origin, quer
   }
 });
 
+test('optional HTTP rejects malformed UTF-8 without generation and preserves valid Unicode', async () => {
+  const supplied = [];
+  const server = await startHttpServer({
+    generate: async args => { supplied.push(args.text); return { text: args.text }; },
+    bearerToken: TOKEN, port: 0,
+  });
+  const address = 'http://127.0.0.1:' + server.address().port + '/mcp';
+  const prefix = Buffer.from('{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"generate_text","arguments":{"text":"');
+  const suffix = Buffer.from('"}}}');
+  const send = textBytes => new Promise((resolve, reject) => {
+    const body = Buffer.concat([prefix, textBytes, suffix]);
+    const request = http.request(address, {
+      method: 'POST', headers: {
+        authorization: 'Bearer ' + TOKEN, 'content-type': 'application/json',
+        accept: 'application/json, text/event-stream', 'content-length': body.length,
+      },
+    }, response => {
+      const chunks = [];
+      response.on('error', reject);
+      response.on('data', chunk => chunks.push(chunk));
+      response.on('end', () => resolve({ status: response.statusCode,
+        json: JSON.parse(Buffer.concat(chunks).toString('utf8')) }));
+    });
+    request.on('error', reject);
+    request.end(body);
+  });
+  try {
+    for (const invalid of [Buffer.from([0xff]), Buffer.from([0xe2, 0x82]), Buffer.from([0xed, 0xa0, 0x80])]) {
+      const result = await send(invalid);
+      assert.equal(result.status, 400);
+      assert.deepEqual(supplied, []);
+    }
+    const text = 'Fictional café — こんにちは 🌱.';
+    const result = await send(Buffer.from(text, 'utf8'));
+    assert.equal(result.status, 200);
+    assert.deepEqual(result.json.result.structuredContent, { text });
+    assert.deepEqual(supplied, [text]);
+  } finally {
+    await new Promise(resolve => { server.close(resolve); server.closeAllConnections(); });
+  }
+});
+
 test('default stdio entry works with the official subprocess MCP client and fictional provider', async () => {
   const transport = new StdioClientTransport({ command: process.execPath, args: ['fixtures/fake-stdio.mjs'], stderr: 'pipe' });
   let errors = '';
