@@ -660,7 +660,7 @@ pub fn cloud_location(path: &Path, home: &Path, platform_is_mac: bool) -> Option
 
     let synced = |folder: &String| folder == "desktop" || folder == "documents";
     let in_home = matches!(under_home, Some([first, ..]) if synced(first));
-    let in_a_users_home = matches!(parts.as_slice(), [root, users, _, folder, ..] if root == "/" && users == "users" && synced(folder));
+    let in_a_users_home = matches!(parts.as_slice(), [root, users, _, folder, ..] if root == std::path::MAIN_SEPARATOR_STR && users == "users" && synced(folder));
     (platform_is_mac && (in_home || in_a_users_home))
         .then_some(CloudProvider::MacDesktopOrDocuments)
 }
