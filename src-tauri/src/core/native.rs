@@ -204,6 +204,12 @@ impl AppCore {
         if let NativeAction::SetSettings(input) = &mut action {
             input.master_password = None;
         }
+        if matches!(
+            action,
+            NativeAction::InspectBackup { .. } | NativeAction::InspectSafetyCopy { .. }
+        ) {
+            self.inspected = None;
+        }
         let inspection = match &action {
             NativeAction::InspectBackup { .. } => {
                 let path = self
