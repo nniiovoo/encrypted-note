@@ -52,6 +52,7 @@ const COMMANDS: &[&str] = &[
 
 fn main() {
     println!("cargo:rerun-if-changed=native/biometry.swift");
+    #[cfg(target_os = "macos")]
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
         build_biometry();
     }
@@ -62,6 +63,7 @@ fn main() {
     .expect("failed to run tauri-build");
 }
 
+#[cfg(target_os = "macos")]
 fn build_biometry() {
     use std::{path::PathBuf, process::Command};
     let arch = match std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() {
