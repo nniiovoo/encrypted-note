@@ -1797,6 +1797,57 @@ fn closing_a_preview_forgets_the_decrypted_copy_at_once() {
     assert_eq!(app.phase(), "no_vault");
 }
 
+fn assert_a_locked_backup_pick_is_forgotten(event: Option<OsEvent>) {
+    let (_source, backup) = a_backup();
+    let mut app = App::new();
+    unlocked(&mut app);
+    app.core.lock();
+    app.core.set_backup_to_open(backup.clone()).unwrap();
+
+    match event {
+        Some(event) => app.core.os_event(event),
+        None => app.core.lock(),
+    }
+    assert_eq!(app.phase(), "locked");
+    assert_eq!(
+        code(
+            app.core
+                .begin_native(NativeAction::InspectBackup { recovery: false })
+        ),
+        "invalid_input",
+        "{event:?} must require a new Backup pick before native authentication"
+    );
+    assert_eq!(
+        code(app.core.inspect_backup(password(PASSWORD))),
+        "invalid_input",
+        "{event:?} must also forget the Backup for internal callers"
+    );
+
+    app.core.set_backup_to_open(backup).unwrap();
+    assert_eq!(
+        app.core
+            .inspect_backup(password(PASSWORD))
+            .unwrap()
+            .note_count,
+        1
+    );
+}
+
+#[test]
+fn owner_lock_forgets_a_backup_picked_while_locked() {
+    assert_a_locked_backup_pick_is_forgotten(None);
+}
+
+#[test]
+fn sleep_forgets_a_backup_picked_while_locked() {
+    assert_a_locked_backup_pick_is_forgotten(Some(OsEvent::Sleep));
+}
+
+#[test]
+fn screen_lock_forgets_a_backup_picked_while_locked() {
+    assert_a_locked_backup_pick_is_forgotten(Some(OsEvent::ScreenLocked));
+}
+
 #[test]
 fn an_inspection_is_dropped_when_the_phase_changes_or_the_vault_changes() {
     let (_source, backup) = a_backup();
