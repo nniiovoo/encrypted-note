@@ -1586,6 +1586,8 @@ impl AppCore {
     fn guard_check(&self) -> Result<(), ApiError> {
         if self.session.sharing_guard_up() {
             Err(err("sharing_guard_up", MSG_GUARD_UP))
+        } else if self.quick_pending.is_some() {
+            Err(not_now())
         } else {
             Ok(())
         }

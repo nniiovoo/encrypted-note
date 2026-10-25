@@ -205,6 +205,78 @@ fn off_by_default_and_only_verified_protected_enrollment_enables_it() {
 }
 
 #[test]
+fn pending_biometry_blocks_disclosure_without_spending_budget() {
+    for finish in [false, true] {
+        let mut app = App::new();
+        let ids: Vec<_> = (0..9)
+            .map(|i| {
+                let input: NoteInput = serde_json::from_value(serde_json::json!({
+                    "kind": "api_key", "title": format!("Fake pending-biometry key {i}"),
+                    "visible": {"env_var": format!("FAKE_KEY_{i}")},
+                    "hidden": {"key": format!("fake-pending-key-{i}")}
+                }))
+                .unwrap();
+                app.core.create_note(input, None).unwrap()
+            })
+            .collect();
+        let NativeResult::QuickUnlockEnrollment(enrollment) = app
+            .native(
+                NativeAction::EnrollQuickUnlock,
+                NativeCredentials::Password(text(PASSWORD)),
+            )
+            .unwrap()
+        else {
+            panic!("expected enrollment");
+        };
+        for id in &ids {
+            assert_eq!(
+                app.core.show_field(id, "key").err().map(|e| e.code),
+                Some("invalid_input")
+            );
+            assert_eq!(
+                app.core.copy_field(id, "key", None).err().map(|e| e.code),
+                Some("invalid_input")
+            );
+            assert_eq!(
+                app.core.copy_field_line(id, "key", 0).err().map(|e| e.code),
+                Some("invalid_input")
+            );
+            assert_eq!(
+                app.core.copy_field_env(id).err().map(|e| e.code),
+                Some("invalid_input")
+            );
+        }
+        assert!(app.core.quick_unlock_pending());
+        let status = app.core.app_status();
+        assert_eq!(status.copies, 0);
+        assert_eq!(status.clipboard_clear_in_ms, None);
+        assert_eq!(status.reveal, None);
+        let payload = enrollment
+            .key
+            .with_keychain_payload(|bytes| Zeroizing::new(bytes.to_vec()));
+        let completion = enrollment.verify(item(&payload));
+        if finish {
+            app.core.finish_quick_unlock_enrollment(completion).unwrap();
+            assert!(app.core.app_status().quick_unlock.enabled);
+        } else {
+            app.core.cancel_all_native();
+            assert!(app.core.finish_quick_unlock_enrollment(completion).is_err());
+            assert!(!app.core.app_status().quick_unlock.enabled);
+        }
+        assert!(!app.core.quick_unlock_pending());
+        // All eight real admissions remain available after the refused requests.
+        for id in &ids[..8] {
+            app.core.copy_field(id, "key", None).unwrap();
+        }
+        assert_eq!(app.core.app_status().copies, 8);
+        assert_eq!(
+            app.core.copy_field(&ids[8], "key", None).unwrap_err().code,
+            "too_many"
+        );
+    }
+}
+
+#[test]
 fn restart_requires_native_current_master_even_if_registration_survives() {
     let mut app = App::new();
     let payload = app.enroll();
