@@ -644,7 +644,7 @@ impl AppCore {
                 .map(NativeResult::QuickUnlockEnrollment),
             (NativeAction::CreateVault { .. }, Prepared::Created { open, recovery_key }) => {
                 let shown = Zeroizing::new(recovery_key.expose_display().to_owned());
-                self.start_session();
+                self.initialize_session();
                 self.set_phase(Phase::ConfirmRecoveryKit {
                     open,
                     recovery_key,
