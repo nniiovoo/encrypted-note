@@ -467,14 +467,13 @@ mod mac {
         #[test]
         fn private_location_works_when_ancestor_listing_is_denied() {
             const CHILD_PATH: &str = "ENOTE_TEST_SANDBOX_LOCATION";
-            const CHILD_OK: &str = "ENOTE_TEST_SANDBOX_LOCATION_OK";
+            const CHILD_OK: &str = "fake-sandbox-child-complete";
             if let Some(path) = std::env::var_os(CHILD_PATH) {
                 let path = std::path::PathBuf::from(path);
                 let ancestor = path.parent().unwrap().parent().unwrap();
                 assert_eq!(
                     std::fs::File::open(ancestor)
-                        .err()
-                        .expect("fixture ancestor listing must be denied")
+                        .expect_err("fixture ancestor listing must be denied")
                         .kind(),
                     std::io::ErrorKind::PermissionDenied
                 );
@@ -486,7 +485,8 @@ mod mac {
                 );
                 remove(&path).expect("remove in the allowed private child");
                 remove(&path).expect("missing removal still flushes the private child");
-                println!("{CHILD_OK}");
+                std::fs::write(path.with_file_name(CHILD_OK), b"complete")
+                    .expect("mark the fictional sandbox check complete");
                 return;
             }
 
@@ -521,7 +521,10 @@ mod mac {
                 String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr)
             );
-            assert!(String::from_utf8_lossy(&output.stdout).contains(CHILD_OK));
+            assert_eq!(
+                std::fs::read(path.with_file_name(CHILD_OK)).expect("sandbox helper completed"),
+                b"complete"
+            );
         }
 
         #[test]
