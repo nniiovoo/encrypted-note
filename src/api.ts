@@ -144,7 +144,7 @@ export interface AppStatus {
   save_durability_uncertain: boolean;
   /** The settings file couldn't be read, so the strictest lock rules are in force. */
   settings_unreadable: boolean;
-  quick_unlock: { available: boolean; enabled: boolean; can_unlock: boolean; reason?: string | null };
+  quick_unlock: { available: boolean; enabled: boolean; can_unlock: boolean; cleanup_failed: boolean; reason?: string | null };
   settings: Settings;
 }
 
