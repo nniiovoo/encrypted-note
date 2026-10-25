@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 
 use store::{
     AUTO_SAFETY_KEEP, CloudProvider, DAILY_SAFETY_KEEP_SECS, MAX_FILE_BYTES,
-    REPLACED_SAFETY_KEEP_SECS, SAFETY_DIR, SETTINGS_FILE, SafetyKind, StoreError, VAULT_FILE,
-    VaultDir, cloud_location, read_file, write_backup,
+    REPLACED_SAFETY_KEEP_SECS, SAFETY_DIR, SafetyKind, StoreError, VAULT_FILE, VaultDir,
+    cloud_location, read_file, write_backup,
 };
 
 const DAY: i64 = 24 * 60 * 60;
@@ -58,6 +58,7 @@ fn open_creates_the_data_folder_with_no_vault() {
 #[test]
 fn data_folder_is_private_to_the_owner() {
     use std::os::unix::fs::PermissionsExt;
+    use store::SETTINGS_FILE;
     let (_tmp, root) = data_dir();
     let dir = VaultDir::open(&root).unwrap();
     let mode = fs::metadata(&root).unwrap().permissions().mode() & 0o777;
