@@ -762,6 +762,7 @@ fn entry_prompt(operation: &NativeOperation, kind: EntryKind) -> Prompt {
         "change_password" => "Change Master Password",
         "rotate_keys" => "Rotate Vault keys",
         "set_settings" => "Confirm less strict Auto-lock",
+        "enroll_quick_unlock" => "Enable Touch ID for this Vault",
         _ => "Confirm encrypted-note action",
     }
     .to_owned();
@@ -1439,6 +1440,24 @@ mod tests {
                 .extensions_left,
             Some(0)
         );
+    }
+
+    #[test]
+    fn touch_id_enrollment_prompt_names_the_action() {
+        let operation = NativeOperation {
+            id: 1,
+            action: "enroll_quick_unlock",
+            target: None,
+            kind: None,
+            field: None,
+            requires_credentials: true,
+        };
+        let Prompt::Credential { title, label, .. } = entry_prompt(&operation, EntryKind::Password)
+        else {
+            panic!("Touch ID enrollment requires native credential entry");
+        };
+        assert_eq!(title, "Enable Touch ID for this Vault");
+        assert_eq!(label, "Master Password");
     }
 
     #[test]
