@@ -4689,6 +4689,144 @@ fn native_new_password(password: &str) -> NativeCredentials {
     }
 }
 
+fn native_creation_kit(app: &mut App) -> Zeroizing<String> {
+    let result = native_run(
+        &mut app.core,
+        NativeAction::CreateVault {
+            params: KdfParams::TESTING,
+        },
+        native_new_password(PASSWORD),
+    )
+    .unwrap();
+    let NativeResult::RecoveryKit(shown) = result else {
+        panic!("native kit expected")
+    };
+    shown.recovery_key.unwrap()
+}
+
+#[test]
+fn create_kit_guard_native_confirmation_resets_only_after_save() {
+    let mut app = App::new();
+    app.core.guard_update(&zoom());
+    app.core.dismiss_sharing_guard();
+    let key = native_creation_kit(&mut app);
+    assert_eq!(app.phase(), "confirm_recovery_kit");
+    app.core.guard_update(&zoom());
+    assert!(!app.core.app_status().sharing_guard.up);
+    assert!(!vault_file(&app).exists());
+    assert_eq!(
+        code(native_run(
+            &mut app.core,
+            NativeAction::ConfirmRecoveryKit,
+            NativeCredentials::KitConfirmation(pw("fake-wrong-groups")),
+        )),
+        "invalid_input"
+    );
+    assert!(!app.core.app_status().sharing_guard.up);
+    assert!(!vault_file(&app).exists());
+    native_run(
+        &mut app.core,
+        NativeAction::ConfirmRecoveryKit,
+        NativeCredentials::KitConfirmation(pw(&last_groups(&key))),
+    )
+    .unwrap();
+    assert_eq!(app.phase(), "unlocked");
+    assert!(vault_file(&app).is_file());
+    assert!(app.core.app_status().sharing_guard.up);
+}
+
+#[test]
+fn create_kit_guard_legacy_confirmation_resets_only_after_save() {
+    let mut app = App::new();
+    app.core.guard_update(&zoom());
+    app.core.dismiss_sharing_guard();
+    let key = app
+        .core
+        .create_vault(pw(PASSWORD), KdfParams::TESTING)
+        .unwrap()
+        .recovery_key
+        .unwrap();
+    assert_eq!(app.phase(), "confirm_recovery_kit");
+    assert!(!app.core.app_status().sharing_guard.up);
+    assert!(!vault_file(&app).exists());
+    app.core.confirm_recovery_kit(&last_groups(&key)).unwrap();
+    assert_eq!(app.phase(), "unlocked");
+    assert!(vault_file(&app).is_file());
+    assert!(app.core.app_status().sharing_guard.up);
+}
+
+#[test]
+fn create_kit_guard_new_or_restarted_capture_app_rejects_pending_confirmation() {
+    for restart in [false, true] {
+        let mut app = App::new();
+        app.core.guard_update(&zoom());
+        app.core.dismiss_sharing_guard();
+        let key = native_creation_kit(&mut app);
+        let operation = app
+            .core
+            .begin_native(NativeAction::ConfirmRecoveryKit)
+            .unwrap();
+        let job = app
+            .core
+            .prepare_native(
+                operation.id,
+                NativeCredentials::KitConfirmation(pw(&last_groups(&key))),
+            )
+            .unwrap();
+        if restart {
+            app.core.guard_update(&[]);
+            app.core.guard_update(&zoom());
+        } else {
+            let mut apps = zoom();
+            apps.push(guard::RunningApp {
+                bundle_id: Some("com.obsproject.obs-studio".into()),
+                exe_name: Some("obs64.exe".into()),
+            });
+            app.core.guard_update(&apps);
+        }
+        assert!(app.core.app_status().sharing_guard.up);
+        assert_eq!(code(app.core.finish_native(job.run())), "invalid_input");
+        assert!(!vault_file(&app).exists());
+    }
+}
+
+#[test]
+fn create_kit_guard_pending_candidate_still_expires_at_idle_deadline() {
+    let mut app = App::new();
+    app.core.guard_update(&zoom());
+    app.core.dismiss_sharing_guard();
+    drop(native_creation_kit(&mut app));
+    let remaining = app.core.app_status().lock_in_ms.unwrap();
+    app.advance(remaining);
+    app.core.tick();
+    assert_eq!(app.phase(), "no_vault");
+    assert!(!vault_file(&app).exists());
+    assert!(app.core.app_status().sharing_guard.up);
+}
+
+#[test]
+fn create_kit_guard_rotation_keeps_current_session_acknowledgement() {
+    let mut app = App::new();
+    unlocked(&mut app);
+    app.core.guard_update(&zoom());
+    app.core.dismiss_sharing_guard();
+    let key = app
+        .core
+        .change_password(pw(PASSWORD), pw(NEW_PASSWORD), true)
+        .unwrap()
+        .recovery_key
+        .unwrap();
+    assert!(!app.core.app_status().sharing_guard.up);
+    native_run(
+        &mut app.core,
+        NativeAction::ConfirmRecoveryKit,
+        NativeCredentials::KitConfirmation(pw(&last_groups(&key))),
+    )
+    .unwrap();
+    assert_eq!(app.phase(), "unlocked");
+    assert!(!app.core.app_status().sharing_guard.up);
+}
+
 #[test]
 fn native_setup_recovery_reset_and_password_change_keep_credentials_in_rust() {
     let mut app = App::new();
