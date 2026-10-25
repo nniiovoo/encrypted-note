@@ -738,7 +738,7 @@ impl AppCore {
         )
         .map_err(|e| format_error(e, CredKind::Password))?;
         let shown = Zeroizing::new(created.recovery_key.expose_display().to_owned());
-        self.start_session();
+        self.initialize_session();
         self.set_phase(Phase::ConfirmRecoveryKit {
             open: Box::new(Open {
                 vault: created.unlocked,
@@ -775,6 +775,9 @@ impl AppCore {
             std::mem::replace(&mut self.phase, Phase::Locked)
         {
             self.set_phase(Phase::Unlocked(open));
+        }
+        if !rotation {
+            self.reset_guard();
         }
         Ok(())
     }
@@ -1551,9 +1554,14 @@ impl AppCore {
     /// A Vault was just opened (created, unlocked or installed): start the idle timer, and forget
     /// a Sharing Guard dismissal made while none was open.
     fn start_session(&mut self) {
+        self.initialize_session();
+        self.reset_guard();
+    }
+
+    // Creation keeps its current acknowledgement until the initial Kit is saved.
+    fn initialize_session(&mut self) {
         self.session_generation = self.session_generation.saturating_add(1);
         self.session.unlocked(self.clock.now_ms());
-        self.reset_guard();
     }
 
     fn reset_guard(&mut self) {
