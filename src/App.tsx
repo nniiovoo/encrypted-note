@@ -144,13 +144,12 @@ function Screen({ status, place, onPlace, restarts, readDraft, onDraft, onLock, 
   onOutcomeOutside: (message: string) => void;
 }) {
   // Native credential operations follow the same Sharing Guard as the app.
-  const sensitive = status.phase !== "locked";
-  const shield = status.sharing_guard.up && sensitive;
+  const shield = status.sharing_guard.up;
   // What was drawn before this, so the Shield can tell an unlock from an interruption.
   const now = shield ? "shield" : status.phase;
   const [seen, setSeen] = useState({ now, before: now });
   if (seen.now !== now) setSeen({ now, before: seen.now });
-  if (shield) return <Shield apps={status.sharing_guard.apps} afterUnlock={seen.before === "locked"} />;
+  if (shield) return <Shield apps={status.sharing_guard.apps} afterUnlock={status.phase !== "locked" && seen.before === "locked"} />;
   switch (status.phase) {
     case "no_vault":
       return <NoVault onOperationOutcome={onOutcomeOutside} />;
