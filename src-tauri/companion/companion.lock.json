@@ -1,0 +1,13 @@
+{
+  "comment": "The one authoritative pin for the optional Agent Companion helper (ADR-0009). scripts/package-companion.sh verifies every value; nothing here is a secret.",
+  "companion": {
+    "repository": "https://github.com/nniiovoo/encrypted-note-agent-companion.git",
+    "commit": "b98e78ce4db807d5a19bd23ab6dde546aed3ca38",
+    "policySha256": "04bd48f02a0f2cf5052ee296a97f21c469a493039054621d84f23bdb7784ec52"
+  },
+  "node": {
+    "version": "v24.22.1",
+    "aarch64": { "file": "node-v24.22.1-darwin-arm64.tar.gz", "sha256": "89c682593d76cd44233fa53b1563264e7de9cbb189cad169135c5b4fadfbc0a7" },
+    "x86_64": { "file": "node-v24.22.1-darwin-x64.tar.gz", "sha256": "d132557e7ee2b85af08b0c8c34338e65c6430f2238d01f727728ef42dc83b035" }
+  }
+}
