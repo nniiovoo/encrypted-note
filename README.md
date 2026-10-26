@@ -25,6 +25,7 @@ Exactly one MCP tool is exposed:
 - One in-flight request, six admitted requests per rolling minute, 60 per rolling hour, and 100 per process. Failed admitted requests consume the local allowance.
 - Provider response bodies are bounded to 256 KiB. Only completed assistant text from the fixed model returns to the caller; provider errors, headers and response identifiers do not.
 - Local counters reset when this process restarts. They supplement independent provider caps; they are not durable provider spending controls.
+- An owner grant ends at an absolute time at most one hour away, or after one hour of monotonic time, whichever is first. Restarting never extends it; an expired grant returns a fixed error with no provider work.
 - Returned text is untrusted. The companion never executes it.
 
 The versioned nonsecret contract is policy.json. Runtime input cannot change it. The trusted deployment must protect code and policy against agent modification.
@@ -84,11 +85,26 @@ ChatGPT can optionally reach a private MCP server through owner-selected Secure 
 
 Tunnel creation, client installation, sign-in, credential provisioning, workspace changes, authentication configuration and cloud connectivity have not been performed. They remain optional owner decisions. The optional HTTP bearer transport does not implement OAuth or claim to complete ChatGPT authentication by itself.
 
-[Official private-tunnel requirements](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels), [ChatGPT connection and end-to-end test](https://developers.openai.com/plugins/deploy/connect-chatgpt).
+[Official private-tunnel requirements](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels), [ChatGPT connection and end-to-end test](https://developers.openai.com/plugins/deploy/connect-chatgpt). Step-by-step preparation and the checks that make a connection count as verified: [docs/chatgpt-connection.md](docs/chatgpt-connection.md).
 
 ## Current limits
 
 This implementation is ready for code review and fictional-data development. It is not approved for real keys or production use. Provider controls, OS isolation, credential custody, successful live generation, ChatGPT authentication and end-to-end connection remain unverified. Neither source review nor a successful fake-provider test can guarantee that a key cannot be stolen or misused.
+
+## Integrated with encrypted-note
+
+encrypted-note can bundle this companion as its optional **Agent Companion** helper ([encrypted-note ADR-0009](https://github.com/nniiovoo/encrypted-note/blob/main/docs/adr/0009-optional-agent-companion-helper.md)). The app pins one commit of this repository, the SHA-256 of policy.json and an official Node.js release, and runs `isolation/integrated-broker.mjs` inside a separate XPC service with its own macOS sandbox container. A fictional-data spike showed that a plain child process of the sandboxed app could read the app's container, while that XPC service could not; the app's Vault therefore stays outside this companion's reach.
+
+The integrated entry point runs the same fixed broker with:
+
+- fixed data paths inside the helper's own container (`$HOME/Library/Application Support/encrypted-note-companion/plan.json` and `credential.env`), never chosen by a caller;
+- one new grant of at most one hour for each owner Start, enforced before the credential read, before listening and before every admission, including direct loopback calls;
+- a fresh delegated agent token for each Start, written owner-only (0600, plus the single agent read ACL) into the owner-prepared handoff folder, and removed on every stop;
+- a bounded owner-control protocol on stdin/stdout, separate from the agent MCP channel: one `{"v":1,"op":"stop"}` command in; `ready`, `stopped`, `error` and `check` events with fixed codes out. Control EOF, a malformed command, a signal or the grant deadline stops the broker. Nothing from the plan, credential, token, provider or MCP traffic is printed.
+
+Its `--check` mode reports readiness booleans and never reads the credential's contents. Code and runtime ancestors may be admin-group-writable (an app in /Applications) only after the agent account is confirmed not to be an administrator.
+
+Reviewed plans are now version 2 with `grantExpiresAt`: a canonical UTC instant for the standalone owner launcher, or `null` in a plan installed into encrypted-note, where each Start issues the grant. Version-1 plans are refused.
 
 ## Prepared isolated Mac setup
 
