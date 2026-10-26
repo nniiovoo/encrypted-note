@@ -20,6 +20,7 @@
 - **Reveal limits.** Logins, API Keys and Text use a 30-second reveal. Seed Phrases and Private Keys need the Master Password to view or edit, with hold-to-show or a 20-second timed reveal. The limits the owner can stretch, and the ones that stay fixed, are in [ADR-0006](adr/0006-everyday-key-use-limits-the-owner-can-stretch.md).
 - **Backups.** A Backup is just a copy of the Vault file you save wherever you like (e.g. an exFAT USB stick) and open on your other computer. There's no sync by design ([ADR-0001](adr/0001-local-only-vault-moved-by-hand.md)).
 - **Emergency Reader.** `crates/reader` is a small command-line tool that reads a Vault or Backup even if the app stops working ([how to use it](guide.md#if-the-app-wont-open)).
+- **Optional Agent Companion.** A separate helper (an XPC service with its own App Sandbox container) can let one approved agent use one fixed OpenAI text tool with a separately created Agent Key. It can't open the Vault's container, receives nothing from the Vault, and stops on Stop, lock, sleep, grant expiry and quit. Its Agent Key is kept in an owner-only plain-text file and Node.js memory, not encrypted Vault storage ([ADR-0009](adr/0009-optional-agent-companion-helper.md), [guide](agent-companion.md)).
 - **Vocabulary.** [CONTEXT.md](../CONTEXT.md) defines Vault, Note, Kind, Hidden Field, Recovery Kit and the rest.
 
 ## Tested so far
@@ -27,3 +28,4 @@
 - **Automated:** `./scripts/check.sh` runs the test suite, including tamper tests over every byte of a Vault file and the RFC 9106 and XChaCha20-Poly1305 reference vectors.
 - **By hand on macOS 26:** the main flows, clipboard privacy markers, the Sharing Guard with real apps, and a Backup read back by the Emergency Reader. Screen-capture results so far: [capture-test.md](capture-test.md).
 - **Windows:** the adapters compile but have **not yet been run on a real Windows PC**.
+- **Agent Companion:** checked with fictional data only, including that the packaged helper can't read a fake Vault canary in the app's container ([results](agent-key-validation.md#integrated-helper-2026-10-26)). No real key, live request or ChatGPT connection yet; it's unavailable on Windows.
