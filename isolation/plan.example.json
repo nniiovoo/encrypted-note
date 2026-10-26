@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "ownerUid": null,
   "agentUid": null,
   "agentShortName": "enote-agent",
@@ -11,5 +11,6 @@
   "brokerPort": 8789,
   "providerModel": "gpt-6-luna",
   "providerScope": "api.responses.write",
-  "bearerTokenFile": null
+  "bearerTokenFile": null,
+  "grantExpiresAt": null
 }

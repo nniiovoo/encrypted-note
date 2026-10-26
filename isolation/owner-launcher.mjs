@@ -2,10 +2,12 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { realpath } from 'node:fs/promises';
 import { loadPlan, requireRole, assertProtectedPath, verifyCodeTree,
-         readConfirmedCredential, readAgentToken } from './common.mjs';
+         readConfirmedCredential, readAgentToken, assertGrantActive, grantGuard,
+         MAX_GRANT_MS } from './common.mjs';
 
 export async function launchOwnerBroker(plan, { credentialFile, tokenFile, output = process.stderr } = {}) {
   requireRole(plan, 'owner');
+  assertGrantActive(plan);
   if (process.platform !== 'darwin') throw new Error('This launcher is for the reviewed Mac only.');
   const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
   await assertProtectedPath(await realpath(process.execPath), plan.ownerUid);
@@ -19,23 +21,27 @@ export async function launchOwnerBroker(plan, { credentialFile, tokenFile, outpu
   await assertProtectedPath(tokenFile, plan.ownerUid, undefined, { tokenAgent: plan.agentShortName });
   // An independent owner preflight must already trust this launcher and its Node runtime.
   // Delay application/SDK imports until the remaining protected tree checks complete.
-  const { createGenerator } = await import('../src/generate.mjs');
+  const { createGenerator, guardGenerate } = await import('../src/generate.mjs');
   const { startHttpServer, stopHttpServer } = await import('../src/http.mjs');
+  // Grant again immediately before the credential read and before the broker opens.
+  const expiresAt = assertGrantActive(plan);
   let apiKey = await readConfirmedCredential(credentialFile, plan.ownerUid);
   const bearerToken = await readAgentToken(tokenFile, plan.ownerUid);
   if (apiKey === bearerToken) { apiKey = ''; throw new Error('Separate credentials are required.'); }
-  const generate = createGenerator({ apiKey });
+  const generate = guardGenerate(createGenerator({ apiKey }), grantGuard(expiresAt));
   apiKey = ''; // Best effort only; JavaScript strings cannot be guaranteed erased.
+  assertGrantActive(plan);
   const server = await startHttpServer({ generate, bearerToken, port: plan.brokerPort });
   const stop = () => stopHttpServer(server);
-  // Supplemental lifetime, never a substitute for provider-enforced one-hour expiry.
-  const lifetime = setTimeout(stop, plan.credentialExpirySeconds * 1000);
+  // Stop at the earlier of the absolute grant deadline and one hour from now. Supplemental
+  // to, never a substitute for, provider-enforced key expiry.
+  const lifetime = setTimeout(stop, Math.max(0, Math.min(expiresAt - Date.now(), MAX_GRANT_MS)));
   for (const event of ['SIGINT', 'SIGTERM']) process.once(event, stop);
   server.once('close', () => {
     clearTimeout(lifetime);
     for (const event of ['SIGINT', 'SIGTERM']) process.removeListener(event, stop);
   });
-  output.write('Owner broker is listening on reviewed loopback port 8789 for at most one hour.\n');
+  output.write('Owner broker is listening on reviewed loopback port 8789 until its grant ends (at most one hour).\n');
   return server;
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
