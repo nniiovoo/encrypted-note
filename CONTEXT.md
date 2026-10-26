@@ -58,6 +58,10 @@ _Avoid_: emergency kit, backup sheet
 A separate credential the owner creates at a service only for AI agent work, with narrow provider-enforced permissions, expiry, revocation and hard spending/usage caps. It is never a copy of an owner's existing key and never enters the **Vault**. This boundary is approved. The selected first task is OpenAI text generation with one fixed model through a separate local stdio companion; protected custody, provider controls and any real-key pilot remain unverified ([ADR-0007](docs/adr/0007-agents-use-separate-restricted-keys.md), [ADR-0008](docs/adr/0008-agent-gateway-awaits-a-concrete-api.md)).
 _Avoid_: sharing an owner key, agent access to the Vault
 
+**Agent Companion**:
+The optional helper inside the app, with its own macOS sandbox, that lets one approved agent use one fixed OpenAI text operation with an **Agent Key**. It can't open the **Vault**, is off unless the owner starts it, and stops at the end of its one-hour grant, on Stop, whenever the app is **Locked**, on sleep and when the app quits ([ADR-0009](docs/adr/0009-optional-agent-companion-helper.md)).
+_Avoid_: agent bridge (that's the agent account's side), Vault connector, plugin
+
 ### Screen privacy
 
 **Capture Hiding**:
@@ -121,7 +125,7 @@ _Avoid_: pinned, bookmarked, starred item
 
 - The owner has one **Vault**; it moves between computers only when the owner copies the file by hand.
 - AI agents have no access to the **Vault**, its **Notes**, their metadata, **Backups**, **Safety Copies**, or the **Emergency Reader**. The **Master Password**, **Recovery Key** and **Wallet Kinds** never take part in agent work.
-- Any future **Agent Key** integration is separate from this offline app. Hiding the key still lets an agent perform every operation its provider scope permits, within its enforced limits; only the owner can independently approve scope or limit changes ([ADR-0007](docs/adr/0007-agents-use-separate-restricted-keys.md)).
+- The **Agent Companion** is the only **Agent Key** integration inside the app; it runs apart from the **Vault** in its own sandbox and never receives Vault content. Any other **Agent Key** integration is separate from this app. Hiding the key still lets an agent perform every operation its provider scope permits, within its enforced limits; only the owner can independently approve scope or limit changes ([ADR-0007](docs/adr/0007-agents-use-separate-restricted-keys.md)).
 - Results from an external agent's allowed service actions may leave this computer, including for a cloud model provider; no Vault content or metadata may enter that route.
 - Moving a **Vault** to the other computer means opening a **Backup** there. There is no separate "export" or "sync" concept.
 - The app nudges the owner when changes have gone 7+ days without a **Backup**, and warns if a **Backup** is saved into a cloud-synced folder.

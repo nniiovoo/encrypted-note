@@ -374,3 +374,89 @@ export const markSeedExplainerSeen = () => invoke<void>("mark_seed_explainer_see
 export const vaultLocation = () => invoke<string>("vault_location");
 /** "I'm not sharing right now". */
 export const dismissSharingGuard = () => invoke<void>("dismiss_sharing_guard");
+
+// ---------- Agent Companion (ADR-0009) ----------
+// An optional helper with its own macOS sandbox that cannot open the Vault. These calls take no
+// arguments, so the screens cannot choose a program, path, destination, model, credential or
+// grant. Replies are fixed, nonsecret fields: never a key, token, path or helper output.
+
+export type CompanionState =
+  | "unsupported"
+  | "unavailable"
+  | "stopped"
+  | "starting"
+  | "running"
+  | "stopping"
+  | "expired"
+  | "error";
+
+export type CompanionError =
+  | "plan_missing"
+  | "plan_invalid"
+  | "wrong_identity"
+  | "code_unprotected"
+  | "agent_unverified"
+  | "credential_missing"
+  | "credential_invalid"
+  | "handoff_unavailable"
+  | "port_unavailable"
+  | "grant_inactive"
+  | "control_invalid"
+  | "runtime_missing"
+  | "policy_mismatch"
+  | "launch_failed"
+  | "start_timeout"
+  | "unexpected_exit"
+  | "protocol_invalid"
+  | "busy"
+  | "install_invalid"
+  | "helper_restarted"
+  | "helper_timeout"
+  | "helper_unreachable"
+  | "invalid_reply"
+  | "internal";
+
+export interface CompanionReadiness {
+  ready: boolean;
+  runtime: boolean;
+  plan: boolean;
+  credential: boolean;
+  handoff: boolean;
+  agent: boolean;
+  code: boolean;
+}
+
+export interface CompanionOperation {
+  name: string;
+  destination: string;
+  model: string;
+  max_input_bytes: number;
+  max_output_tokens: number;
+  concurrent: number;
+  per_minute: number;
+  per_hour: number;
+  per_run: number;
+  grant_minutes: number;
+}
+
+export interface CompanionView {
+  platform_supported: boolean;
+  helper_bundled: boolean;
+  state: CompanionState;
+  error: CompanionError | null;
+  /** Unix seconds, only while on or just after the grant ended. */
+  expires_at: number | null;
+  /** Local readiness on this Mac. */
+  local: CompanionReadiness;
+  /** The private ChatGPT connection is checked outside this app. */
+  chatgpt: "not_verified";
+  operation: CompanionOperation;
+}
+
+export const companionStatus = () => invoke<CompanionView>("companion_status");
+/** The owner's explicit Start: one grant of at most an hour. Refused while Locked. */
+export const companionStart = () => invoke<CompanionView>("companion_start");
+export const companionStop = () => invoke<CompanionView>("companion_stop");
+/** Opens OS file panels for the reviewed plan and the separate Agent Key file. Rust passes the
+ *  chosen files to the helper unread; nothing about them comes back here. */
+export const companionSetup = () => invoke<CompanionView>("companion_setup");

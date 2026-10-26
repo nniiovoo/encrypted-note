@@ -1,6 +1,6 @@
 # Restricted OpenAI Agent Key workflow validation
 
-Status: ready-for-human — separate companion source published privately; 30 fictional tests passed: 21 provider/protocol tests and 9 isolation-preparation tests. Actual OS isolation, protected custody, provider configuration and a real-key pilot remain unverified. Refs [#27](https://github.com/nniiovoo/encrypted-note/issues/27) and [#28](https://github.com/nniiovoo/encrypted-note/issues/28).
+Status: ready-for-human — separate companion source published privately; 30 fictional tests passed: 21 provider/protocol tests and 9 isolation-preparation tests. The optional integrated helper (2026-10-26) passed its fictional-data checks; see below. Actual OS isolation, protected custody, provider configuration and a real-key pilot remain unverified. Refs [#27](https://github.com/nniiovoo/encrypted-note/issues/27) and [#28](https://github.com/nniiovoo/encrypted-note/issues/28).
 
 The owner selected OpenAI API text generation with one fixed model and a new separate restricted Agent Key. Agents receive no owner Vault, Notes, metadata, Master Password, Recovery Key, Wallet Kind, Backup, Safety Copy or Emergency Reader access ([ADR-0007](adr/0007-agents-use-separate-restricted-keys.md)). The operation and outstanding gate are recorded in [ADR-0008](adr/0008-agent-gateway-awaits-a-concrete-api.md).
 
@@ -78,3 +78,31 @@ Only an observed authenticated end-to-end tool call can complete that connection
 Completed: private source publication in the separate companion repository, independent code review, 30 fictional tests (21 provider/protocol plus 9 isolation preparation), official local MCP client compatibility and reproducible dependency installation.
 
 Pending: actual OS isolation, protected execution and credential custody; provider account, permissions, model/tool/rate/spend policies; actual expiry/revocation; live API generation; optional ChatGPT authentication and connection. No real credential, owner Vault or wallet material was used.
+
+## Integrated helper, 2026-10-26
+
+The owner approved bundling the companion as encrypted-note's optional **Agent Companion** helper ([ADR-0009](adr/0009-optional-agent-companion-helper.md), [setup guide](agent-companion.md)). Everything below used fictional data and fake keys; no real Vault, credential, provider call, account change or tunnel was involved. Machine: macOS 26.4.1, Apple silicon, ad-hoc signing (as `tauri.conf.json`).
+
+**Packaging and isolation spike.** A minimal sandboxed app carrying the Vault app's entitlements wrote a FAKE canary into its own container:
+- A plain child process could read and list the canary. A child inherits the app's sandbox and container.
+- An XPC service with its own sandbox got `EPERM` for both, and could listen on loopback with its own `network.server` entitlement.
+
+The integration therefore uses an XPC service. The official Node.js v24.22.1 binary is signed with `get-task-allow`, `allow-dyld-environment-variables` and `disable-library-validation`; the bundled copy is re-signed with only sandbox inheritance and `allow-jit`, and it runs.
+
+| Area | Result |
+| --- | --- |
+| Companion (separate repository) | 49 tests pass on Node 26.8.2 and on the pinned Node 24.22.1. They cover grant validity, expiry at the broker (including direct loopback calls without the bridge), monotonic time limits, the control protocol, the per-Start token handoff and every refusal code, and they check that no fictional key, token or provider-error marker reaches protocol output or tool results. |
+| encrypted-note checks | 610 Rust tests pass, 9 of them new for the supervisor. Also passing: clippy with warnings denied, formatting, cargo-deny (advisories, bans, licenses, sources), the network-source check (63 files, including the new Swift), the TypeScript check and the production web build. |
+| Packaged helper, `scripts/verify-companion.sh` | 30 of 30 checks pass against the real signed helper driven through the app's own client code: <ul><li>the real broker's refusals inside the actual sandbox (`plan_missing`, `agent_unverified`);</li><li>owner files installed into the helper's own container;</li><li>the helper cannot read or list a fake Vault canary in the app's container;</li><li>owner stop;</li><li>a crash reported and never restarted;</li><li>expiry;</li><li>an unresponsive broker forced to stop in 7 s;</li><li>garbage and oversized output rejected, with no fake marker in the app or the system log;</li><li>no orphans when either the app or the helper is force-killed.</li></ul> |
+| Release app with the helper (`scripts/package-companion.sh --app`) | Builds, and its strict deep signature check passes. The helper keeps its own entitlements; the Vault app's entitlements are unchanged, with no `network.server`. The app's signing identifier matches the helper's connection requirement. The helper adds about 144 MB. |
+| Ordinary use | The packaged app started with no helper process, no listening port and no network socket. |
+
+**Not yet tested:**
+- clicking through the Settings section in a running app;
+- keyboard and screen-reader use of that section;
+- the native setup panels;
+- an x86_64 build;
+- Windows (the section shows "not available");
+- Developer ID signing and notarization.
+
+**Owner actions still required:** the standard agent account, the handoff folder, the restricted OpenAI key and its provider controls, the reviewed plan, a live call, and the ChatGPT tunnel. Every row in the operational tables above is still pending.

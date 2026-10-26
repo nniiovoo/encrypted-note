@@ -56,6 +56,10 @@
     "allow-set-settings",
     "allow-mark-seed-explainer-seen",
     "allow-vault-location",
-    "allow-dismiss-sharing-guard"
+    "allow-dismiss-sharing-guard",
+    "allow-companion-status",
+    "allow-companion-start",
+    "allow-companion-stop",
+    "allow-companion-setup"
   ]
 }

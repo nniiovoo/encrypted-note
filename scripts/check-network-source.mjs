@@ -3,6 +3,10 @@
 // crates/*/src/ (including inline tests); Swift in src-tauri/native/ recursively.
 // Dependencies, vendor/, src-tauri/gen/,
 // configuration, docs, scripts and crates/*/tests/ are outside this check.
+// src-tauri/companion/ is also outside: it holds the separately sandboxed Agent Companion
+// helper's pins, entitlements and fictional verification payloads (ADR-0009), not Vault code.
+// The helper's own Swift (src-tauri/native/companion/) is scanned like all native code: it
+// supervises a process and has no network API of its own.
 // Patterns: browser fetch/sendBeacon calls, XMLHttpRequest, WebSocket, EventSource,
 // WebTransport and RTCPeerConnection names; Rust std::net/tokio::net and socket types.
 // Swift URLSession/URLRequest/NSURLConnection and Network NWConnection/NWListener names.

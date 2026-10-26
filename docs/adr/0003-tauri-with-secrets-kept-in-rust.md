@@ -1,5 +1,7 @@
 # Tauri v2, with every secret kept in the Rust core
 
+> **Amended by [ADR-0009](0009-optional-agent-companion-helper.md) (2026-10-26):** every Vault secret stays in the Rust core. The one key held elsewhere is a separately created OpenAI Agent Key, kept by the optional Agent Companion helper in its own sandbox as an owner-only plain-text file and in Node.js memory. It is never a Vault value.
+
 The app must run on Mac and Windows and support **Capture Hiding** on both. The owner writes TypeScript, and Rust is already installed. We chose Tauri v2: the screens are TypeScript in the system WebView, and a Rust core owns everything sensitive (key derivation, encryption, the **Vault** file, Keychain / Windows Hello). The WebView is treated as untrusted. It never holds the **Master Password**-derived key or the decrypted **Vault**. When the owner clicks Show, it receives exactly one **Hidden Field**, and it drops that field when the field hides again. Rust can wipe secrets from memory (`zeroize`); JavaScript strings can't be wiped.
 
 ## Considered Options
