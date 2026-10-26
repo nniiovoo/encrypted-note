@@ -19,7 +19,7 @@ const cloudNames: Record<Exclude<CloudProvider, "mac_desktop_or_documents">, str
 
 export const strings = {
   appName: "encrypted-note",
-  statusLine: "Encrypted · Stored only on this computer · Never connects to the internet",
+  statusLine: "Encrypted · Stored only on this computer · The Vault never connects to the internet",
   // `anywhere`: the owner chose in Settings to count activity anywhere on this computer.
   locksIn: (time: string, anywhere: boolean) =>
     `Locks in ${time}${anywhere ? ", counting activity anywhere on this computer" : ""}`,
@@ -45,7 +45,7 @@ export const strings = {
   // Welcome
   welcomeLead: "A calm place for your Seed Phrases, Private Keys, Logins, API Keys and private Text.",
   welcomeCards: [
-    ["Stays on this computer", "Your Vault is one encrypted file on this computer. This app never connects to the internet."],
+    ["Stays on this computer", "Your Vault is one encrypted file on this computer, and it never connects to the internet. The optional Agent Companion, off unless you start it, can't open the Vault."],
     [
       "Only you have the key",
       "Your Master Password and your Recovery Kit are the only ways in. Nobody can reset them for you, so keep your Recovery Kit safe.",
@@ -447,6 +447,81 @@ export const strings = {
   limitsAdvice: [
     "Keep your operating system updated: many protections live there, not in this app.",
     "Review which apps may record your screen (Mac: System Settings → Privacy & Security → Screen & System Audio Recording).",
-    "This app contains no network code, so it can't send your Vault anywhere.",
+    "The Vault's code contains no network code, so it can't send your Vault anywhere. The optional Agent Companion is a separate helper that can't open the Vault.",
   ],
+
+  // ---------- Agent Companion (ADR-0009) ----------
+  companionTitle: "Agent Companion",
+  companionIntro:
+    "Optional and off unless you start it. One approved AI agent can use one fixed OpenAI text tool with a separate Agent Key you created for it. The helper runs in its own macOS sandbox and can't open your Vault; nothing from your Vault, its Notes or their keys ever reaches it.",
+  companionUnsupported: "Not available on this computer yet. The helper's boundary has only been built and checked on Mac.",
+  companionNotBundled: "This build of the app doesn't include the Agent Companion helper.",
+  companionChecking: "Checking the Agent Companion…",
+  companionStates: {
+    unsupported: "Not available",
+    unavailable: "Not included in this build",
+    stopped: "Off",
+    starting: "Starting…",
+    running: "On",
+    stopping: "Stopping…",
+    expired: "Off: the one-hour grant ended",
+    error: "Off: needs attention",
+  } satisfies Record<string, string>,
+  companionRunningUntil: (time: string) => `On until ${time}. It stops when the Vault locks, the computer sleeps or the app quits.`,
+  companionLocalTitle: "Ready on this Mac",
+  companionLocal: {
+    runtime: "Pinned helper runtime and policy verified",
+    plan: "Reviewed companion plan installed",
+    credential: "Separate Agent Key file installed (owner-only)",
+    handoff: "Agent handoff folder prepared",
+    agent: "Agent account confirmed as a standard (not admin) account",
+    code: "Companion code protected from the agent account",
+  },
+  companionReady: "Ready to start",
+  companionNotReady: "Not ready: finish the items marked ✗. See the setup guide.",
+  companionChatgptTitle: "Private ChatGPT connection",
+  companionChatgpt:
+    "Not checked by this app. It is set up from the agent account and counts as working only after a test call you make yourself. See the setup guide.",
+  companionOperationTitle: "What an approved agent can do",
+  companionOperation: (o: { name: string; model: string; destination: string; max_input_bytes: number; max_output_tokens: number; per_minute: number; per_hour: number; per_run: number; grant_minutes: number }) => [
+    `One tool: ${o.name}, with the fixed model ${o.model}. No files, browsing, other tools or other models.`,
+    `Sends the text an agent gives it (at most ${o.max_input_bytes.toLocaleString("en-US")} bytes) to ${o.destination}, and returns at most ${o.max_output_tokens} tokens of text.`,
+    `One request at a time; at most ${o.per_minute} a minute, ${o.per_hour} an hour and ${o.per_run} per start. Each start is one grant of ${o.grant_minutes} minutes.`,
+  ],
+  companionCustody:
+    "The helper keeps the Agent Key in a plain-text file only your macOS account can read, inside the helper's own container, and holds it in Node.js memory while on. That isn't encrypted Vault storage, and that memory can't be reliably erased. Use a key with a spending cap and a short expiry, and revoke it at OpenAI if in doubt.",
+  companionSetup: "Set up…",
+  companionStart: "Start for one hour",
+  companionStop: "Stop",
+  companionConfirmTitle: "Start the Agent Companion?",
+  companionConfirmText: [
+    "For the next hour, the approved agent can send text to OpenAI through the helper. That can cost money, and what it sends leaves this computer.",
+    "Stop ends new requests at once. It can't undo a request already sent or billed, and it doesn't revoke the Agent Key at OpenAI.",
+  ],
+  companionErrors: {
+    plan_missing: "No reviewed companion plan is installed. Use Set up… to choose it.",
+    plan_invalid: "The companion plan isn't a reviewed version-2 plan. Prepare a new one.",
+    wrong_identity: "The companion plan names a different macOS owner.",
+    code_unprotected: "The companion's code could be changed by another account, so it wasn't started.",
+    agent_unverified: "The agent account couldn't be confirmed as a standard (not admin) account.",
+    credential_missing: "No Agent Key file is installed. Use Set up… to choose it.",
+    credential_invalid: "The Agent Key file isn't a single separate Agent Key, or it isn't owner-only.",
+    handoff_unavailable: "The agent handoff folder isn't prepared as the setup guide describes.",
+    port_unavailable: "Another program is using the companion's local port.",
+    grant_inactive: "The grant couldn't be started.",
+    control_invalid: "The helper stopped after an unexpected control message.",
+    runtime_missing: "The helper's pinned runtime is missing from this app.",
+    policy_mismatch: "The helper's policy doesn't match this build, so it wasn't started.",
+    launch_failed: "The helper couldn't start its runtime.",
+    start_timeout: "The helper took too long to start and was stopped.",
+    unexpected_exit: "The helper stopped unexpectedly. It won't restart by itself.",
+    protocol_invalid: "The helper sent something unexpected and was stopped.",
+    busy: "Stop the Agent Companion before changing its setup.",
+    install_invalid: "Those files couldn't be installed. Choose the reviewed plan and the Agent Key file again.",
+    helper_restarted: "The helper stopped unexpectedly. It won't restart by itself.",
+    helper_timeout: "The helper didn't answer in time.",
+    helper_unreachable: "The helper couldn't be reached.",
+    invalid_reply: "The helper's reply wasn't understood.",
+    internal: "Something went wrong in the helper.",
+  } satisfies Record<string, string>,
 };

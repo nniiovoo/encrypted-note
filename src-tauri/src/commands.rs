@@ -19,6 +19,7 @@ use session::OsEvent;
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 use zeroize::Zeroizing;
 
+use crate::companion::{Companion, CompanionView};
 use crate::core::{
     ApiError, AppCore, AppStatus, AssessmentView, BackupWritten, CredentialInput, NoteEditInput,
     NoteInput, PickedFile, RecoveryKeyShown, SafetyCopy, SettingsInput, SettingsView, ShowMode,
@@ -509,6 +510,94 @@ fn civil_date(unix_secs: i64) -> (i64, i64, i64) {
     let day = doy - (153 * mp + 2) / 5 + 1;
     let month = if mp < 10 { mp + 3 } else { mp - 9 };
     (yoe + era * 400 + i64::from(month <= 2), month, day)
+}
+
+// ---------- Agent Companion (ADR-0009) ----------
+//
+// Four commands, none taking an argument: the screens cannot choose an executable, script,
+// destination, model, credential, path or grant. Replies are fixed nonsecret fields only.
+
+fn require_unlocked(app: &AppHandle) -> Result<(), ApiError> {
+    if core(app).app_status().phase == "unlocked" {
+        Ok(())
+    } else {
+        Err(ApiError {
+            code: "locked",
+            message: "Unlock the Vault first.".to_owned(),
+        })
+    }
+}
+
+#[tauri::command(async)]
+pub fn companion_status(app: AppHandle) -> CompanionView {
+    app.state::<Companion>().status()
+}
+
+/// The owner's explicit Start: one new grant of at most an hour, only while Unlocked.
+#[tauri::command(async)]
+pub fn companion_start(app: AppHandle) -> Result<CompanionView, ApiError> {
+    require_unlocked(&app)?;
+    Ok(app.state::<Companion>().start())
+}
+
+#[tauri::command(async)]
+pub fn companion_stop(app: AppHandle) -> CompanionView {
+    app.state::<Companion>().stop()
+}
+
+/// Native owner setup: the owner picks the reviewed companion plan and the separately created
+/// Agent Key file in OS-drawn panels. This process opens the two files and hands the helper
+/// their descriptors; it never reads them, and nothing about them returns to the screens.
+#[tauri::command]
+pub async fn companion_setup(app: AppHandle) -> Result<CompanionView, ApiError> {
+    require_unlocked(&app)?;
+    if !cfg!(target_os = "macos") {
+        return Ok(app.state::<Companion>().status());
+    }
+    let home = home_dir(&app);
+    let plan = pick_file(&app, {
+        let home = home.clone();
+        move || {
+            rfd::FileDialog::new()
+                .set_title("Choose the reviewed Agent Companion plan")
+                .set_directory(&home)
+                .add_filter("Companion plan", &["json"])
+                .pick_file()
+        }
+    })
+    .await?;
+    let credential = pick_file(&app, move || {
+        rfd::FileDialog::new()
+            .set_title("Choose the separate Agent Key file (never a key from your Vault)")
+            .set_directory(&home)
+            .pick_file()
+    })
+    .await?;
+    let plan = open_chosen(&plan)?;
+    let credential = open_chosen(&credential)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        app.state::<Companion>().install(&plan, &credential)
+    })
+    .await
+    .map_err(|_| ApiError {
+        code: "internal",
+        message: "The Agent Companion setup did not finish.".to_owned(),
+    })
+}
+
+/// Opens an owner-chosen file read-only without following a symbolic link.
+fn open_chosen(path: &std::path::Path) -> Result<std::fs::File, ApiError> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    options.open(path).map_err(|_| ApiError {
+        code: "io",
+        message: "That file could not be opened.".to_owned(),
+    })
 }
 
 #[cfg(test)]
