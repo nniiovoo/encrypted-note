@@ -18,7 +18,7 @@ An offline, encrypted vault for seed phrases, private keys, passwords and API ke
 
 ## Features
 
-- **Offline.** No network code, accounts, sync, updater or telemetry. Your Vault is one encrypted file on your computer.
+- **Offline Vault.** The Vault has no network code, accounts, sync, updater or telemetry; it's one encrypted file on your computer. An optional [Agent Companion](docs/agent-companion.md), off unless you start it, runs in its own sandbox, can't open the Vault, and sends text an approved agent supplies to OpenAI.
 - **Hidden by default.** Secrets stay as dots until you choose Show. Seed Phrases and Private Keys also need your Master Password.
 - **Careful on screen shares.** Asks the OS to keep the window out of captures (best effort) and covers it when a screen-sharing app is running.
 - **Recoverable.** A Recovery Key you write down at setup, and an [Emergency Reader](docs/guide.md#if-the-app-wont-open) that opens your Vault without the app.
@@ -37,6 +37,8 @@ npm run tauri dev   # run in development
 npx tauri build     # build the app
 ```
 
+To bundle the optional Agent Companion helper (Mac), use `scripts/package-companion.sh --app`; `scripts/verify-companion.sh` checks a built helper with fictional data.
+
 Run `./scripts/check.sh` (tests, clippy, cargo-deny, TypeScript) before a pull request. Debug builds read `ENOTE_DEV_DATA_DIR=<folder>` to keep your real Vault untouched, and `ENOTE_DEV_ALLOW_CAPTURE=1` to allow screenshots; release builds ignore both.
 
 ## Agent safety
@@ -44,7 +46,7 @@ Run `./scripts/check.sh` (tests, clippy, cargo-deny, TypeScript) before a pull r
 AI coding agents are instructed to follow [AGENTS.md](AGENTS.md):
 
 - Use obviously fake secrets in code, tests, docs, local issues and commits. Never include real passwords, keys or seed phrases.
-- Keep the app offline: no HTTP clients, updaters, telemetry, crash reporters or analytics.
+- Keep the Vault core and WebView offline: no HTTP clients, updaters, telemetry, crash reporters or analytics. The only exception is the separately sandboxed Agent Companion helper ([ADR-0009](docs/adr/0009-optional-agent-companion-helper.md)), which never receives Vault content.
 - Keep keys and decrypted Notes in the Rust core. The WebView receives only one Hidden Field at a time.
 - Add dependencies only when clearly needed, pin exact versions, and explain why in the PR or local issue.
 
@@ -54,6 +56,7 @@ Agents should test with fictional data in a separate development Vault using `EN
 
 - [Security model](docs/security-model.md): what it protects against, how it works, what has been tested
 - [User guide](docs/guide.md): keyboard shortcuts, and reading your Vault if the app won't open
+- [Agent Companion](docs/agent-companion.md): the optional helper for one approved agent, setup and limits
 - [File format](docs/FORMAT.md) · [Design decisions](docs/adr/) · [Glossary](CONTEXT.md)
 
 ## License

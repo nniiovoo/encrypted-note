@@ -49,13 +49,21 @@ const COMMANDS: &[&str] = &[
     "mark_seed_explainer_seen",
     "vault_location",
     "dismiss_sharing_guard",
+    // The optional Agent Companion (ADR-0009): status, start and stop, plus native owner setup.
+    "companion_status",
+    "companion_start",
+    "companion_stop",
+    "companion_setup",
 ];
 
 fn main() {
     println!("cargo:rerun-if-changed=native/biometry.swift");
+    println!("cargo:rerun-if-changed=native/companion/protocol.swift");
+    println!("cargo:rerun-if-changed=native/companion/client.swift");
     #[cfg(target_os = "macos")]
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
         build_biometry();
+        build_companion_client();
     }
     tauri_build::try_build(
         tauri_build::Attributes::new()
@@ -103,4 +111,49 @@ fn build_biometry() {
         println!("cargo:rustc-link-lib=framework={framework}");
     }
     swift_rs::SwiftLinker::new("13.0").link();
+}
+
+/// The app side of the Agent Companion (ADR-0009): forwards status/start/stop/setup to the
+/// bundled helper over XPC and copies back four numbers. The helper itself is built and signed
+/// separately by scripts/package-companion.sh; it is never linked into this process.
+#[cfg(target_os = "macos")]
+fn build_companion_client() {
+    use std::{path::PathBuf, process::Command};
+    let arch = match std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() {
+        Ok("aarch64") => "arm64",
+        Ok("x86_64") => "x86_64",
+        _ => panic!("unsupported macOS architecture"),
+    };
+    let out = PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR"));
+    let object = out.join("companion_client.o");
+    let archive = out.join("libencrypted_note_companion.a");
+    let status = Command::new("xcrun")
+        .args([
+            "swiftc",
+            "-parse-as-library",
+            "-wmo",
+            "-emit-object",
+            "-O",
+            "-target",
+        ])
+        .arg(format!("{arch}-apple-macos13.0"))
+        .args(["-module-name", "EncryptedNoteCompanion", "-o"])
+        .arg(&object)
+        .args([
+            "native/companion/protocol.swift",
+            "native/companion/client.swift",
+        ])
+        .status()
+        .expect("run Swift compiler");
+    assert!(status.success(), "compile Agent Companion client");
+    let status = Command::new("xcrun")
+        .args(["ar", "crs"])
+        .arg(&archive)
+        .arg(&object)
+        .status()
+        .expect("run archive tool");
+    assert!(status.success(), "archive Agent Companion client");
+    println!("cargo:rustc-link-search=native={}", out.display());
+    println!("cargo:rustc-link-lib=static=encrypted_note_companion");
+    println!("cargo:rustc-link-lib=framework=Foundation");
 }

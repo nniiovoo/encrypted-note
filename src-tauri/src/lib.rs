@@ -18,6 +18,8 @@
 #[allow(unsafe_code)]
 pub mod biometry;
 mod commands;
+#[allow(unsafe_code)]
+pub mod companion;
 pub mod core;
 #[allow(unsafe_code)]
 mod hardening;
@@ -102,6 +104,10 @@ pub fn run() {
             commands::mark_seed_explainer_seen,
             commands::vault_location,
             commands::dismiss_sharing_guard,
+            commands::companion_status,
+            commands::companion_start,
+            commands::companion_stop,
+            commands::companion_setup,
         ])
         .setup(|app| {
             setup(app.handle());
@@ -115,6 +121,8 @@ pub fn run() {
         if let RunEvent::Exit = event {
             // Clears the clipboard if it still holds our copy, and drops the keys.
             commands::os_event(app, OsEvent::Quit);
+            // The Agent Companion ends with the app (ADR-0009).
+            companion::stop_on_exit(app);
         }
     });
 }
@@ -196,9 +204,18 @@ fn setup(app: &AppHandle) {
     app.manage(CoreState(Mutex::new(core)));
     app.manage(native_coordinator::CoordinatorState::default());
     app.manage(quick_runtime::QuickRuntime::new(quick_unlock_path));
+    // Supervised beside the core, never inside it: the Vault core holds no helper state.
+    app.manage(companion::Companion::new(companion::system_transport()));
 
     let handle = app.clone();
     platform::observe_lock_events(app, move |event| {
+        // Sleep, screen lock, user switch and quit end any Agent Companion grant at once.
+        if matches!(
+            event,
+            OsEvent::Sleep | OsEvent::ScreenLocked | OsEvent::UserSwitched | OsEvent::Quit
+        ) {
+            companion::stop_for_lifecycle(&handle);
+        }
         // Never block the main thread on the core (an unlock may be running Argon2id).
         let handle = handle.clone();
         std::thread::spawn(move || commands::os_event(&handle, event));
@@ -293,6 +310,11 @@ fn background(app: &AppHandle) {
         native_coordinator::sync(app, &mut core);
         quick_runtime::sync(app, &mut core);
         let key = without_countdowns(core.app_status());
+        // Whatever locked the Vault (Auto-lock, Lock, a lost focus, an OS event), an Agent
+        // Companion grant ends with it (ADR-0009). Only an atomic check unless one may run.
+        if key.phase != "unlocked" {
+            companion::stop_for_lifecycle(app);
+        }
         if last.as_ref() != Some(&key) {
             let _ = app.emit(STATUS_EVENT, commands::status(&core));
             last = Some(key);

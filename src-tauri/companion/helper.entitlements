@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- ADR-0009: the Agent Companion helper has its OWN sandbox container. It cannot open the
+         Vault's container. These entitlements apply to the helper only, never to the Vault app. -->
+    <key>com.apple.security.app-sandbox</key>
+    <true/>
+    <!-- The fixed OpenAI request (POST https://api.openai.com/v1/responses). -->
+    <key>com.apple.security.network.client</key>
+    <true/>
+    <!-- The loopback broker (127.0.0.1:8789) that the separate agent account's bridge calls. -->
+    <key>com.apple.security.network.server</key>
+    <true/>
+    <!-- The owner-prepared handoff folder for the per-grant agent token, and nothing else. -->
+    <key>com.apple.security.temporary-exception.files.absolute-path.read-write</key>
+    <array>
+        <string>/Users/Shared/encrypted-note-companion/</string>
+    </array>
+</dict>
+</plist>

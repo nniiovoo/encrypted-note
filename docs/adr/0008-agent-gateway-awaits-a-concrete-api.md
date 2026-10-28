@@ -1,5 +1,7 @@
 # Agents use a separate local companion for bounded OpenAI text generation
 
+> **Amended by [ADR-0009](0009-optional-agent-companion-helper.md) (2026-10-26):** the companion can now also be bundled into encrypted-note as a separately sandboxed helper, pinned by commit and policy hash, with an absolute one-hour grant enforced at the broker. Its standalone launcher remains. The real-key gate below is unchanged.
+
 Status: Service and operation selected by the owner, 2026-10-21; companion source published privately and development/preparation behavior verified with 30 fictional tests. Actual OS isolation, protected execution, provider controls, a real-key pilot and optional ChatGPT cloud connection remain pending. Refs [issue #28](https://github.com/nniiovoo/encrypted-note/issues/28).
 
 The owner selected **OpenAI API text generation using one fixed model**, with a new separate restricted **Agent Key** and no owner-Vault access ([ADR-0007](0007-agents-use-separate-restricted-keys.md)). This replaces the earlier read-only-operation proposal. The selected implementation is a separate local companion whose primary interface is MCP over stdio.

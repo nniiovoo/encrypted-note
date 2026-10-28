@@ -1,10 +1,15 @@
-// Settings: Auto-lock, Backups, opening a Backup or Safety Copy, Change Master Password, help.
+// Settings: Auto-lock, Backups, opening a Backup or Safety Copy, Change Master Password, the
+// optional Agent Companion (ADR-0009), help.
 
 import { useEffect, useId, useRef, useState } from "react";
 import {
   appStatus,
   changePassword,
   cancelNativeOperation,
+  companionSetup,
+  companionStart,
+  companionStatus,
+  companionStop,
   disableQuickUnlock,
   enableQuickUnlock,
   discardInspection,
@@ -21,6 +26,7 @@ import {
   type AppStatus,
   type BackupWritten,
   type CloudProvider,
+  type CompanionView,
   type SafetyCopy,
   type Settings as SettingsView,
   type VaultPreview,
@@ -148,6 +154,8 @@ export function Settings({ status, onOperationOutcome }: { status: AppStatus; on
         </div>
       </section>
 
+      <AgentCompanion />
+
       <details className="card">
         <summary>{s.privacyTitle}</summary>
         {s.privacyTips.map((t) => (
@@ -258,6 +266,120 @@ function BackUp({ status }: { status: AppStatus }) {
             <button onClick={write}>{s.saveAnyway}</button>
             <button className="primary" onClick={start}>
               {s.chooseAnother}
+            </button>
+          </div>
+        </Modal>
+      )}
+    </section>
+  );
+}
+
+/** The optional Agent Companion (ADR-0009): readiness, the approved operation, Start/Stop.
+ *  Everything shown comes from fixed fields; Rust never sends a key, token, path or helper text. */
+function AgentCompanion() {
+  const [view, setView] = useState<CompanionView | null>(null);
+  const [confirming, setConfirming] = useState(false);
+  const { busy, error, run } = useAction();
+  const acting = useRef(false);
+  useEffect(() => {
+    let alive = true;
+    const refresh = () => {
+      if (acting.current) return;
+      companionStatus().then((next) => alive && !acting.current && setView(next), () => {});
+    };
+    refresh();
+    const timer = window.setInterval(refresh, 5000);
+    return () => {
+      alive = false;
+      window.clearInterval(timer);
+    };
+  }, []);
+  const act = (call: () => Promise<CompanionView>) => {
+    acting.current = true;
+    run(async () => setView(await call())).finally(() => (acting.current = false));
+  };
+  const on = view?.state === "starting" || view?.state === "running" || view?.state === "stopping";
+  const until = (t: number) => new Date(t * 1000).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+  const parts = Object.keys(s.companionLocal) as (keyof typeof s.companionLocal)[];
+
+  let body;
+  if (!view) body = <p className="hint">{s.companionChecking}</p>;
+  else if (!view.platform_supported) body = <p className="hint">{s.companionUnsupported}</p>;
+  else if (!view.helper_bundled) body = <p className="hint">{s.companionNotBundled}</p>;
+  else
+    body = (
+      <>
+        <p role="status" aria-live="polite">
+          <strong>{s.companionStates[view.state]}</strong>
+          {view.state === "running" && view.expires_at ? ` · ${s.companionRunningUntil(until(view.expires_at))}` : ""}
+        </p>
+        {view.error && <p className="warn">{s.companionErrors[view.error]}</p>}
+        <div className="setting">
+          <strong>{s.companionLocalTitle}</strong>
+          <ul className="rows">
+            {parts.map((part) => (
+              <li key={part}>
+                <span aria-hidden="true">{view.local[part] ? "✓" : "✗"} </span>
+                {s.companionLocal[part]}
+                <span className="sr-only">{view.local[part] ? " (ready)" : " (not ready)"}</span>
+              </li>
+            ))}
+          </ul>
+          <p className="hint">{view.local.ready ? s.companionReady : s.companionNotReady}</p>
+        </div>
+        <div className="setting">
+          <strong>{s.companionChatgptTitle}</strong>
+          <p className="hint">{s.companionChatgpt}</p>
+        </div>
+        <details>
+          <summary>{s.companionOperationTitle}</summary>
+          {s.companionOperation(view.operation).map((line) => (
+            <p key={line}>{line}</p>
+          ))}
+        </details>
+        <p className="hint">{s.companionCustody}</p>
+        <div className="actions">
+          <button disabled={busy || on} onClick={() => act(companionSetup)}>
+            {s.companionSetup}
+          </button>
+          {on ? (
+            <button disabled={busy || view.state === "stopping"} onClick={() => act(companionStop)}>
+              {s.companionStop}
+            </button>
+          ) : (
+            <button className="primary" disabled={busy || !view.local.ready} onClick={() => setConfirming(true)}>
+              {s.companionStart}
+            </button>
+          )}
+        </div>
+      </>
+    );
+
+  return (
+    <section className="section">
+      <h2>{s.companionTitle}</h2>
+      <div className="card stack">
+        <p>{s.companionIntro}</p>
+        {body}
+        <ErrorLine error={error} />
+      </div>
+      {confirming && (
+        <Modal title={s.companionConfirmTitle} onClose={() => setConfirming(false)}>
+          {s.companionConfirmText.map((line) => (
+            <p key={line}>{line}</p>
+          ))}
+          <p className="hint">{s.companionCustody}</p>
+          <div className="actions">
+            <button onClick={() => setConfirming(false)}>{s.cancel}</button>
+            <button
+              className="primary"
+              disabled={busy}
+              onClick={() => {
+                setConfirming(false);
+                act(companionStart);
+              }}
+            >
+              {s.companionStart}
             </button>
           </div>
         </Modal>
