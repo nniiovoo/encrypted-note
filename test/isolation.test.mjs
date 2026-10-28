@@ -4,17 +4,21 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { validatePlan, requireRole, parseConfirmedCredential, readBounded,
-  validateAclListing, assertProtectedPath, assertStandardIdentity } from '../isolation/common.mjs';
+  validateAclListing, assertProtectedPath, assertStandardIdentity, assertGrantActive,
+  grantGuard, MAX_GRANT_MS } from '../isolation/common.mjs';
+import { createGenerator, guardGenerate, POLICY } from '../src/generate.mjs';
 import { prepareOwnerFixture, verifyOwnerFixture, probeOwnerFixture } from '../isolation/fixtures.mjs';
 import { bridgeGenerator } from '../isolation/agent-bridge.mjs';
 const ownerUid = process.getuid();
 const plan = {
-  version: 1, ownerUid, agentUid: ownerUid + 1, agentShortName: 'enote-agent',
+  version: 2, ownerUid, agentUid: ownerUid + 1, agentShortName: 'enote-agent',
   credentialExpirySeconds: 3600, projectHardSpendLimitCents: 100,
   projectHardSpendCurrency: 'USD', projectHardSpendInterval: 'month',
   brokerHost: '127.0.0.1', brokerPort: 8789, providerModel: 'gpt-6-luna',
   providerScope: 'api.responses.write', bearerTokenFile: '/Users/Shared/FAKE-TOKEN-DIRECTORY/token',
+  grantExpiresAt: null,
 };
+const T0 = Date.parse('2026-10-26T12:00:00.000Z');
 test('isolation plan rejects missing identity, looser trial controls and unreviewed destinations', () => {
   validatePlan(plan);
   for (const changed of [
@@ -22,7 +26,11 @@ test('isolation plan rejects missing identity, looser trial controls and unrevie
     { bearerTokenFile: '/Users/Shared/../unreviewed' }, { credentialExpirySeconds: 7200 },
     { projectHardSpendLimitCents: 200 }, { brokerHost: '0.0.0.0' }, { brokerPort: 443 },
     { providerModel: 'other' }, { providerScope: 'api.all.read' }, { unexpected: true },
+    { grantExpiresAt: 'tomorrow' }, { grantExpiresAt: '2026-10-26T12:00:00+01:00' },
+    { grantExpiresAt: 1793016000000 }, { version: 3 },
   ]) assert.throws(() => validatePlan({ ...plan, ...changed }));
+  const { grantExpiresAt: _omitted, ...missing } = plan;
+  assert.throws(() => validatePlan(missing));
   assert.throws(() => requireRole(plan, 'agent', ownerUid));
   assert.throws(() => requireRole(plan, 'owner', 0));
 });
@@ -128,4 +136,52 @@ test('agent bridge accepts only the bounded operation and redacts remote errors'
   assert.equal(calls, 1);
   const failing = bridgeGenerator({ callTool: async () => { throw new Error('FAKE_PRIVATE_REMOTE_ERROR'); } });
   await assert.rejects(failing({ text: 'Fiction.' }), error => !error.message.includes('FAKE_PRIVATE_REMOTE_ERROR'));
+});
+
+test('version-1 plans are refused with a request for a new reviewed plan, never migrated', () => {
+  const { grantExpiresAt: _omitted, ...v1 } = { ...plan, version: 1 };
+  assert.throws(() => validatePlan(v1), /version-2/);
+  assert.throws(() => validatePlan({ ...plan, version: 1 }), /version-2/);
+});
+test('grants must be valid canonical UTC instants in the future and at most one hour away', () => {
+  const at = ms => ({ ...plan, grantExpiresAt: new Date(ms).toISOString() });
+  assert.equal(assertGrantActive(at(T0 + 1000), T0), T0 + 1000);
+  assert.equal(assertGrantActive(at(T0 + MAX_GRANT_MS), T0), T0 + MAX_GRANT_MS);
+  assert.equal(assertGrantActive({ ...plan, grantExpiresAt: '2026-10-26T12:30:00Z' }, T0),
+    Date.parse('2026-10-26T12:30:00Z'));
+  for (const bad of [
+    { ...plan, grantExpiresAt: null }, at(T0), at(T0 - 1), at(T0 + MAX_GRANT_MS + 1),
+    { ...plan, grantExpiresAt: '2026-02-30T00:00:00Z' }, { ...plan, grantExpiresAt: '2026-10-26 12:30:00Z' },
+  ]) assert.throws(() => assertGrantActive(bad, T0), /grant/);
+  assert.throws(() => assertGrantActive(at(T0 + 1000), NaN));
+});
+test('an expired grant stays denied after a simulated restart; restarting never adds time', () => {
+  const expired = { ...plan, grantExpiresAt: new Date(T0 + 1000).toISOString() };
+  assert.throws(() => assertGrantActive(expired, T0 + 1000));
+  // A fresh process re-reads the same reviewed plan: still expired.
+  assert.throws(() => assertGrantActive(structuredClone(expired), T0 + 5000));
+});
+test('the admission guard ends at the absolute deadline or after one monotonic hour, whichever is first', () => {
+  let wall = T0; let mono = 0;
+  const active = grantGuard(T0 + 10_000, { now: () => wall, mono: () => mono });
+  assert.equal(active(), true);
+  wall = T0 + 10_000; assert.equal(active(), false);
+  wall = T0 - 86_400_000; mono = MAX_GRANT_MS; // clock moved backwards a day; an hour passed
+  assert.equal(active(), false);
+  const fresh = grantGuard(T0 + 10_000, { now: () => T0 - 5_000_000, mono: () => 0 });
+  assert.equal(fresh(), true); // a backwards clock cannot extend beyond the monotonic hour
+});
+test('an expired grant reaches neither validation counters nor the provider', async () => {
+  let providerCalls = 0;
+  const generate = createGenerator({ apiKey: 'FAKE_OPENAI_AGENT_KEY_FOR_TESTS_ONLY', transport: async () => {
+    providerCalls++; return { status: 200, json: { model: POLICY.model, status: 'completed',
+      output: [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Fiction.' }] }] } };
+  } });
+  let active = true;
+  const guarded = guardGenerate(generate, () => active);
+  assert.deepEqual(await guarded({ text: 'Fiction.' }), { text: 'Fiction.' });
+  active = false;
+  await assert.rejects(guarded({ text: 'Fiction.' }), error => error.code === 'grant_expired');
+  await assert.rejects(guarded({ text: 'Fiction.', model: 'other' }), error => error.code === 'grant_expired');
+  assert.equal(providerCalls, 1);
 });

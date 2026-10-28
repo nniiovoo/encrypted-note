@@ -13,12 +13,20 @@ const PUBLIC_ERRORS = Object.freeze({
   provider_limit: 'The provider rejected the request because of a limit.',
   provider_unavailable: 'The provider request could not be completed.',
   invalid_response: 'The provider returned an unsupported response.',
+  grant_expired: 'The approved agent grant has ended. Ask the owner for a new grant.',
 });
 export class CompanionError extends Error {
   constructor(code) {
     super(PUBLIC_ERRORS[code] ?? PUBLIC_ERRORS.provider_unavailable);
     this.code = Object.hasOwn(PUBLIC_ERRORS, code) ? code : 'provider_unavailable';
   }
+}
+// Checks the owner's grant before validation, admission or any provider work.
+export function guardGenerate(generate, isActive) {
+  return async (args, options) => {
+    if (!isActive()) throw new CompanionError('grant_expired');
+    return generate(args, options);
+  };
 }
 export function validateInput(args) {
   if (!args || Object.getPrototypeOf(args) !== Object.prototype ||

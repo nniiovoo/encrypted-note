@@ -3,14 +3,19 @@ import { constants } from 'node:fs';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { performance } from 'node:perf_hooks';
 export const run = promisify(execFile);
 export function validatePlan(plan) {
   const keys = ['version', 'ownerUid', 'agentUid', 'agentShortName', 'credentialExpirySeconds',
     'projectHardSpendLimitCents', 'projectHardSpendCurrency', 'projectHardSpendInterval',
-    'brokerHost', 'brokerPort', 'providerModel', 'providerScope', 'bearerTokenFile'];
+    'brokerHost', 'brokerPort', 'providerModel', 'providerScope', 'bearerTokenFile', 'grantExpiresAt'];
+  if (plan?.version === 1) {
+    throw new Error('Version-1 isolation plans are no longer accepted. Prepare a new reviewed version-2 plan.');
+  }
   if (!plan || Object.getPrototypeOf(plan) !== Object.prototype ||
-      Object.keys(plan).some(key => !keys.includes(key)) ||
-      plan.version !== 1 || !Number.isSafeInteger(plan.ownerUid) || plan.ownerUid < 501 ||
+      Object.keys(plan).some(key => !keys.includes(key)) || !Object.hasOwn(plan, 'grantExpiresAt') ||
+      (plan.grantExpiresAt !== null && !isCanonicalUtc(plan.grantExpiresAt)) ||
+      plan.version !== 2 || !Number.isSafeInteger(plan.ownerUid) || plan.ownerUid < 501 ||
       !Number.isSafeInteger(plan.agentUid) || plan.agentUid < 501 ||
       plan.ownerUid === plan.agentUid ||
       !/^[a-z][a-z0-9_-]{0,30}$/.test(plan.agentShortName ?? '') ||
@@ -23,6 +28,30 @@ export function validatePlan(plan) {
     throw new Error('The reviewed nonsecret isolation plan is incomplete or changed.');
   }
   return plan;
+}
+// A grant is one owner-approved hour at most, ending at an absolute UTC instant.
+export const MAX_GRANT_MS = 3_600_000;
+export const GRANT_INACTIVE = 'The approved agent grant is missing, expired or too long. Prepare a new reviewed grant.';
+export function isCanonicalUtc(value) {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/.test(value)) return false;
+  const parsed = Date.parse(value);
+  if (!Number.isFinite(parsed)) return false;
+  const canonical = new Date(parsed).toISOString();
+  return canonical === value || canonical.replace('.000Z', 'Z') === value;
+}
+// Checked before any credential read, before the broker opens and before each provider admission.
+export function assertGrantActive(plan, nowMs = Date.now()) {
+  const expires = isCanonicalUtc(plan?.grantExpiresAt) ? Date.parse(plan.grantExpiresAt) : NaN;
+  if (!Number.isFinite(nowMs) || !Number.isFinite(expires) || nowMs >= expires || expires - nowMs > MAX_GRANT_MS) {
+    throw new Error(GRANT_INACTIVE);
+  }
+  return expires;
+}
+// Admission guard: the earlier of the absolute deadline and one hour of monotonic time since start.
+// A backwards wall-clock change cannot add time; a forward change ends the grant early.
+export function grantGuard(expiresAtMs, { now = Date.now, mono = () => performance.now() } = {}) {
+  const started = mono();
+  return () => now() < expiresAtMs && mono() - started < MAX_GRANT_MS;
 }
 export function requireRole(plan, role, uid = process.getuid()) {
   validatePlan(plan);
@@ -81,8 +110,9 @@ export async function readAgentToken(file, uid = process.getuid()) {
     return token;
   } finally { await handle.close(); }
 }
-export async function verifyCodeTree(directory, ownerUid) {
-  await assertProtectedPath(directory, ownerUid);
+export async function verifyCodeTree(directory, ownerUid, { ancestorsChecked = false } = {}) {
+  // Callers that verified the directory and its ancestors themselves pass ancestorsChecked.
+  if (!ancestorsChecked) await assertProtectedPath(directory, ownerUid);
   const { readdir } = await import('node:fs/promises');
   for (const entry of await readdir(directory, { withFileTypes: true })) {
     // npm command shims are not part of this runtime and are never executed.
@@ -93,7 +123,7 @@ export async function verifyCodeTree(directory, ownerUid) {
     if (info.isSymbolicLink() || ![0, ownerUid].includes(info.uid) || (info.mode & 0o022) !== 0) {
       throw new Error('A code or dependency path is not protected.');
     }
-    if (entry.isDirectory()) await verifyCodeTree(child, ownerUid);
+    if (entry.isDirectory()) await verifyCodeTree(child, ownerUid, { ancestorsChecked: true });
     else if (!entry.isFile()) throw new Error('Unexpected runtime file type.');
   }
 }
