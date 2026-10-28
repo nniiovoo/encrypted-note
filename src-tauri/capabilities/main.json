@@ -57,6 +57,10 @@
     "allow-cancel-native-operation",
     "allow-enable-quick-unlock",
     "allow-disable-quick-unlock",
-    "allow-quick-unlock"
+    "allow-quick-unlock",
+    "allow-companion-status",
+    "allow-companion-start",
+    "allow-companion-stop",
+    "allow-companion-setup"
   ]
 }

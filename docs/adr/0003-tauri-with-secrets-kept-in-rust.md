@@ -1,5 +1,7 @@
 # Tauri v2, with secret custody in Rust and native adapters
 
+> **Amended by [ADR-0009](0009-optional-agent-companion-helper.md) (2026-10-26):** every Vault secret stays with the Rust core and its native adapters. The one key held elsewhere is a separately created OpenAI Agent Key, kept by the optional Agent Companion helper in its own sandbox as an owner-only plain-text file and in Node.js memory. It is never a Vault value.
+
 The app must run on Mac and Windows and support **Capture Hiding** on both. We chose Tauri v2: the screens are TypeScript in the system WebView, and the Rust/native core owns key derivation, encryption, the **Vault** file and OS integration. The WebView is treated as untrusted. Native controls own actual **Master Password** and **Recovery Key** entry, **Recovery Kit** display/confirmation and stored **Wallet Kind** readouts. Ordinary Show receives one authorized **Hidden Field**, which is dropped when it hides. New/edited Hidden Field inputs still pass through the WebView. Rust wipes its own secret buffers; JavaScript strings and OS/native copies cannot be promised erased.
 
 ## Considered Options

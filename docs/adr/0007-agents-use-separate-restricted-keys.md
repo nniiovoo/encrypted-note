@@ -1,5 +1,7 @@
 # Agents use separate restricted Agent Keys; the owner Vault stays out of reach
 
+> **Amended by [ADR-0009](0009-optional-agent-companion-helper.md) (2026-10-26):** the owner approved one exception to "no helper": the optional Agent Companion helper, bundled in its own sandbox and managed from Settings. It still has no route to the Vault, its Notes, their metadata, Wallet Kinds, the Master Password or the Recovery Key. Everything else here stands.
+
 Status: Accepted by the owner, 2026-10-21 ([issue #25](https://github.com/nniiovoo/encrypted-note/issues/25)).
 
 The owner has approved a separate **Agent Key** boundary. AI agents receive no access to the owner's **Vault**, its **Notes** or their metadata. An **Agent Key** is a new credential created at a service only for agent work, never a copy of an owner's existing key and never a value stored in the **Vault**. This decision approves the boundary, not a provider operation or a pilot.
