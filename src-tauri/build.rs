@@ -107,7 +107,15 @@ fn build_biometry() {
     assert!(status.success(), "archive local biometric bridge");
     println!("cargo:rustc-link-search=native={}", out.display());
     println!("cargo:rustc-link-lib=static=encrypted_note_biometry");
-    for framework in ["CryptoKit", "Security", "LocalAuthentication", "Foundation"] {
+    // LocalAuthenticationEmbeddedUI keeps Touch ID inside the protected window (no system alert).
+    for framework in [
+        "CryptoKit",
+        "Security",
+        "LocalAuthentication",
+        "LocalAuthenticationEmbeddedUI",
+        "AppKit",
+        "Foundation",
+    ] {
         println!("cargo:rustc-link-lib=framework={framework}");
     }
     swift_rs::SwiftLinker::new("13.0").link();

@@ -30,6 +30,7 @@ struct Panel {
     original_focus: Option<Retained<NSResponder>>,
     _view: Retained<NSView>,
     _target: Retained<Target>,
+    _authentication: Option<Retained<NSView>>,
     fields: Vec<Retained<NSSecureTextField>>,
     sensitive_labels: Vec<Retained<NSTextField>>,
     feedback: Retained<NSTextField>,
@@ -231,7 +232,7 @@ pub(super) fn present(
     heading.setFont(Some(&NSFont::boldSystemFontOfSize(21.0)));
     let detail_height = match &prompt {
         Request::Entry(Prompt::NewPassword { .. }) => 48.0,
-        Request::Entry(Prompt::RecoveryKit { .. }) => 64.0,
+        Request::Entry(Prompt::RecoveryKit { .. }) | Request::Biometric(_) => 64.0,
         _ => 160.0,
     };
     label(
@@ -243,6 +244,33 @@ pub(super) fn present(
         detail_height,
         mtm,
     );
+    let mut authentication = None;
+    if let Request::Biometric(biometric) = &prompt {
+        let pointer = crate::biometry::authentication_view(biometric.request).cast::<NSView>();
+        // SAFETY: Swift returns a +1 retained LAAuthenticationView (an NSView subclass) made on
+        // this main thread for exactly this request, or null. Retained takes over that one
+        // reference and releases it with the Panel.
+        let embedded = unsafe { Retained::from_raw(pointer) }.ok_or(PromptError::Unavailable)?;
+        // SAFETY: NSView's documented size and accessibility accessors on a live view.
+        let size: NSSize = unsafe {
+            let _: () = msg_send![&embedded, setAccessibilityLabel: ns_string!("Touch ID")];
+            msg_send![&embedded, fittingSize]
+        };
+        let (side_w, side_h) = if size.width > 0.0 && size.height > 0.0 {
+            (size.width, size.height)
+        } else {
+            (64.0, 64.0)
+        };
+        embedded.setFrame(rect(
+            (bounds.size.width - side_w) / 2.0,
+            place(&mut y, side_h, 12.0),
+            side_w,
+            side_h,
+        ));
+        anchor(&embedded);
+        view.addSubview(&embedded);
+        authentication = Some(embedded);
+    }
     let mut sensitive_labels = Vec::new();
     let mut readout = None;
     let mut readout_scroll = None;
@@ -382,7 +410,7 @@ pub(super) fn present(
     }
     let feedback = label(
         &view,
-        "Credentials stay in native controls. Escape cancels.",
+        feedback_text(&prompt),
         x,
         place(&mut y, 36.0, 6.0),
         width,
@@ -400,19 +428,23 @@ pub(super) fn present(
     );
     cancel.setKeyEquivalent(ns_string!("\u{1b}"));
     let is_reveal = matches!(&prompt, Request::Reveal { .. });
-    let accept = button(
-        &view,
-        if is_reveal { "Close" } else { "Continue" },
-        rect(x + width - 112.0, button_y, 112.0, 30.0),
-        &target,
-        if is_reveal {
-            sel!(cancel:)
-        } else {
-            sel!(submit:)
-        },
-        mtm,
-    );
-    accept.setKeyEquivalent(ns_string!("\r"));
+    // Touch ID has nothing to submit: the sensor is the only way forward.
+    let accept = (!matches!(&prompt, Request::Biometric(_))).then(|| {
+        let accept = button(
+            &view,
+            if is_reveal { "Close" } else { "Continue" },
+            rect(x + width - 112.0, button_y, 112.0, 30.0),
+            &target,
+            if is_reveal {
+                sel!(cancel:)
+            } else {
+                sel!(submit:)
+            },
+            mtm,
+        );
+        accept.setKeyEquivalent(ns_string!("\r"));
+        accept
+    });
     let mut key_views: Vec<&NSView> = Vec::new();
     for field in &fields {
         key_views.push(&**field);
@@ -429,7 +461,10 @@ pub(super) fn present(
     if let Some(button) = &extend_button {
         key_views.push(&**button);
     }
-    key_views.extend([&*cancel as &NSView, &*accept as &NSView]);
+    key_views.push(&*cancel);
+    if let Some(accept) = &accept {
+        key_views.push(&**accept);
+    }
     // SAFETY: All key views are retained by the native view/Panel for the complete key loop.
     unsafe {
         for pair in key_views.windows(2) {
@@ -461,6 +496,7 @@ pub(super) fn present(
             original_focus,
             _view: view.clone(),
             _target: target,
+            _authentication: authentication,
             fields,
             sensitive_labels,
             feedback,
@@ -500,6 +536,13 @@ pub(super) fn present(
         window.makeFirstResponder(Some(&scroll));
     }
     Ok(())
+}
+
+fn feedback_text(prompt: &Request) -> &'static str {
+    match prompt {
+        Request::Biometric(_) => "Touch ID stays in this window. Switching apps or Escape cancels.",
+        _ => "Credentials stay in native controls. Escape cancels.",
+    }
 }
 
 fn rect(x: f64, y: f64, width: f64, height: f64) -> NSRect {
@@ -590,9 +633,9 @@ fn apply_authorization(id: u64, authorization: Authorization) -> bool {
                     label.setStringValue(&NSString::from_str(suggestion));
                 }
                 // Restore only a generated candidate, never a manually typed password.
-                panel.feedback.setStringValue(ns_string!(
-                    "Credentials stay in native controls. Escape cancels."
-                ));
+                panel
+                    .feedback
+                    .setStringValue(&NSString::from_str(feedback_text(&panel.prompt)));
             }
             _ => (),
         }

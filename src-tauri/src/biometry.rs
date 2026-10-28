@@ -66,6 +66,11 @@ impl Cancellation {
         self.0.id == 0 || self.0.cancelled.load(Ordering::SeqCst)
     }
 
+    /// The opaque request id that pairs the embedded Touch ID view with this operation.
+    pub fn request(&self) -> u64 {
+        self.0.id
+    }
+
     #[cfg(any(target_os = "macos", test))]
     fn check(&self) -> Result<(), Error> {
         if self.is_cancelled() {
@@ -86,7 +91,7 @@ impl Drop for CancellationState {
 }
 
 #[cfg(target_os = "macos")]
-pub use mac::{availability, enroll, read, remove};
+pub use mac::{authentication_view, availability, enroll, read, remove};
 
 #[cfg(not(target_os = "macos"))]
 pub fn availability() -> Availability {
@@ -153,6 +158,15 @@ mod mac {
             capacity: isize,
         ) -> i32;
         fn enote_biometry_validate(blob: *const u8, length: isize) -> i32;
+        fn enote_biometry_view(id: u64) -> *mut std::ffi::c_void;
+    }
+
+    /// Main thread only. A +1 retained `LAAuthenticationView` paired with the context that
+    /// this request's protected read will use, or null (cancelled, reused or off the main
+    /// thread). Without it that read refuses to start. The caller owns the reference.
+    pub fn authentication_view(request: u64) -> *mut std::ffi::c_void {
+        // SAFETY: an opaque request id; Swift checks the thread and returns an owned object.
+        unsafe { enote_biometry_view(request) }
     }
 
     pub(super) fn cancel(id: u64) {

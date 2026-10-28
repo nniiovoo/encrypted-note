@@ -74,24 +74,36 @@ pub struct Reveal {
     pub mode: RevealMode,
 }
 
+/// Touch ID inside the protected window: an explanation, the system's embedded biometric view
+/// for one biometry request, and Cancel. It collects nothing and returns no value.
+pub struct Biometric {
+    pub title: String,
+    pub detail: String,
+    /// The biometry request whose paired authentication context the embedded view presents.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub request: u64,
+}
+
 enum Request {
     Entry(Prompt),
     Reveal {
         reveal: Reveal,
         extend: Option<Box<dyn Fn() -> Authorization + Send>>,
     },
+    Biometric(Biometric),
 }
 
 enum Callback {
     Entry(Completion),
     Reveal(Box<dyn FnOnce() + Send>),
+    Biometric(Box<dyn FnOnce() + Send>),
 }
 
 impl Callback {
     fn finish(self, result: Result<Reply, PromptError>) {
         match self {
             Self::Entry(completion) => completion(result),
-            Self::Reveal(completion) => completion(),
+            Self::Reveal(completion) | Self::Biometric(completion) => completion(),
         }
     }
 }
@@ -101,18 +113,20 @@ impl Request {
         match self {
             Self::Entry(prompt) => prompt.text(),
             Self::Reveal { reveal, .. } => (&reveal.title, &reveal.detail),
+            Self::Biometric(biometric) => (&biometric.title, &biometric.detail),
         }
     }
     fn labels(&self) -> Vec<&str> {
         match self {
             Self::Entry(prompt) => prompt.labels(),
-            Self::Reveal { .. } => Vec::new(),
+            Self::Reveal { .. } | Self::Biometric(_) => Vec::new(),
         }
     }
     fn reply(&self, fields: Vec<Zeroizing<String>>) -> Result<Reply, &'static str> {
         match self {
             Self::Entry(prompt) => prompt.reply(fields),
             Self::Reveal { .. } => Err("Close this native readout to finish."),
+            Self::Biometric(_) => Err("Use Touch ID, or choose Cancel."),
         }
     }
 }
@@ -253,6 +267,27 @@ pub fn present_reveal(
     #[cfg(not(any(target_os = "macos", windows)))]
     {
         let _ = (window, id, reveal, on_extend, activity, completion);
+        Err(PromptError::Unavailable)
+    }
+}
+
+/// Show Touch ID inside this exact main window (Mac only). The completion runs once when the
+/// panel closes for any reason; the caller cancels its biometry request then, which also
+/// invalidates the paired context, so authentication never continues without this panel.
+pub fn present_biometric(
+    window: &tauri::WebviewWindow,
+    id: u64,
+    biometric: Biometric,
+    activity: Activity,
+    completion: Box<dyn FnOnce() + Send>,
+) -> Result<(), PromptError> {
+    let request = Request::Biometric(biometric);
+    let callback = Callback::Biometric(completion);
+    #[cfg(target_os = "macos")]
+    return mac::present(window, id, request, activity, callback);
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (window, id, request, activity, callback);
         Err(PromptError::Unavailable)
     }
 }
