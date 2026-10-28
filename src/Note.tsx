@@ -3,6 +3,7 @@
 import { Fragment, useEffect, useId, useRef, useState, type ClipboardEvent as PasteEvent, type FormEvent } from "react";
 import {
   appendText,
+  cancelNativeOperation,
   checkPrivateKey,
   checkSeed,
   copyField,
@@ -28,7 +29,7 @@ import {
   type Kind,
   type NoteView,
 } from "./api";
-import { Choice, cmdKey, Confirm, ErrorLine, expiry, Field, formatDate, mac, Modal, noAssist, PasswordModal, SecretInput, seconds, useAction } from "./components";
+import { Choice, cmdKey, Confirm, ErrorLine, expiry, Field, formatDate, mac, Modal, noAssist, NativeActionModal, SecretInput, seconds, useAction } from "./components";
 import { Icon, KindBadge } from "./icons";
 import { strings as s } from "./strings";
 
@@ -479,22 +480,22 @@ export function Detail(
         />
       )}
       {modal?.step === "copy" && (
-        <PasswordModal
+        <NativeActionModal
           title={s.noteAction(s.copyTitle(label(note.kind, modal.field)), note.title)}
           text={s.copyText(WALLET_COPY_SECONDS)}
           submitLabel={s.copy}
-          onSubmit={(password) => copyField(id, modal.field, password)}
+          onSubmit={() => copyField(id, modal.field)}
           onClose={() => setModal(null)}
           retryInMs={status.retry_in_ms}
         />
       )}
       {modal?.step === "trash" && live && (
-        <PasswordModal
+        <NativeActionModal
           title={s.noteAction(s.moveToTrash, note.title)}
           text={s.walletTrashText}
           submitLabel={s.moveToTrash}
-          onSubmit={async (password) => {
-            await trashNote(id, password);
+          onSubmit={async () => {
+            await trashNote(id);
             live.onTrashed();
           }}
           onClose={() => setModal(null)}
@@ -505,207 +506,48 @@ export function Detail(
   );
 }
 
-/** Wallet Kinds (ADR-0004): Master Password each time, visible only while held, or for 20 s. */
+/** Wallet authentication and readout stay together in native controls. */
 function WalletShow(props: { id: string; title: string; field: string; name: string; status: AppStatus; onClose: () => void }) {
-  const { id, field } = props;
-  const [password, setPassword] = useState("");
-  const { shown, keep, hide, version } = useShown(id, props.status);
-  const holding = useRef(false);
-  // The right password, but the button was let go before the check finished: said once idle.
-  const [letGo, setLetGo] = useState(false);
-  // Show and copy of a Seed Phrase's words asks first, as Copy does.
-  const [confirmCopy, setConfirmCopy] = useState(false);
-  // More time: a request on its way (a second click must not use up another of the three), and
-  // the core's refusal of one.
-  const [asking, setAsking] = useState(false);
-  const [moreError, setMoreError] = useState<string | null>(null);
-  // Ties "2 times left" to the button, so a screen reader says both.
-  const timesLeft = useId();
-  const input = useRef<HTMLInputElement>(null);
   const { busy, error, run } = useAction();
-  const isShown = shown && props.status.reveal?.note_id === id && props.status.reveal.field === field;
-  // The reveal on screen. Its time (and with it "more time") is there only for a timed reveal:
-  // a value shown while held has neither.
-  const reveal = isShown ? props.status.reveal : null;
-  // After three wrong passwords the core refuses every attempt for a while, the right one too.
+  const [confirmCopy, setConfirmCopy] = useState(false);
+  const pending = useRef(false);
   const wait = props.status.retry_in_ms ? seconds(props.status.retry_in_ms) : 0;
-
-  // "copy": shown for 20 seconds and copied, with the one password entry. Never while held.
-  const show = (mode: "held" | "accessible" | "copy") => {
-    if (wait > 0) return; // it would be thrown away unchecked: what was typed stays in the box
-    const p = password;
-    const requestedAt = version();
-    setPassword("");
-    setLetGo(false);
-    setMoreError(null);
-    run(async () => {
-      const value = mode === "copy" ? await showAndCopyWalletField(id, field, p) : await showWalletField(id, field, p, mode);
-      if (mode !== "held" || holding.current) keep(field, value, requestedAt);
-      else {
-        // let go before the password check finished
-        setLetGo(true);
-        await hideField();
-      }
-    }).then((ok) => {
-      if (!ok) holding.current = false; // the button may be disabled before it's let go
-    });
-  };
-  const hold = () => {
-    if (!password || holding.current || wait > 0) return;
-    holding.current = true;
-    show("held");
-  };
-  const release = () => {
-    if (!holding.current) return;
-    holding.current = false;
-    hide();
-  };
-  // More time for a value shown for 20 seconds: its 20 seconds start again, counted from now.
-  // The core allows it three times.
-  const more = () => {
-    setMoreError(null);
-    setAsking(true);
-    extendReveal()
-      .catch((e) => setMoreError(isApiError(e) ? e.message : s.somethingWentWrong))
-      .finally(() => setAsking(false));
-  };
-  useEffect(() => {
-    // A release the button never hears of must still hide the value. On a Mac the key-up for
-    // Space is not delivered while Cmd is down; any other key means the hold is over; and the
-    // page can be hidden without the window losing focus.
-    const onKey = (e: KeyboardEvent) => {
-      if (holding.current && (e.metaKey || e.key !== " ")) release();
-    };
-    const onHidden = () => {
-      if (document.hidden) release();
-    };
-    window.addEventListener("blur", release);
-    window.addEventListener("keydown", onKey, true);
-    document.addEventListener("visibilitychange", onHidden);
-    return () => {
-      window.removeEventListener("blur", release);
-      window.removeEventListener("keydown", onKey, true);
-      document.removeEventListener("visibilitychange", onHidden);
-    };
+  useEffect(() => () => {
+    if (pending.current) void cancelNativeOperation().catch(() => {});
   }, []);
-  // When a reveal ends or a check fails, the button that had the keyboard is disabled again and
-  // typing would go nowhere: the password box takes it back. The core can also end a hold itself,
-  // and a disabled button never hears that it was let go.
-  useEffect(() => {
-    if (!busy && !shown) holding.current = false;
-    const at = document.activeElement;
-    if (!at || at === document.body || (at as HTMLButtonElement).disabled) input.current?.focus();
-  }, [busy, !!shown]);
-  // The question in front of Show and copy leaves the keyboard on the sheet itself when it
-  // closes: the password box takes it, as when this prompt opened.
-  useEffect(() => {
-    if (!confirmCopy) input.current?.focus();
-  }, [confirmCopy]);
-
+  const close = () => {
+    if (pending.current) void cancelNativeOperation().catch(() => {});
+    props.onClose();
+  };
+  const show = (mode: "held" | "accessible" | "copy") => {
+    if (busy || wait > 0) return;
+    pending.current = true;
+    run(() => mode === "copy" ? showAndCopyWalletField(props.id, props.field) : showWalletField(props.id, props.field, mode))
+      .then((ok) => {
+        pending.current = false;
+        if (ok) props.onClose();
+      });
+  };
   return (
     <>
-      <Modal title={s.noteAction(s.showWalletTitle(props.name), props.title)} onClose={props.onClose}>
-        {isShown ? <Value field={field} value={shown.value} /> : <p className="hint">{s.holdHint}</p>}
-        {reveal && reveal.expires_in_ms != null && (
-          <div className="actions start">
-            <span className="hint">{s.hidesIn(seconds(reveal.expires_in_ms))}</span>
-            {/* Never given the keyboard by the page, and it gives it up once pressed: a key held
-                down (its repeats are ignored too) must not keep the value on screen. */}
-            {reveal.extensions_left != null && (
-              <>
-                <button
-                  type="button"
-                  className="small"
-                  aria-describedby={timesLeft}
-                  disabled={!reveal.can_extend || asking}
-                  onKeyDown={(e) => e.repeat && e.preventDefault()}
-                  onClick={(e) => {
-                    e.currentTarget.blur();
-                    more();
-                  }}
-                >
-                  {s.resetTimer20}
-                </button>
-                <span id={timesLeft} className="hint">
-                  {s.moreTimesLeft(reveal.extensions_left)}
-                </span>
-              </>
-            )}
-          </div>
-        )}
-        {/* Enter shows for 20 seconds. */}
-        <form
-          className="stack"
-          onSubmit={(e) => {
-            e.preventDefault();
-            show("accessible");
-          }}
-        >
-          <Field label={s.masterPassword}>
-            <SecretInput
-              ref={input}
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              // Space may still be held down from the button when the keyboard comes back here.
-              onKeyDown={(e) => e.key === " " && e.repeat && e.preventDefault()}
-              autoFocus
-            />
-          </Field>
-          <ErrorLine error={error ?? moreError} />
-          {wait > 0 && <p className="hint">{s.tryAgainIn(wait)}</p>}
-          {/* The line is there before its text, so that the text is read out when it comes. */}
-          <p className="hint" role="status">
-            {letGo && !busy && !shown && s.keepHolding}
-          </p>
-          <div className="actions">
-            <button
-              type="button"
-              className="primary big"
-              disabled={!busy && !shown && (!password || wait > 0)}
-              onPointerDown={(e) => {
-                e.currentTarget.setPointerCapture(e.pointerId);
-                hold();
-              }}
-              onPointerUp={release}
-              onPointerCancel={release}
-              onKeyDown={(e) => {
-                if (e.key !== " ") return;
-                e.preventDefault();
-                if (!e.repeat) hold();
-              }}
-              onKeyUp={(e) => e.key === " " && release()}
-              onBlur={release}
-            >
-              {busy ? s.checking : s.holdToShow}
-            </button>
-            <button disabled={busy || !password || wait > 0}>{s.showFor20}</button>
-            {/* One password entry for both. A Seed Phrase's words are asked about first, as
-                when they are copied from the Note. */}
-            <button
-              type="button"
-              disabled={busy || !password || wait > 0}
-              onClick={() => (field === "words" ? setConfirmCopy(true) : show("copy"))}
-            >
-              {s.showFor20AndCopy}
-            </button>
-            <button type="button" onClick={props.onClose}>
-              {s.close}
-            </button>
-          </div>
-        </form>
+      <Modal title={s.noteAction(s.showWalletTitle(props.name), props.title)} onClose={close}>
+        <p className="hint">{s.holdHint}</p>
+        <ErrorLine error={error} />
+        {wait > 0 && <p className="hint">{s.tryAgainIn(wait)}</p>}
+        <div className="actions">
+          <button className="primary" disabled={busy || wait > 0} onClick={() => show("held")}>{s.holdToShow}</button>
+          <button disabled={busy || wait > 0} onClick={() => show("accessible")}>{s.showFor20}</button>
+          <button disabled={busy || wait > 0} onClick={() => props.field === "words" ? setConfirmCopy(true) : show("copy")}>{s.showFor20AndCopy}</button>
+          <button onClick={close}>{s.close}</button>
+        </div>
       </Modal>
-      {confirmCopy && (
-        <Confirm
-          title={s.noteAction(s.fieldAction(s.showFor20AndCopy, props.name), props.title)}
-          text={s.copySeedText}
-          confirmLabel={s.copyAnyway}
-          onConfirm={() => {
-            setConfirmCopy(false);
-            show("copy");
-          }}
-          onClose={() => setConfirmCopy(false)}
-        />
-      )}
+      {confirmCopy && <Confirm
+        title={s.noteAction(s.fieldAction(s.showFor20AndCopy, props.name), props.title)}
+        text={s.copySeedText}
+        confirmLabel={s.copyAnyway}
+        onConfirm={() => { setConfirmCopy(false); show("copy"); }}
+        onClose={() => setConfirmCopy(false)}
+      />}
     </>
   );
 }
@@ -861,7 +703,7 @@ export function Editor(props: {
     };
   }, [phrase, privateKey, chain]);
 
-  async function save(password?: string) {
+  async function save() {
     if (note && add) {
       // Only what was typed is sent. The title goes first: saved a second time after a failure
       // it changes nothing, where text added a second time would be there twice.
@@ -880,8 +722,8 @@ export function Editor(props: {
       } else if (f === "chain") input.visible.chain = chain === "other" ? chainName.trim() || "other" : chain;
       else if (f !== "word_count") input.visible[f] = visible[f] ?? "";
     }
-    if (note) await updateNote(note.id, input, password);
-    const id = note ? note.id : await createNote({ kind, ...input }, password);
+    if (note) await updateNote(note.id, input);
+    const id = note ? note.id : await createNote({ kind, ...input });
     // The explainer counts as seen once a Seed Phrase is actually saved.
     if (kind === "seed_phrase" && !props.status.settings.seed_explainer_seen) markSeedExplainerSeen().catch(() => {});
     if (another.current && props.onSavedAndNew) props.onSavedAndNew();
@@ -1162,7 +1004,7 @@ export function Editor(props: {
         </Modal>
       )}
       {step === "password" && (
-        <PasswordModal
+        <NativeActionModal
           title={s.noteAction(note ? s.edit : s.add, note?.title ?? title.trim())}
           text={s.savePasswordText}
           submitLabel={s.save}

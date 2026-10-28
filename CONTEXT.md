@@ -37,7 +37,7 @@ Replacing the **Vault**'s internal keys and its **Recovery Key** (so the owner w
 _Avoid_: reset, re-key, re-encrypt
 
 **Locked** / **Unlocked**:
-The two states of an open app: **Unlocked** means the **Vault** can be read; **Locked** means the app has forgotten how to read it until the **Master Password** or **Recovery Key** is entered again.
+The two states of an open app: **Unlocked** means the **Vault** can be read; **Locked** means the app has dropped its open Vault and decrypted Notes. Native **Master Password** or **Recovery Key** entry opens it again; previously enabled **Quick Unlock** may also open it under its separate local rules.
 _Avoid_: logged in / logged out, open / closed
 
 **Auto-lock**:
@@ -45,7 +45,7 @@ The owner-chosen rule for when an **Unlocked** app becomes **Locked** by itself 
 _Avoid_: timeout, session expiry
 
 **Quick Unlock**:
-Opening a **Locked** app with Touch ID (Mac) or Windows Hello instead of typing the **Master Password**; the **Master Password** is still required after every restart and every 7 days. (Planned for v1.1.)
+Opening a **Locked** app with Touch ID on a supported Mac after explicit enrollment. The local source implementation uses a device-bound Secure Enclave key and an encrypted private file; no account, server or Apple Developer profile is part of this route. Native **Master Password** verification is still required after every app restart and every 7 days; Touch ID never extends that deadline or opens **Wallet Kinds**. Physical Touch ID acceptance remains pending. Windows Hello remains later.
 _Avoid_: biometric login, fingerprint login
 
 **Recovery Kit**:
@@ -98,7 +98,7 @@ _Avoid_: using "passphrase" for the **Master Password**
 A **Kind** of **Note** holding one wallet/account private key, with the chain it belongs to and its public address.
 
 **Wallet Kinds**:
-**Seed Phrase** and **Private Key**, the **Kinds** that can move funds directly. Their **Hidden Fields** stay encrypted even while the app is **Unlocked**. Showing, adding or editing them needs the **Master Password** again. Shown values stay visible while the Show button or Space key is held, or for 20 seconds when the timed reveal option is chosen; those 20 seconds can be given again three times, after which showing the value takes the **Master Password** once more.
+**Seed Phrase** and **Private Key**, the **Kinds** that can move funds directly. Their **Hidden Fields** stay encrypted even while the app is **Unlocked**. Showing, adding or editing them needs the **Master Password** again in a native panel; stored Wallet readouts stay native too. Shown values stay visible while the Show button or Space key is held, or for 20 seconds when the timed reveal option is chosen; those 20 seconds can be given again three times, after which showing the value takes the **Master Password** once more.
 _Avoid_: sensitive kinds, crypto notes
 
 **Login**:
@@ -139,7 +139,7 @@ _Avoid_: pinned, bookmarked, starred item
 - A copied value is cleared from the clipboard after 30 seconds, or 60 if the owner chooses that; a **Wallet Kind** value always after 30. The visible parts of a **Note** can be copied too, and that never needs the **Master Password**.
 - **Capture Hiding** is always on; the **Sharing Guard** exists because **Capture Hiding** alone can't be trusted on Mac.
 - Search matches only the visible parts of a **Note** (title, website, username, purpose, wallet name, chain, address, derivation path, service name, key ID, where it is managed, expiry date, variable name), never its **Hidden Fields**. Several words can be typed: a **Note** is found when each word is somewhere in those parts, in any order, and a **Private Key** is also found by the name of its chain (such as "ethereum").
-- A **Vault** opens with either its **Master Password** or its **Recovery Key**; nothing else can open it.
+- The **Vault** file has only **Master Password** and **Recovery Key** credential slots. Enabled **Quick Unlock** opens this computer's current Vault with a separately protected **Vault Key**, without adding a credential slot or releasing the **Wallet Key**.
 - A **Vault** has exactly one **Recovery Key**, shown to the owner once, at setup, to write onto their **Recovery Kit**.
 - **Safety Copies** stay on this computer; a **Backup** is the owner's copy somewhere else. Both are complete **Vaults**.
 - The **Emergency Reader** never writes **Notes** to disk; it only shows them.

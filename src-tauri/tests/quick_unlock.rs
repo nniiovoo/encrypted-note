@@ -205,6 +205,78 @@ fn off_by_default_and_only_verified_protected_enrollment_enables_it() {
 }
 
 #[test]
+fn pending_biometry_blocks_disclosure_without_spending_budget() {
+    for finish in [false, true] {
+        let mut app = App::new();
+        let ids: Vec<_> = (0..9)
+            .map(|i| {
+                let input: NoteInput = serde_json::from_value(serde_json::json!({
+                    "kind": "api_key", "title": format!("Fake pending-biometry key {i}"),
+                    "visible": {"env_var": format!("FAKE_KEY_{i}")},
+                    "hidden": {"key": format!("fake-pending-key-{i}")}
+                }))
+                .unwrap();
+                app.core.create_note(input, None).unwrap()
+            })
+            .collect();
+        let NativeResult::QuickUnlockEnrollment(enrollment) = app
+            .native(
+                NativeAction::EnrollQuickUnlock,
+                NativeCredentials::Password(text(PASSWORD)),
+            )
+            .unwrap()
+        else {
+            panic!("expected enrollment");
+        };
+        for id in &ids {
+            assert_eq!(
+                app.core.show_field(id, "key").err().map(|e| e.code),
+                Some("invalid_input")
+            );
+            assert_eq!(
+                app.core.copy_field(id, "key", None).err().map(|e| e.code),
+                Some("invalid_input")
+            );
+            assert_eq!(
+                app.core.copy_field_line(id, "key", 0).err().map(|e| e.code),
+                Some("invalid_input")
+            );
+            assert_eq!(
+                app.core.copy_field_env(id).err().map(|e| e.code),
+                Some("invalid_input")
+            );
+        }
+        assert!(app.core.quick_unlock_pending());
+        let status = app.core.app_status();
+        assert_eq!(status.copies, 0);
+        assert_eq!(status.clipboard_clear_in_ms, None);
+        assert_eq!(status.reveal, None);
+        let payload = enrollment
+            .key
+            .with_keychain_payload(|bytes| Zeroizing::new(bytes.to_vec()));
+        let completion = enrollment.verify(item(&payload));
+        if finish {
+            app.core.finish_quick_unlock_enrollment(completion).unwrap();
+            assert!(app.core.app_status().quick_unlock.enabled);
+        } else {
+            app.core.cancel_all_native();
+            assert!(app.core.finish_quick_unlock_enrollment(completion).is_err());
+            assert!(!app.core.app_status().quick_unlock.enabled);
+        }
+        assert!(!app.core.quick_unlock_pending());
+        // All eight real admissions remain available after the refused requests.
+        for id in &ids[..8] {
+            app.core.copy_field(id, "key", None).unwrap();
+        }
+        assert_eq!(app.core.app_status().copies, 8);
+        assert_eq!(
+            app.core.copy_field(&ids[8], "key", None).unwrap_err().code,
+            "too_many"
+        );
+    }
+}
+
+#[test]
 fn restart_requires_native_current_master_even_if_registration_survives() {
     let mut app = App::new();
     let payload = app.enroll();
@@ -340,12 +412,69 @@ fn disable_persists_before_cleanup_and_surviving_items_are_unusable() {
     assert!(app.settings()["quick_unlock_binding"].is_null());
     assert!(app.core.take_quick_unlock_cleanup());
     app.core.quick_unlock_cleanup_failed();
-    assert!(app.core.app_status().quick_unlock.reason.is_some());
+    assert!(app.core.app_status().quick_unlock.cleanup_failed);
+    assert!(app.core.app_status().quick_unlock.reason.is_none());
     let mut app = app.restart();
     assert!(!app.core.app_status().quick_unlock.enabled);
     app.native_unlock();
     app.core.lock();
     assert!(app.unlock_with(&payload).is_err());
+}
+
+#[test]
+fn cleanup_retry_stays_disabled_until_removal_success_clears_the_warning() {
+    let mut app = App::new();
+    let payload = app.enroll();
+    app.core.disable_quick_unlock().unwrap();
+    assert!(app.core.take_quick_unlock_cleanup());
+    app.core.quick_unlock_cleanup_failed();
+    assert!(app.core.app_status().quick_unlock.cleanup_failed);
+
+    // Retrying uses the same disable path and remains a cleanup request, never enrollment.
+    app.core.disable_quick_unlock().unwrap();
+    assert!(app.settings()["quick_unlock_binding"].is_null());
+    assert!(app.core.take_quick_unlock_cleanup());
+    assert!(!app.core.take_quick_unlock_cleanup());
+    let pending = app.core.app_status().quick_unlock;
+    assert!(pending.cleanup_failed);
+    assert!(!pending.enabled);
+    assert!(!pending.can_unlock);
+
+    app.core.quick_unlock_cleanup_finished(true);
+    let cleaned = app.core.app_status().quick_unlock;
+    assert!(!cleaned.cleanup_failed);
+    assert!(cleaned.reason.is_none());
+    assert!(!cleaned.enabled);
+    assert!(!cleaned.can_unlock);
+    app.core.lock();
+    assert!(app.unlock_with(&payload).is_err());
+}
+
+#[test]
+fn cleanup_retry_preserves_independent_unavailable_hardware_reason() {
+    const REASON: &str = "Touch ID is unavailable on this fictional test computer.";
+    let mut app = App::new();
+    let _ = app.enroll();
+    app.core.set_quick_unlock_availability(false, Some(REASON));
+    app.core.disable_quick_unlock().unwrap();
+    assert!(app.core.take_quick_unlock_cleanup());
+    app.core.quick_unlock_cleanup_failed();
+    let failed = app.core.app_status().quick_unlock;
+    assert!(failed.cleanup_failed);
+    assert_eq!(failed.reason, Some(REASON));
+    assert!(!failed.available);
+
+    // Hardware availability is not needed to persist disabled policy and requeue removal.
+    app.core.disable_quick_unlock().unwrap();
+    assert!(app.core.take_quick_unlock_cleanup());
+    assert!(app.core.app_status().quick_unlock.cleanup_failed);
+    app.core.quick_unlock_cleanup_finished(true);
+    let cleaned = app.core.app_status().quick_unlock;
+    assert!(!cleaned.cleanup_failed);
+    assert_eq!(cleaned.reason, Some(REASON));
+    assert!(!cleaned.available);
+    assert!(!cleaned.enabled);
+    assert!(!cleaned.can_unlock);
 }
 
 #[test]

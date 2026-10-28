@@ -66,6 +66,11 @@ impl Cancellation {
         self.0.id == 0 || self.0.cancelled.load(Ordering::SeqCst)
     }
 
+    /// The opaque request id that pairs the embedded Touch ID view with this operation.
+    pub fn request(&self) -> u64 {
+        self.0.id
+    }
+
     #[cfg(any(target_os = "macos", test))]
     fn check(&self) -> Result<(), Error> {
         if self.is_cancelled() {
@@ -86,7 +91,7 @@ impl Drop for CancellationState {
 }
 
 #[cfg(target_os = "macos")]
-pub use mac::{availability, enroll, read, remove};
+pub use mac::{authentication_view, availability, enroll, read, remove};
 
 #[cfg(not(target_os = "macos"))]
 pub fn availability() -> Availability {
@@ -117,11 +122,14 @@ mod mac {
     use super::*;
     use std::{
         ffi::{CString, OsStr},
-        fs::{File, Metadata},
+        fs::{File, Metadata, OpenOptions},
         io::{Read, Write},
         os::{
             fd::{AsRawFd, FromRawFd},
-            unix::{ffi::OsStrExt, fs::MetadataExt},
+            unix::{
+                ffi::OsStrExt,
+                fs::{MetadataExt, OpenOptionsExt},
+            },
         },
         path::Component,
     };
@@ -150,6 +158,15 @@ mod mac {
             capacity: isize,
         ) -> i32;
         fn enote_biometry_validate(blob: *const u8, length: isize) -> i32;
+        fn enote_biometry_view(id: u64) -> *mut std::ffi::c_void;
+    }
+
+    /// Main thread only. A +1 retained `LAAuthenticationView` paired with the context that
+    /// this request's protected read will use, or null (cancelled, reused or off the main
+    /// thread). Without it that read refuses to start. The caller owns the reference.
+    pub fn authentication_view(request: u64) -> *mut std::ffi::c_void {
+        // SAFETY: an opaque request id; Swift checks the thread and returns an owned object.
+        unsafe { enote_biometry_view(request) }
     }
 
     pub(super) fn cancel(id: u64) {
@@ -205,34 +222,18 @@ mod mac {
             }
             let parent = path.parent().ok_or(Error::Failed)?;
             let name = c_string(path.file_name().ok_or(Error::Failed)?)?;
-            let mut directory = File::open("/").map_err(io_error)?;
-            // Walk with directory descriptors so symlinks in any component fail closed.
-            for component in parent.components() {
-                match component {
-                    Component::RootDir => {}
-                    Component::Normal(part) => {
-                        let part = c_string(part)?;
-                        // SAFETY: a live directory fd, NUL-terminated single component,
-                        // and nofollow/directory flags; success transfers a new owned fd.
-                        let fd = unsafe {
-                            libc::openat(
-                                directory.as_raw_fd(),
-                                part.as_ptr(),
-                                libc::O_RDONLY
-                                    | libc::O_DIRECTORY
-                                    | libc::O_NOFOLLOW
-                                    | libc::O_CLOEXEC,
-                            )
-                        };
-                        if fd < 0 {
-                            return Err(io_error(std::io::Error::last_os_error()));
-                        }
-                        // SAFETY: openat returned a fresh fd and no other owner exists.
-                        directory = unsafe { File::from_raw_fd(fd) };
-                    }
-                    _ => return Err(Error::Failed),
-                }
+            if parent
+                .components()
+                .any(|component| !matches!(component, Component::RootDir | Component::Normal(_)))
+            {
+                return Err(Error::Failed);
             }
+            // Reject every symlink without reading ancestors outside the app sandbox.
+            let directory = OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW_ANY | libc::O_CLOEXEC)
+                .open(parent)
+                .map_err(io_error)?;
             let metadata = directory.metadata().map_err(io_error)?;
             // SAFETY: geteuid reads the current process's effective user id.
             if metadata.uid() != unsafe { libc::geteuid() } || metadata.mode() & 0o077 != 0 {
@@ -475,6 +476,110 @@ mod mac {
                 .expect("physical temporary path");
             let path = canonical.join("fake-quick-unlock.bin");
             (directory, path)
+        }
+
+        #[test]
+        fn private_location_works_when_ancestor_listing_is_denied() {
+            const CHILD_PATH: &str = "ENOTE_TEST_SANDBOX_LOCATION";
+            const CHILD_OK: &str = "fake-sandbox-child-complete";
+            if let Some(path) = std::env::var_os(CHILD_PATH) {
+                let path = std::path::PathBuf::from(path);
+                let ancestor = path.parent().unwrap().parent().unwrap();
+                assert_eq!(
+                    std::fs::File::open(ancestor)
+                        .expect_err("fixture ancestor listing must be denied")
+                        .kind(),
+                    std::io::ErrorKind::PermissionDenied
+                );
+                write_blob(&path, b"obviously-fake-encrypted-blob", 99)
+                    .expect("publish in the allowed private child");
+                assert_eq!(
+                    read_blob(&path).expect("read in the allowed private child"),
+                    b"obviously-fake-encrypted-blob"
+                );
+                remove(&path).expect("remove in the allowed private child");
+                remove(&path).expect("missing removal still flushes the private child");
+                std::fs::write(path.with_file_name(CHILD_OK), b"complete")
+                    .expect("mark the fictional sandbox check complete");
+                return;
+            }
+
+            let (_fixture, original_path) = private_location();
+            let ancestor = original_path.parent().unwrap();
+            let parent = ancestor.join("fake-private-child");
+            std::fs::create_dir(&parent).expect("fake private child");
+            std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o700))
+                .expect("private child permissions");
+            let path = parent.join("fake-quick-unlock.bin");
+            let mut parameter = std::ffi::OsString::from("ENOTE_TEST_DENIED_ANCESTOR=");
+            parameter.push(ancestor);
+            let output = std::process::Command::new("/usr/bin/sandbox-exec")
+                .arg("-D")
+                .arg(parameter)
+                .args([
+                    "-p",
+                    r#"(version 1) (allow default) (deny file-read-data (literal (param "ENOTE_TEST_DENIED_ANCESTOR")))"#,
+                ])
+                .arg(std::env::current_exe().expect("test executable"))
+                .args([
+                    "--exact",
+                    "biometry::mac::tests::private_location_works_when_ancestor_listing_is_denied",
+                    "--nocapture",
+                ])
+                .env(CHILD_PATH, &path)
+                .output()
+                .expect("run the sandboxed private-location fixture");
+            assert!(
+                output.status.success(),
+                "sandboxed private-location helper failed: {} {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(
+                std::fs::read(path.with_file_name(CHILD_OK)).expect("sandbox helper completed"),
+                b"complete"
+            );
+        }
+
+        #[test]
+        fn parent_symlinks_and_traversal_are_refused_without_changing_fake_blobs() {
+            let (_fixture, root_path) = private_location();
+            let root = root_path.parent().expect("fixture root");
+            let physical_parent = root.join("fake-private-parent");
+            let physical_child = physical_parent.join("fake-private-child");
+            for directory in [&physical_parent, &physical_child] {
+                std::fs::create_dir(directory).expect("fake private directory");
+                std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700))
+                    .expect("private directory permissions");
+            }
+            let path = physical_child.join("fake-quick-unlock.bin");
+            write_blob(&path, b"obviously-fake-original-blob", 21).expect("original fake blob");
+            let final_parent_link = root.join("fake-final-parent-link");
+            let intermediate_link = root.join("fake-intermediate-link");
+            symlink(&physical_child, &final_parent_link).expect("fake final parent link");
+            symlink(&physical_parent, &intermediate_link).expect("fake intermediate link");
+
+            for candidate in [
+                final_parent_link.join("fake-quick-unlock.bin"),
+                intermediate_link.join("fake-private-child/fake-quick-unlock.bin"),
+                physical_child.join("../fake-private-child/fake-quick-unlock.bin"),
+            ] {
+                assert_eq!(read_blob(&candidate), Err(Error::Failed));
+                assert_eq!(remove(&candidate), Err(Error::Failed));
+                assert_eq!(
+                    write_blob(
+                        &candidate.with_file_name("fake-new-blob"),
+                        b"fake-new-blob",
+                        22
+                    ),
+                    Err(Error::Failed)
+                );
+                assert_eq!(
+                    read_blob(&path).expect("original fake blob survives each refused operation"),
+                    b"obviously-fake-original-blob"
+                );
+                assert!(!physical_child.join("fake-new-blob").exists());
+            }
         }
 
         #[test]

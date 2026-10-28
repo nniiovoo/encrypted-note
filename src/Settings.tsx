@@ -1,14 +1,17 @@
 // Settings: Auto-lock, Backups, opening a Backup or Safety Copy, Change Master Password, the
 // optional Agent Companion (ADR-0009), help.
 
-import { useEffect, useId, useRef, useState, type FormEvent } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import {
   appStatus,
   changePassword,
+  cancelNativeOperation,
   companionSetup,
   companionStart,
   companionStatus,
   companionStop,
+  disableQuickUnlock,
+  enableQuickUnlock,
   discardInspection,
   forgetBackupDestination,
   inspectBackup,
@@ -28,21 +31,19 @@ import {
   type Settings as SettingsView,
   type VaultPreview,
 } from "./api";
-import { Choice, ErrorLine, Field, formatDate, Modal, NewPassword, PasswordModal, SafetyCopiesNote, SecretInput, useAction, useSafetyCopies } from "./components";
+import { Choice, ErrorLine, formatDate, Modal, SafetyCopiesNote, useAction, useSafetyCopies } from "./components";
 import { strings as s } from "./strings";
 
 const MINUTES = [1, 2, 5, 10, 15, 30, 60].map((m) => [m, s.minutes(m)] as const);
 const CLIPBOARD_SECONDS = [30, 60].map((n) => [n, s.clipboardSeconds(n)] as const);
 
-export function Settings({ status, onKit, onOperationOutcome }: { status: AppStatus; onKit: (recoveryKey: string) => void; onOperationOutcome: (message: string) => void }) {
+export function Settings({ status, onOperationOutcome }: { status: AppStatus; onOperationOutcome: (message: string) => void }) {
   const [chosen, setChosen] = useState(() => lockChoices(status.settings));
-  const [pending, setPending] = useState<{ settings: typeof chosen; generation: number; text: string } | null>(null);
   const [saving, setSaving] = useState(false);
   const submitting = useRef(false);
   const latest = useRef(status);
   latest.current = status;
   useEffect(() => setChosen(lockChoices(status.settings)), [status.settings.idle_minutes, status.settings.lock_on_app_switch, status.settings.clipboard_clear_seconds, status.settings.count_activity_anywhere]);
-  useEffect(() => setPending(null), [status.session_generation, status.phase]);
   const safety = useSafetyCopies();
   const { copies } = safety;
   const [flow, setFlow] = useState<"password" | "open" | SafetyCopy | null>(null);
@@ -53,12 +54,12 @@ export function Settings({ status, onKit, onOperationOutcome }: { status: AppSta
     safety.reload();
   };
 
-  const save = async (settings: typeof chosen, password?: string, generation?: number) => {
+  const save = async (settings: typeof chosen, generation: number) => {
     if (submitting.current) return;
     submitting.current = true;
     setSaving(true);
     try {
-      setChosen(lockChoices(await setSettings({ ...settings, master_password: password, session_generation: generation })));
+      setChosen(lockChoices(await setSettings({ ...settings, session_generation: generation })));
     } catch (error) {
       const actual = await appStatus().catch(() => latest.current);
       setChosen(lockChoices(actual.settings));
@@ -69,22 +70,10 @@ export function Settings({ status, onKit, onOperationOutcome }: { status: AppSta
     }
   };
   const change = (next: Partial<typeof chosen>) => {
-    if (submitting.current || pending) return;
-    const merged = { ...chosen, ...next };
-    const changes = [
-      merged.idle_minutes > chosen.idle_minutes ? s.autoLockChangeIdle(merged.idle_minutes) : "",
-      chosen.lock_on_app_switch && !merged.lock_on_app_switch ? s.autoLockChangeSwitch : "",
-      !chosen.count_activity_anywhere && merged.count_activity_anywhere ? s.autoLockChangeActivity : "",
-    ].filter(Boolean);
-    if (changes.length) setPending({ settings: merged, generation: status.session_generation, text: changes.join(" ") });
-    else run(() => save(merged));
+    if (submitting.current) return;
+    run(() => save({ ...chosen, ...next }, status.session_generation));
   };
-  const closeReauth = () => {
-    if (!submitting.current) {
-      setPending(null);
-    }
-  };
-  const disabled = saving || pending !== null;
+  const disabled = saving;
 
   return (
     <section className="page stack">
@@ -124,6 +113,8 @@ export function Settings({ status, onKit, onOperationOutcome }: { status: AppSta
           <ErrorLine error={error} />
         </div>
       </section>
+
+      {status.platform === "mac" && <QuickUnlock status={status} />}
 
       <BackUp status={status} />
 
@@ -184,8 +175,7 @@ export function Settings({ status, onKit, onOperationOutcome }: { status: AppSta
         ))}
       </details>
 
-      {pending && <PasswordModal title={s.autoLockConfirmTitle} text={pending.text} submitLabel={s.applyAutoLock} retryInMs={status.retry_in_ms} onSubmit={(password) => save(pending.settings, password, pending.generation)} onClose={closeReauth} />}
-      {flow === "password" && <ChangePassword onKit={onKit} onClose={closeFlow} onOperationOutcome={onOperationOutcome} />}
+      {flow === "password" && <ChangePassword onClose={closeFlow} onOperationOutcome={onOperationOutcome} />}
       {flow === "open" && <ReplaceVault onClose={closeFlow} onOperationOutcome={onOperationOutcome} />}
       {typeof flow === "object" && flow && <ReplaceVault copy={flow} onClose={closeFlow} onOperationOutcome={onOperationOutcome} />}
     </section>
@@ -402,19 +392,19 @@ function AgentCompanion() {
 export function ReplaceVault({ copy, onClose, onOperationOutcome }: { copy?: SafetyCopy; onClose: () => void; onOperationOutcome: (message: string) => void }) {
   const [picked, setPicked] = useState<string | null>(null);
   const [useKey, setUseKey] = useState(false);
-  const [secret, setSecret] = useState("");
   const [preview, setPreview] = useState<VaultPreview | null>(null);
   const { busy, error, run } = useAction();
   const [committing, setCommitting] = useState(false);
   // However this dialog goes away (Cancel, Escape, a lock, another screen), Rust drops the
   // decrypted copy it kept for "Replace". After a replace there is nothing left to drop.
-  useEffect(() => () => void discardInspection().catch(() => {}), []);
+  useEffect(() => () => {
+    void cancelNativeOperation().catch(() => {});
+    void discardInspection().catch(() => {});
+  }, []);
 
-  function inspect(e: FormEvent) {
-    e.preventDefault();
-    const credential = useKey ? { recovery_key: secret } : { master_password: secret };
-    setSecret("");
-    run(async () => setPreview(copy ? await inspectSafetyCopy(copy.id, credential) : await inspectBackup(credential)));
+  function inspect() {
+    const kind = useKey ? "recovery" : "password";
+    run(async () => setPreview(copy ? await inspectSafetyCopy(copy.id, kind) : await inspectBackup(kind)));
   }
 
   // This computer's Vault beside the copy: only when the core could compare the two (the Vault
@@ -481,7 +471,7 @@ export function ReplaceVault({ copy, onClose, onOperationOutcome }: { copy?: Saf
     );
   else if (copy || picked)
     body = (
-      <form onSubmit={inspect} className="stack">
+      <div className="stack">
         {picked && <p className="hint">{picked}</p>}
         <Choice
           label={s.unlockWith}
@@ -489,19 +479,17 @@ export function ReplaceVault({ copy, onClose, onOperationOutcome }: { copy?: Saf
           value={useKey ? "key" : "password"}
           onChange={(v) => setUseKey(v === "key")}
         />
-        <Field label={useKey ? s.recoveryKey : s.masterPassword}>
-          <SecretInput value={secret} onChange={(e) => setSecret(e.target.value)} autoFocus />
-        </Field>
+        <p className="hint">{s.nativeCredentialHint}</p>
         <ErrorLine error={error} />
         <div className="actions">
           <button type="button" onClick={onClose}>
             {s.cancel}
           </button>
-          <button className="primary" disabled={busy || !secret}>
+          <button className="primary" disabled={busy} onClick={inspect}>
             {busy ? s.checking : s.openIt}
           </button>
         </div>
-      </form>
+      </div>
     );
   else
     body = (
@@ -524,51 +512,55 @@ export function ReplaceVault({ copy, onClose, onOperationOutcome }: { copy?: Saf
   );
 }
 
-function ChangePassword({ onKit, onClose, onOperationOutcome }: { onKit: (recoveryKey: string) => void; onClose: () => void; onOperationOutcome: (message: string) => void }) {
+function ChangePassword({ onClose, onOperationOutcome }: { onClose: () => void; onOperationOutcome: (message: string) => void }) {
   const [rotate, setRotate] = useState(false);
-  const [current, setCurrent] = useState("");
-  const [committing, setCommitting] = useState(false);
-
-  async function submit(password: string) {
-    const c = current;
-    setCurrent("");
-    setCommitting(true);
-    try {
-      const { recovery_key } = await changePassword(c, password, rotate);
-      // With Key Rotation nothing is saved until the new Recovery Kit is confirmed, so nothing
-      // is announced yet: the app says how it ended when that step is left.
-      if (recovery_key) onKit(recovery_key);
-      else onOperationOutcome(s.passwordChangeCompleted);
-      onClose();
-    } catch (error) {
-      onOperationOutcome(s.passwordChangeFailed);
-      throw error;
-    } finally {
-      setCommitting(false);
-    }
-  }
-
+  const { busy, error, run } = useAction();
+  const close = () => {
+    if (busy) void cancelNativeOperation().catch(() => {});
+    onClose();
+  };
   return (
-    <Modal title={s.changePasswordTitle} onClose={committing ? () => {} : onClose}>
-      {
-        <NewPassword
-          submitLabel={rotate ? s.changeAndRotate : s.changePasswordTitle}
-          busyLabel={s.saving}
-          onSubmit={submit}
-          ready={!!current}
-        >
-          <Choice
-            label={s.whyChange}
-            options={[["new", s.justNew], ["rotate", s.someoneKnows]]}
-            value={rotate ? "rotate" : "new"}
-            onChange={(v) => setRotate(v === "rotate")}
-          />
-          <p className="hint">{rotate ? s.rotateExplained : s.justNewExplained}</p>
-          <Field label={s.currentPassword}>
-            <SecretInput value={current} onChange={(e) => setCurrent(e.target.value)} autoFocus />
-          </Field>
-        </NewPassword>
-      }
+    <Modal title={s.changePasswordTitle} onClose={close}>
+      <div className="stack">
+        <Choice
+          label={s.whyChange}
+          options={[["new", s.justNew], ["rotate", s.someoneKnows]]}
+          value={rotate ? "rotate" : "new"}
+          disabled={busy}
+          onChange={(v) => setRotate(v === "rotate")}
+        />
+        <p className="hint">{rotate ? s.rotateExplained : s.justNewExplained}</p>
+        <p className="hint">{s.nativeCredentialHint}</p>
+        <ErrorLine error={error} />
+        <div className="actions">
+          <button onClick={close}>{s.cancel}</button>
+          <button className="primary" disabled={busy} onClick={() => run(async () => {
+            await changePassword(rotate);
+            onOperationOutcome(rotate ? s.keyRotationCompleted : s.passwordChangeCompleted);
+            onClose();
+          })}>{busy ? s.saving : rotate ? s.changeAndRotate : s.changePasswordTitle}</button>
+        </div>
+      </div>
     </Modal>
+  );
+}
+
+function QuickUnlock({ status }: { status: AppStatus }) {
+  const { busy, error, run } = useAction();
+  const quick = status.quick_unlock;
+  return (
+    <section className="section">
+      <h2>{s.quickUnlockTitle}</h2>
+      <div className="card stack">
+        <p>{s.quickUnlockText}</p>
+        <p className="hint">{s.quickUnlockWalletLimit}</p>
+        {quick.reason && <p className="hint">{quick.reason}</p>}
+        {quick.cleanup_failed && <p className="hint">{s.quickUnlockCleanupFailed}</p>}
+        <button disabled={busy || (!quick.cleanup_failed && !quick.enabled && !quick.available)} onClick={() => run(quick.cleanup_failed || quick.enabled ? disableQuickUnlock : enableQuickUnlock)}>
+          {busy ? s.checking : quick.cleanup_failed ? s.retryTouchIdCleanup : quick.enabled ? s.disableTouchId : s.enableTouchId}
+        </button>
+        <ErrorLine error={error} />
+      </div>
+    </section>
   );
 }

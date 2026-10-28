@@ -464,6 +464,7 @@ pub struct AppCore {
     quick_unlock_reason: Option<&'static str>,
     quick_pending: Option<u64>,
     quick_cleanup_needed: bool,
+    quick_cleanup_failed: bool,
 }
 
 impl AppCore {
@@ -527,6 +528,7 @@ impl AppCore {
             quick_unlock_reason: None,
             quick_pending: None,
             quick_cleanup_needed: false,
+            quick_cleanup_failed: false,
         };
         core.load_quick_unlock_registration();
         Ok(core)
@@ -1482,6 +1484,18 @@ impl AppCore {
         self.dir.root().display().to_string()
     }
 
+    /// Rust-only custody location; canonicalization errors must never select a fallback path.
+    pub(crate) fn quick_unlock_path(&self) -> Result<PathBuf, ApiError> {
+        self.dir
+            .root()
+            .canonicalize()
+            .map(|root| root.join("quick-unlock.sealed"))
+            .map_err(|_| ApiError {
+                code: "internal",
+                message: "The local Touch ID storage folder could not be opened.".to_owned(),
+            })
+    }
+
     pub fn mark_seed_explainer_seen(&mut self) -> Result<(), ApiError> {
         self.tick();
         self.open()?;
@@ -1572,6 +1586,8 @@ impl AppCore {
     fn guard_check(&self) -> Result<(), ApiError> {
         if self.session.sharing_guard_up() {
             Err(err("sharing_guard_up", MSG_GUARD_UP))
+        } else if self.quick_pending.is_some() {
+            Err(not_now())
         } else {
             Ok(())
         }

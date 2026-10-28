@@ -1,14 +1,12 @@
 // Screens outside the Unlocked Vault: Welcome, Create Master Password, Recovery Kit, lock screen,
 // and setting a new Master Password after a Recovery Key unlock.
 
-import { useEffect, useState, type FormEvent } from "react";
-import { confirmRecoveryKit, createVault, lock, setNewPassword, unlock, type AppStatus, type SafetyCopy } from "./api";
-import { AppIcon, ErrorLine, Field, formatDate, Modal, NewPassword, SafetyCopiesNote, SecretInput, seconds, useAction, useSafetyCopies } from "./components";
+import { useEffect, useState } from "react";
+import { createVault, lock, quickUnlock, setNewPassword, unlock, type AppStatus, type SafetyCopy } from "./api";
+import { AppIcon, ErrorLine, formatDate, Modal, SafetyCopiesNote, seconds, useAction, useSafetyCopies } from "./components";
 import { Icon, type IconName } from "./icons";
 import { ReplaceVault } from "./Settings";
 import { strings as s } from "./strings";
-
-export type Kit = { key: string; rotation: boolean };
 
 // One per s.welcomeCards entry, in order.
 const WELCOME_ICONS: IconName[] = ["computer", "key", "eyeSlash", "shield"];
@@ -19,7 +17,8 @@ const LockLink = ({ label = s.lock }: { label?: string }) => (
   </button>
 );
 
-export function NoVault({ onKit, onOperationOutcome }: { onKit: (recoveryKey: string) => void; onOperationOutcome: (message: string) => void }) {
+export function NoVault({ onOperationOutcome }: { onOperationOutcome: (message: string) => void }) {
+  const { busy, error, run } = useAction();
   const [step, setStep] = useState<"welcome" | "create" | "open">("welcome");
   // No Vault file, but Safety Copies: this is not a first run. Say so, before the owner
   // concludes their Notes are gone and creates a new Vault over them. Until the first list
@@ -34,12 +33,9 @@ export function NoVault({ onKit, onOperationOutcome }: { onKit: (recoveryKey: st
       <div className="center narrow">
         <h1>{s.createTitle}</h1>
         <p>{s.createIntro}</p>
-        <NewPassword
-          allowShow
-          submitLabel={s.createVault}
-          busyLabel={s.settingUp}
-          onSubmit={async (password) => onKit((await createVault(password)).recovery_key)}
-        />
+        <p className="hint">{s.nativeSetupHint}</p>
+        <ErrorLine error={error} />
+        <button className="primary big" disabled={busy} onClick={() => run(createVault)}>{busy ? s.settingUp : s.createVault}</button>
         <button className="link" onClick={() => setStep("welcome")}>
           {s.back}
         </button>
@@ -96,52 +92,11 @@ export function NoVault({ onKit, onOperationOutcome }: { onKit: (recoveryKey: st
   );
 }
 
-export function RecoveryKit({ kit }: { kit: Kit }) {
-  const [typed, setTyped] = useState("");
-  const [stored, setStored] = useState(false);
-  const { busy, error, run } = useAction();
-  function submit(e: FormEvent) {
-    e.preventDefault();
-    const t = typed;
-    setTyped("");
-    run(() => confirmRecoveryKit(t));
-  }
-  return (
-    <div className="center narrow">
-      <section className="kit">
-        <h1>{s.kitTitle}</h1>
-        <p>{s.kitIntro}</p>
-        <p className="recovery-key">
-          {kit.key.split("-").map((group, i) => (
-            <span key={i}>{group}</span>
-          ))}
-        </p>
-        <p className="warn">{s.kitPdfWarning}</p>
-      </section>
-      {kit.rotation && <p className="warn">{s.oldCopiesAfterRotation}</p>}
-      <form onSubmit={submit} className="stack">
-        <Field label={s.retypeLastGroups}>
-          <SecretInput value={typed} onChange={(e) => setTyped(e.target.value)} />
-        </Field>
-        <label className="check">
-          <input type="checkbox" checked={stored} onChange={(e) => setStored(e.target.checked)} />
-          {s.storedPhysically}
-        </label>
-        <ErrorLine error={error} />
-        <button className="primary big" disabled={busy || !typed || !stored}>
-          {s.continue}
-        </button>
-      </form>
-      {kit.rotation && <LockLink label={s.lockAndCancel} />}
-    </div>
-  );
-}
-
-/** The Recovery Key is shown once; after a reload of this screen it's gone. */
-export const KitLost = () => (
+/** The one-time Recovery Key never enters the page. */
+export const NativeRecoveryKit = () => (
   <div className="center narrow">
     <h1>{s.kitTitle}</h1>
-    <p>{s.kitLost}</p>
+    <p>{s.nativeKitHint}</p>
     <LockLink label={s.lockAndCancel} />
   </div>
 );
@@ -149,38 +104,30 @@ export const KitLost = () => (
 /** No Note titles or counts here. */
 export function Locked({ status, onOperationOutcome }: { status: AppStatus; onOperationOutcome: (message: string) => void }) {
   const [useKey, setUseKey] = useState(false);
-  const [secret, setSecret] = useState("");
   const [restore, setRestore] = useState<"choose" | "backup" | null>(null);
   const safety = useSafetyCopies();
   const copies = safety.copies ?? [];
   const [copy, setCopy] = useState<SafetyCopy | null>(null);
   const { busy, error, run } = useAction();
   const wait = status.retry_in_ms ? seconds(status.retry_in_ms) : 0;
-  function submit(e: FormEvent) {
-    e.preventDefault();
-    const v = secret;
-    setSecret("");
-    run(() => unlock(useKey ? { recovery_key: v } : { master_password: v }));
-  }
   return (
     <div className="center tight">
       <AppIcon large />
       <h1>{s.appName}</h1>
-      <form onSubmit={submit} className="stack">
-        <Field label={useKey ? s.recoveryKey : s.masterPassword} hint={useKey ? s.recoveryKeyHint : undefined}>
-          <SecretInput key={String(useKey)} value={secret} onChange={(e) => setSecret(e.target.value)} autoFocus />
-        </Field>
+      <div className="stack">
+        <p className="hint">{s.nativeCredentialHint}</p>
         <ErrorLine error={error} />
         {wait > 0 && <p className="hint">{s.tryAgainIn(wait)}</p>}
-        <button className="primary big" disabled={busy || !secret || wait > 0}>
-          {busy ? s.unlocking : s.unlock}
+        <button className="primary big" disabled={busy || wait > 0} onClick={() => run(() => unlock(useKey ? "recovery" : "password"))}>
+          {busy ? s.unlocking : useKey ? s.unlockWithRecoveryKey : s.unlockWithPassword}
         </button>
-      </form>
+        {status.quick_unlock.enabled && <button disabled={busy || !status.quick_unlock.can_unlock || wait > 0} onClick={() => run(quickUnlock)}>{s.unlockWithTouchId}</button>}
+        {status.quick_unlock.enabled && !status.quick_unlock.can_unlock && status.quick_unlock.reason && <p className="hint">{status.quick_unlock.reason}</p>}
+      </div>
       <button
         className={status.show_recovery_hint && !useKey ? "link emphasis" : "link"}
         onClick={() => {
           setUseKey(!useKey);
-          setSecret("");
         }}
       >
         {useKey ? s.useMasterPassword : s.forgotUseKit}
@@ -217,11 +164,16 @@ export function Locked({ status, onOperationOutcome }: { status: AppStatus; onOp
   );
 }
 
-export const NewPasswordScreen = () => (
-  <div className="center narrow">
-    <h1>{s.setNewPasswordTitle}</h1>
-    <p>{s.setNewPasswordIntro}</p>
-    <NewPassword submitLabel={s.saveNewPassword} busyLabel={s.saving} onSubmit={setNewPassword} />
-    <LockLink />
-  </div>
-);
+export function NewPasswordScreen() {
+  const { busy, error, run } = useAction();
+  return (
+    <div className="center narrow">
+      <h1>{s.setNewPasswordTitle}</h1>
+      <p>{s.setNewPasswordIntro}</p>
+      <p className="hint">{s.nativeCredentialHint}</p>
+      <ErrorLine error={error} />
+      <button className="primary big" disabled={busy} onClick={() => run(setNewPassword)}>{busy ? s.saving : s.saveNewPassword}</button>
+      <LockLink />
+    </div>
+  );
+}

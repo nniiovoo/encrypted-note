@@ -1733,10 +1733,20 @@ fn status_has_the_shape_api_ts_expects() {
     let quick = status["quick_unlock"].as_object().unwrap();
     let mut keys: Vec<&str> = quick.keys().map(String::as_str).collect();
     keys.sort_unstable();
-    assert_eq!(keys, ["available", "can_unlock", "enabled", "reason"]);
+    assert_eq!(
+        keys,
+        [
+            "available",
+            "can_unlock",
+            "cleanup_failed",
+            "enabled",
+            "reason"
+        ]
+    );
     assert_eq!(quick["available"], false);
     assert_eq!(quick["enabled"], false);
     assert_eq!(quick["can_unlock"], false);
+    assert_eq!(quick["cleanup_failed"], false);
     assert!(quick["reason"].is_null() || quick["reason"].is_string());
     // The exact public shape excludes keys, header bindings, credentials and native requests.
     assert!(!status["quick_unlock"].to_string().contains(PASSWORD));

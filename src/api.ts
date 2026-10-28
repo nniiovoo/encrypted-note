@@ -4,12 +4,11 @@
 // (snake_case, as serde produces them).
 //
 // Trust rules the Rust side enforces:
-// * Listing returns visible fields only. A Hidden Field value is returned only by showField /
-//   showWalletField / showAndCopyWalletField, one at a time, and the screens must drop it when
-//   told to hide.
+// * Listing returns visible fields only. An ordinary Hidden Field is returned only by showField,
+//   one at a time, and the screens must drop it when told to hide. Wallet readout stays native.
 // * Copy never returns the value: Rust writes the clipboard itself. That goes for one line of a
 //   value and for NAME=value too. Text added to a Text Note is joined to its body in Rust.
-// * Passwords and Recovery Keys are sent once and the calling screen clears its input afterwards.
+// * Master Password and Recovery Key entry and Recovery Kit display stay in native controls.
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
@@ -85,8 +84,6 @@ export interface Settings {
 /** What setSettings takes. The lock rule is always sent. Each of the two newer settings may be
  *  left out, which keeps the value it has. */
 export interface SettingsInput {
-  /** Required only when loosening Auto-lock; sent once, never an approval token. */
-  master_password?: string | undefined;
   session_generation?: number | undefined;
   idle_minutes: number;
   lock_on_app_switch: boolean;
@@ -147,13 +144,8 @@ export interface AppStatus {
   save_durability_uncertain: boolean;
   /** The settings file couldn't be read, so the strictest lock rules are in force. */
   settings_unreadable: boolean;
+  quick_unlock: { available: boolean; enabled: boolean; can_unlock: boolean; cleanup_failed: boolean; reason?: string | null };
   settings: Settings;
-}
-
-export interface Assessment {
-  acceptable: boolean;
-  score: number;
-  feedback: string[];
 }
 
 export interface SeedCheck {
@@ -203,7 +195,7 @@ export interface SafetyCopy {
   created_at: number;
 }
 
-export type Credential = { master_password: string } | { recovery_key: string };
+export type CredentialKind = "password" | "recovery";
 
 /** Errors come back as { code, message }; message is already plain, owner-facing English. */
 export interface ApiError {
@@ -239,18 +231,16 @@ export const onStatusChanged = (handler: (s: AppStatus) => void): Promise<Unlist
 
 // ---------- setup, unlock, lock ----------
 
-export const suggestPassphrase = () => invoke<string>("suggest_passphrase");
-export const assessPassword = (password: string) => invoke<Assessment>("assess_password", { password });
-/** Calibrates the KDF (~1 s), creates the Vault in memory, returns the Recovery Key to show once.
- *  Nothing is written to disk until confirmRecoveryKit succeeds. Phase -> confirm_recovery_kit. */
-export const createVault = (masterPassword: string) =>
-  invoke<{ recovery_key: string }>("create_vault", { masterPassword });
-/** The owner retypes the last two groups of the Recovery Key. On success the Vault is saved
- *  (or the rotation is committed) and phase -> unlocked. */
-export const confirmRecoveryKit = (lastGroups: string) => invoke<void>("confirm_recovery_kit", { lastGroups });
-export const unlock = (credential: Credential) => invoke<void>("unlock", { credential });
-/** After a Recovery Key unlock (phase needs_new_password). */
-export const setNewPassword = (masterPassword: string) => invoke<void>("set_new_password", { masterPassword });
+/** Native setup includes choosing a password and confirming the Recovery Kit. */
+export const createVault = () => invoke<void>("create_vault");
+export const unlock = (kind: CredentialKind) => invoke<void>("unlock", { kind });
+/** After a Recovery Key unlock, choose the replacement password in native controls. */
+export const setNewPassword = () => invoke<void>("set_new_password");
+/** Cancellation never grants permission or returns credential text. */
+export const cancelNativeOperation = () => invoke<void>("cancel_native_operation");
+export const enableQuickUnlock = () => invoke<void>("enable_quick_unlock");
+export const disableQuickUnlock = () => invoke<void>("disable_quick_unlock");
+export const quickUnlock = () => invoke<void>("quick_unlock");
 /** Works whenever the Vault is open, including needs_new_password and confirm_recovery_kit
  *  (an unconfirmed new Vault or Key Rotation is dropped: nothing was saved yet). */
 export const lock = () => invoke<void>("lock");
@@ -269,19 +259,14 @@ export interface NoteInput {
   hidden: Record<string, string>;
 }
 /** Wallet Kinds require the Master Password (ADR-0004). */
-export const createNote = (input: NoteInput, masterPassword?: string) =>
-  invoke<string>("create_note", { input, masterPassword: masterPassword ?? null });
-export const updateNote = (id: string, input: Omit<NoteInput, "kind">, masterPassword?: string) =>
-  invoke<void>("update_note", { id, input, masterPassword: masterPassword ?? null });
+export const createNote = (input: NoteInput) => invoke<string>("create_note", { input });
+export const updateNote = (id: string, input: Omit<NoteInput, "kind">) => invoke<void>("update_note", { id, input });
 /** Removing a Wallet Kind needs the Master Password, like every other change to one: trashing
  *  it, deleting it for good, and emptying a Trash that holds one. */
-export const trashNote = (id: string, masterPassword?: string) =>
-  invoke<void>("trash_note", { id, masterPassword: masterPassword ?? null });
+export const trashNote = (id: string) => invoke<void>("trash_note", { id });
 export const restoreNote = (id: string) => invoke<void>("restore_note", { id });
-export const deleteForever = (id: string, masterPassword?: string) =>
-  invoke<void>("delete_forever", { id, masterPassword: masterPassword ?? null });
-export const emptyTrash = (masterPassword?: string) =>
-  invoke<number>("empty_trash", { masterPassword: masterPassword ?? null });
+export const deleteForever = (id: string) => invoke<void>("delete_forever", { id });
+export const emptyTrash = () => invoke<number>("empty_trash");
 export const setFavorite = (id: string, favorite: boolean) => invoke<void>("set_favorite", { id, favorite });
 /** Adds text to the end of a Text Note's body, on a new line (none is added when the body is
  *  empty or already ends with a line break). Only the new text is sent: Rust joins it to the
@@ -293,15 +278,12 @@ export const appendText = (id: string, text: string) => invoke<void>("append_tex
 
 /** Non-wallet Kinds. Shown for 30 s (status.reveal says when it expires). */
 export const showField = (id: string, field: string) => invoke<string>("show_field", { id, field });
-/** Wallet Kinds: Master Password again; mode "held" (until hideField) or "accessible" (20 s). */
-export const showWalletField = (id: string, field: string, masterPassword: string, mode: "held" | "accessible") =>
-  invoke<string>("show_wallet_field", { id, field, masterPassword, mode });
-/** Wallet Kinds: one Master Password entry shows the value for 20 s (never held) and copies it.
- *  Returns the value to show, like showWalletField in "accessible" mode. If the reveal is
- *  refused (code "too_many", "sharing_guard_up") nothing is copied either. The copy is cleared
- *  after 30 s. */
-export const showAndCopyWalletField = (id: string, field: string, masterPassword: string) =>
-  invoke<string>("show_and_copy_wallet_field", { id, field, masterPassword });
+/** Wallet password and hold/20-second readout remain in native controls. */
+export const showWalletField = (id: string, field: string, mode: "held" | "accessible") =>
+  invoke<void>("show_wallet_field", { id, field, mode });
+/** Native 20-second Wallet readout and private clipboard write, with fresh authentication. */
+export const showAndCopyWalletField = (id: string, field: string) =>
+  invoke<void>("show_and_copy_wallet_field", { id, field });
 export const hideField = () => invoke<void>("hide_field");
 /** More time for the value shown now, counted from this call: another 30 s for a non-wallet
  *  Kind, as often as asked; another 20 s for a Wallet Kind value, three times at most
@@ -312,8 +294,7 @@ export const hideField = () => invoke<void>("hide_field");
 export const extendReveal = () => invoke<void>("extend_reveal");
 /** Rust writes the clipboard privately and clears it after the time chosen in Settings (30 or
  *  60 s; a Wallet Kind value always after 30 s). Wallet Kinds need the password. */
-export const copyField = (id: string, field: string, masterPassword?: string) =>
-  invoke<void>("copy_field", { id, field, masterPassword: masterPassword ?? null });
+export const copyField = (id: string, field: string) => invoke<void>("copy_field", { id, field });
 /** Copies one visible field (username, website, service, public address, ...) the same private,
  *  timed way. No Master Password, for Wallet Kinds either. `field` must be a visible field of
  *  the Note's Kind other than word_count; an empty one is refused like an empty Hidden Field. */
@@ -349,24 +330,22 @@ export const forgetBackupDestination = () => invoke<void>("forget_backup_destina
 /** Opens the OS open dialog (Rust side) for a Backup file. */
 export const pickBackupToOpen = () => invoke<PickedFile>("pick_backup_to_open");
 /** Decrypt the picked Backup in memory with its credential and describe it. */
-export const inspectBackup = (credential: Credential) => invoke<VaultPreview>("inspect_backup", { credential });
+export const inspectBackup = (kind: CredentialKind) => invoke<VaultPreview>("inspect_backup", { kind });
 /** Install the inspected Backup; the current Vault becomes a Safety Copy. Phase -> unlocked
  *  (or needs_new_password if a Recovery Key was used). */
 export const replaceWithBackup = () => invoke<void>("replace_with_backup");
 /** The preview was closed without installing: Rust forgets the decrypted copy and the picked file. */
 export const discardInspection = () => invoke<void>("discard_inspection");
 export const listSafetyCopies = () => invoke<SafetyCopy[]>("list_safety_copies");
-export const inspectSafetyCopy = (id: string, credential: Credential) =>
-  invoke<VaultPreview>("inspect_safety_copy", { id, credential });
+export const inspectSafetyCopy = (id: string, kind: CredentialKind) =>
+  invoke<VaultPreview>("inspect_safety_copy", { id, kind });
 /** Install the inspected Safety Copy (same rules as replaceWithBackup). */
 export const restoreSafetyCopy = () => invoke<void>("restore_safety_copy");
 
 // ---------- account care & settings ----------
 
-/** rotate=false: new password only. rotate=true: Key Rotation, returns the new Recovery Key
- *  to show, and phase -> confirm_recovery_kit. */
-export const changePassword = (currentPassword: string, newPassword: string, rotate: boolean) =>
-  invoke<{ recovery_key: string | null }>("change_password", { currentPassword, newPassword, rotate });
+/** Native password change includes the new Recovery Kit confirmation when rotating. */
+export const changePassword = (rotate: boolean) => invoke<void>("change_password", { rotate });
 export const setSettings = (settings: SettingsInput) => invoke<Settings>("set_settings", { settings });
 export const markSeedExplainerSeen = () => invoke<void>("mark_seed_explainer_seen");
 /** The folder this computer's Vault file and Safety Copies are in, as text to show (built like

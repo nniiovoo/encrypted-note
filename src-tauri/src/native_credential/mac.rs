@@ -17,8 +17,8 @@ use objc2_foundation::{
 use zeroize::Zeroizing;
 
 use super::{
-    Activity, Callback, PresentationState, PresentationUpdate, Prompt, PromptError, Reply, Request,
-    RevealMode, readout_text,
+    Activity, Authorization, Callback, PresentationState, PresentationUpdate, Prompt, PromptError,
+    Reply, Request, RevealMode, readout_text,
 };
 
 thread_local! { static ACTIVE: RefCell<Option<Panel>> = const { RefCell::new(None) }; }
@@ -30,6 +30,7 @@ struct Panel {
     original_focus: Option<Retained<NSResponder>>,
     _view: Retained<NSView>,
     _target: Retained<Target>,
+    _authentication: Option<Retained<NSView>>,
     fields: Vec<Retained<NSSecureTextField>>,
     sensitive_labels: Vec<Retained<NSTextField>>,
     feedback: Retained<NSTextField>,
@@ -75,7 +76,10 @@ define_class!(
             else { false }
         }
         #[unsafe(method(controlTextDidChange:))]
-        fn changed(&self, _notification: &AnyObject) { forget_suggestion(); activity(true); }
+        fn changed(&self, _notification: &AnyObject) {
+            forget_suggestion();
+            activity(edit_activity_is_genuine());
+        }
         #[unsafe(method(controlTextDidBeginEditing:))]
         fn editing(&self, _notification: &AnyObject) {
             ACTIVE.with(|active| {
@@ -228,7 +232,7 @@ pub(super) fn present(
     heading.setFont(Some(&NSFont::boldSystemFontOfSize(21.0)));
     let detail_height = match &prompt {
         Request::Entry(Prompt::NewPassword { .. }) => 48.0,
-        Request::Entry(Prompt::RecoveryKit { .. }) => 64.0,
+        Request::Entry(Prompt::RecoveryKit { .. }) | Request::Biometric(_) => 64.0,
         _ => 160.0,
     };
     label(
@@ -240,6 +244,33 @@ pub(super) fn present(
         detail_height,
         mtm,
     );
+    let mut authentication = None;
+    if let Request::Biometric(biometric) = &prompt {
+        let pointer = crate::biometry::authentication_view(biometric.request).cast::<NSView>();
+        // SAFETY: Swift returns a +1 retained LAAuthenticationView (an NSView subclass) made on
+        // this main thread for exactly this request, or null. Retained takes over that one
+        // reference and releases it with the Panel.
+        let embedded = unsafe { Retained::from_raw(pointer) }.ok_or(PromptError::Unavailable)?;
+        // SAFETY: NSView's documented size and accessibility accessors on a live view.
+        let size: NSSize = unsafe {
+            let _: () = msg_send![&embedded, setAccessibilityLabel: ns_string!("Touch ID")];
+            msg_send![&embedded, fittingSize]
+        };
+        let (side_w, side_h) = if size.width > 0.0 && size.height > 0.0 {
+            (size.width, size.height)
+        } else {
+            (64.0, 64.0)
+        };
+        embedded.setFrame(rect(
+            (bounds.size.width - side_w) / 2.0,
+            place(&mut y, side_h, 12.0),
+            side_w,
+            side_h,
+        ));
+        anchor(&embedded);
+        view.addSubview(&embedded);
+        authentication = Some(embedded);
+    }
     let mut sensitive_labels = Vec::new();
     let mut readout = None;
     let mut readout_scroll = None;
@@ -379,7 +410,7 @@ pub(super) fn present(
     }
     let feedback = label(
         &view,
-        "Credentials stay in native controls. Escape cancels.",
+        feedback_text(&prompt),
         x,
         place(&mut y, 36.0, 6.0),
         width,
@@ -397,19 +428,23 @@ pub(super) fn present(
     );
     cancel.setKeyEquivalent(ns_string!("\u{1b}"));
     let is_reveal = matches!(&prompt, Request::Reveal { .. });
-    let accept = button(
-        &view,
-        if is_reveal { "Close" } else { "Continue" },
-        rect(x + width - 112.0, button_y, 112.0, 30.0),
-        &target,
-        if is_reveal {
-            sel!(cancel:)
-        } else {
-            sel!(submit:)
-        },
-        mtm,
-    );
-    accept.setKeyEquivalent(ns_string!("\r"));
+    // Touch ID has nothing to submit: the sensor is the only way forward.
+    let accept = (!matches!(&prompt, Request::Biometric(_))).then(|| {
+        let accept = button(
+            &view,
+            if is_reveal { "Close" } else { "Continue" },
+            rect(x + width - 112.0, button_y, 112.0, 30.0),
+            &target,
+            if is_reveal {
+                sel!(cancel:)
+            } else {
+                sel!(submit:)
+            },
+            mtm,
+        );
+        accept.setKeyEquivalent(ns_string!("\r"));
+        accept
+    });
     let mut key_views: Vec<&NSView> = Vec::new();
     for field in &fields {
         key_views.push(&**field);
@@ -426,7 +461,10 @@ pub(super) fn present(
     if let Some(button) = &extend_button {
         key_views.push(&**button);
     }
-    key_views.extend([&*cancel as &NSView, &*accept as &NSView]);
+    key_views.push(&*cancel);
+    if let Some(accept) = &accept {
+        key_views.push(&**accept);
+    }
     // SAFETY: All key views are retained by the native view/Panel for the complete key loop.
     unsafe {
         for pair in key_views.windows(2) {
@@ -458,6 +496,7 @@ pub(super) fn present(
             original_focus,
             _view: view.clone(),
             _target: target,
+            _authentication: authentication,
             fields,
             sensitive_labels,
             feedback,
@@ -499,6 +538,13 @@ pub(super) fn present(
     Ok(())
 }
 
+fn feedback_text(prompt: &Request) -> &'static str {
+    match prompt {
+        Request::Biometric(_) => "Touch ID stays in this window. Switching apps or Escape cancels.",
+        _ => "Credentials stay in native controls. Escape cancels.",
+    }
+}
+
 fn rect(x: f64, y: f64, width: f64, height: f64) -> NSRect {
     NSRect::new(NSPoint::new(x, y), NSSize::new(width, height))
 }
@@ -533,10 +579,19 @@ fn activity(genuine: bool) -> bool {
         return false;
     };
     let authorization = hook(genuine);
-    let update = ACTIVE.with(|active| {
+    let restored = ACTIVE.with(|active| {
         let mut active = active.try_borrow_mut().ok()?;
         let panel = active.as_mut().filter(|panel| panel.id == id)?;
         panel.activity = Some(hook);
+        Some(())
+    });
+    restored.is_some() && apply_authorization(id, authorization)
+}
+
+fn apply_authorization(id: u64, authorization: Authorization) -> bool {
+    let update = ACTIVE.with(|active| {
+        let mut active = active.try_borrow_mut().ok()?;
+        let panel = active.as_mut().filter(|panel| panel.id == id)?;
         let update = panel.presentation.authorize(authorization);
         match update {
             PresentationUpdate::Clear => {
@@ -578,9 +633,9 @@ fn activity(genuine: bool) -> bool {
                     label.setStringValue(&NSString::from_str(suggestion));
                 }
                 // Restore only a generated candidate, never a manually typed password.
-                panel.feedback.setStringValue(ns_string!(
-                    "Credentials stay in native controls. Escape cancels."
-                ));
+                panel
+                    .feedback
+                    .setStringValue(&NSString::from_str(feedback_text(&panel.prompt)));
             }
             _ => (),
         }
@@ -593,6 +648,27 @@ fn activity(genuine: bool) -> bool {
         update,
         Some(PresentationUpdate::Keep | PresentationUpdate::Restore)
     )
+}
+
+fn edit_activity_is_genuine() -> bool {
+    // Only input events can renew an edit lease; programmatic notifications revalidate.
+    // SAFETY: AppKit invokes the text-field delegate on the main thread; currentEvent
+    // is an optional live NSEvent, and isARepeat is queried only for a key-down event.
+    unsafe {
+        let app: Retained<AnyObject> = msg_send![class!(NSApplication), sharedApplication];
+        let event: Option<Retained<AnyObject>> = msg_send![&app, currentEvent];
+        let Some(event) = event else {
+            return false;
+        };
+        let kind: usize = msg_send![&event, type];
+        let repeated = kind == 10 && msg_send![&event, isARepeat];
+        edit_event_is_genuine(Some(kind), repeated)
+    }
+}
+
+fn edit_event_is_genuine(kind: Option<usize>, repeated: bool) -> bool {
+    // NSEventType: keyDown, or mouse buttons used by native context-menu Paste.
+    matches!(kind, Some(1 | 2 | 3 | 4 | 25 | 26)) || kind == Some(10) && !repeated
 }
 
 fn anchor(view: &NSView) {
@@ -815,7 +891,7 @@ fn extend() {
         extend.take().map(|hook| (panel.id, hook))
     });
     if let Some((id, hook)) = pending {
-        let allowed = hook();
+        let authorization = hook();
         let present = ACTIVE.with(|active| {
             let mut active = active.borrow_mut();
             let Some(panel) = active.as_mut().filter(|panel| panel.id == id) else {
@@ -824,14 +900,13 @@ fn extend() {
             if let Request::Reveal { extend, .. } = &mut panel.prompt {
                 *extend = Some(hook);
             }
-            if allowed {
+            if authorization == Authorization::Allowed {
                 panel.extensions += 1;
                 panel.expires = Some(Instant::now() + Duration::from_secs(20));
             }
             true
         });
-        if present && !allowed {
-            finish(Err(PromptError::Cancelled));
+        if present && !apply_authorization(id, authorization) {
             return;
         }
     }
@@ -959,4 +1034,21 @@ pub(super) fn cancel(id: u64) -> bool {
         finish(Err(PromptError::Cancelled));
     }
     matches
+}
+
+#[cfg(test)]
+mod tests {
+    use super::edit_event_is_genuine;
+
+    #[test]
+    fn credential_edits_count_input_but_not_repeats_or_programmatic_notifications() {
+        assert!(edit_event_is_genuine(Some(10), false));
+        for event in [1, 2, 3, 4, 25, 26] {
+            assert!(edit_event_is_genuine(Some(event), false));
+        }
+        assert!(!edit_event_is_genuine(Some(10), true));
+        for event in [None, Some(11), Some(13), Some(15)] {
+            assert!(!edit_event_is_genuine(event, false));
+        }
+    }
 }

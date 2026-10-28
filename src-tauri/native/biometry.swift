@@ -1,6 +1,8 @@
+import AppKit
 import CryptoKit
 import Foundation
 import LocalAuthentication
+import LocalAuthenticationEmbeddedUI
 import Security
 
 // This file never creates a Keychain item. CryptoKit returns an encrypted, device-bound
@@ -10,8 +12,26 @@ private let maximumBlobLength = 32 * 1024
 private let maximumEnclaveLength = 16 * 1024
 private let magic = Data("ENOTE-SE-WRAP-V1".utf8)
 private let domain = Data("com.encryptednote.app.quick-unlock.p256.v1".utf8)
+private let reason = "unlock your encrypted-note Vault"
+private let authenticationTimeout: DispatchTimeInterval = .seconds(120)
 
 private enum BiometryFailure: Error { case cancelled, unavailable, malformed, failed }
+
+private func freshContext() -> LAContext {
+    let context = LAContext()
+    context.localizedReason = reason
+    context.localizedFallbackTitle = ""
+    context.touchIDAuthenticationAllowableReuseDuration = 0
+    return context
+}
+
+// The one authentication context of a protected read, paired with its embedded view. It is
+// claimed once; a read without a paired view never starts, so no system alert can appear.
+private final class Paired {
+    let context: LAContext
+    var claimed = false
+    init(_ context: LAContext) { self.context = context }
+}
 
 // Cancellation can arrive before registration, during a protected operation, or between
 // enrollment and its read-back. Rust releases the id only when the last request handle drops.
@@ -19,6 +39,7 @@ private final class Requests: @unchecked Sendable {
     static let shared = Requests()
     private let lock = NSLock()
     private var contexts: [UInt64: LAContext] = [:]
+    private var paired: [UInt64: Paired] = [:]
     private var cancelled: Set<UInt64> = []
 
     func begin(_ id: UInt64) throws -> LAContext {
@@ -27,10 +48,7 @@ private final class Requests: @unchecked Sendable {
         guard id != 0, !cancelled.contains(id), contexts[id] == nil else {
             throw BiometryFailure.cancelled
         }
-        let context = LAContext()
-        context.localizedReason = "unlock your encrypted-note Vault"
-        context.localizedFallbackTitle = ""
-        context.touchIDAuthenticationAllowableReuseDuration = 0
+        let context = freshContext()
         contexts[id] = context
         return context
     }
@@ -42,20 +60,48 @@ private final class Requests: @unchecked Sendable {
         if contexts[id] === context { contexts.removeValue(forKey: id) }
     }
 
+    // Main thread only (the caller checks). One view per request, created with the exact
+    // context the later Secure Enclave operation uses.
+    func pair(_ id: UInt64) -> NSView? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard id != 0, !cancelled.contains(id), paired[id] == nil else { return nil }
+        let context = freshContext()
+        let view = LAAuthenticationView(context: context, controlSize: .large)
+        paired[id] = Paired(context)
+        return view
+    }
+
+    func claim(_ id: UInt64) throws -> LAContext {
+        lock.lock()
+        defer { lock.unlock() }
+        // No paired view means no embedded presentation: refuse rather than fall back to the
+        // system alert, which takes focus away from the protected window.
+        guard !cancelled.contains(id), let entry = paired[id], !entry.claimed else {
+            throw BiometryFailure.cancelled
+        }
+        entry.claimed = true
+        return entry.context
+    }
+
     func cancel(_ id: UInt64) {
         lock.lock()
         cancelled.insert(id)
         let context = contexts[id]
+        let embedded = paired[id]?.context
         lock.unlock()
         context?.invalidate()
+        embedded?.invalidate()
     }
 
     func release(_ id: UInt64) {
         lock.lock()
         let context = contexts.removeValue(forKey: id)
+        let embedded = paired.removeValue(forKey: id)?.context
         cancelled.remove(id)
         lock.unlock()
         context?.invalidate()
+        embedded?.invalidate()
     }
 
     func check(_ id: UInt64) throws {
@@ -70,6 +116,16 @@ func enoteBiometryCancel(_ id: UInt64) { Requests.shared.cancel(id) }
 
 @_cdecl("enote_biometry_release")
 func enoteBiometryRelease(_ id: UInt64) { Requests.shared.release(id) }
+
+// Returns a +1 retained LAAuthenticationView for this request, or nil. Main thread only;
+// Rust installs it in the protected window before the read starts and releases it after.
+@_cdecl("enote_biometry_view")
+func enoteBiometryView(_ id: UInt64) -> UnsafeMutableRawPointer? {
+    // A Thread check, not MainActor.assumeIsolated: that would link the Swift Concurrency
+    // runtime, which this static bridge does not ship or load.
+    guard Thread.isMainThread, let view = Requests.shared.pair(id) else { return nil }
+    return Unmanaged.passRetained(view).toOpaque()
+}
 
 @_cdecl("enote_biometry_available")
 func enoteBiometryAvailable() -> Int32 {
@@ -91,6 +147,24 @@ private func status(_ error: Error) -> Int32 {
     if let error = error as? LAError,
        [.userCancel, .appCancel, .systemCancel].contains(error.code) { return 1 }
     return 4
+}
+
+private final class Outcome: @unchecked Sendable { var error: Error? = BiometryFailure.failed }
+
+// Blocks the calling worker thread (never the main thread, which draws the paired view).
+private func authenticate(_ context: LAContext, _ access: SecAccessControl) throws {
+    let done = DispatchSemaphore(value: 0)
+    let outcome = Outcome()
+    context.evaluateAccessControl(access, operation: .useKeyKeyExchange,
+        localizedReason: reason) { success, error in
+        outcome.error = success ? nil : (error ?? BiometryFailure.failed)
+        done.signal()
+    }
+    guard done.wait(timeout: .now() + authenticationTimeout) == .success else {
+        context.invalidate()
+        throw BiometryFailure.cancelled
+    }
+    if let error = outcome.error { throw error }
 }
 
 private func randomBytes(_ count: Int) throws -> Data {
@@ -200,8 +274,17 @@ func enoteBiometryOpen(_ id: UInt64, _ input: UnsafePointer<UInt8>?, _ length: I
           capacity == payloadLength else { return 3 }
     do {
         let envelope = try Envelope(Data(bytes: input, count: length))
-        let context = try Requests.shared.begin(id)
-        defer { Requests.shared.end(id, context) }
+        let context = try Requests.shared.claim(id)
+        defer { context.invalidate() }
+        guard let access = SecAccessControlCreateWithFlags(nil,
+            kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly,
+            [.privateKeyUsage, .biometryCurrentSet], nil) else { throw BiometryFailure.failed }
+        // Biometrics only, presented by the paired view inside the protected window. Success
+        // here authorizes nothing by itself: only the enclave operation below releases data.
+        try authenticate(context, access)
+        try Requests.shared.check(id)
+        // Any further authentication UI would appear outside the protected window: refuse it.
+        context.interactionNotAllowed = true
         let enclave = try SecureEnclave.P256.KeyAgreement.PrivateKey(
             dataRepresentation: envelope.enclave, authenticationContext: context)
         guard enclave.publicKey.x963Representation == envelope.enclavePublic else {

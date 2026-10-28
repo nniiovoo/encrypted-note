@@ -4,11 +4,12 @@
 const COMMANDS: &[&str] = &[
     "app_status",
     "activity",
-    "suggest_passphrase",
-    "assess_password",
     "create_vault",
-    "confirm_recovery_kit",
     "unlock",
+    "cancel_native_operation",
+    "enable_quick_unlock",
+    "disable_quick_unlock",
+    "quick_unlock",
     "set_new_password",
     "lock",
     "list_notes",
@@ -106,7 +107,15 @@ fn build_biometry() {
     assert!(status.success(), "archive local biometric bridge");
     println!("cargo:rustc-link-search=native={}", out.display());
     println!("cargo:rustc-link-lib=static=encrypted_note_biometry");
-    for framework in ["CryptoKit", "Security", "LocalAuthentication", "Foundation"] {
+    // LocalAuthenticationEmbeddedUI keeps Touch ID inside the protected window (no system alert).
+    for framework in [
+        "CryptoKit",
+        "Security",
+        "LocalAuthentication",
+        "LocalAuthenticationEmbeddedUI",
+        "AppKit",
+        "Foundation",
+    ] {
         println!("cargo:rustc-link-lib=framework={framework}");
     }
     swift_rs::SwiftLinker::new("13.0").link();

@@ -23,10 +23,12 @@ pub mod companion;
 pub mod core;
 #[allow(unsafe_code)]
 mod hardening;
+mod native_coordinator;
 #[allow(unsafe_code)]
 pub mod native_credential;
 #[allow(unsafe_code)]
 mod platform;
+mod quick_runtime;
 pub mod quick_unlock;
 #[allow(unsafe_code)]
 mod wipe_on_free;
@@ -57,11 +59,12 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::app_status,
             commands::activity,
-            commands::suggest_passphrase,
-            commands::assess_password,
             commands::create_vault,
-            commands::confirm_recovery_kit,
             commands::unlock,
+            commands::cancel_native_operation,
+            commands::enable_quick_unlock,
+            commands::disable_quick_unlock,
+            commands::quick_unlock,
             commands::set_new_password,
             commands::lock,
             commands::list_notes,
@@ -133,6 +136,14 @@ pub fn run() {
 fn navigation_guard() -> tauri::plugin::TauriPlugin<tauri::Wry> {
     tauri::plugin::Builder::<tauri::Wry>::new("navigation-guard")
         .on_navigation(|webview, url| {
+            if webview
+                .app_handle()
+                .try_state::<native_coordinator::CoordinatorState>()
+                .is_some()
+            {
+                native_coordinator::cancel(webview.app_handle());
+                quick_runtime::cancel(webview.app_handle());
+            }
             let dev_url = webview.app_handle().config().build.dev_url.as_ref();
             is_app_url(url, dev_url.filter(|_| cfg!(debug_assertions)))
         })
@@ -173,8 +184,26 @@ fn setup(app: &AppHandle) {
             .map_err(|e| e.message)
         })
         .unwrap_or_else(|message| fatal(&message));
+    let biometry = biometry::availability();
+    core.set_quick_unlock_availability(
+        biometry == biometry::Availability::Available,
+        match biometry {
+            biometry::Availability::Available => None,
+            biometry::Availability::UnsupportedPlatform => {
+                Some("Touch ID is available only on supported Macs.")
+            }
+            biometry::Availability::BiometryUnavailable => {
+                Some("Touch ID is not available on this Mac.")
+            }
+        },
+    );
     core.set_lock_events_unavailable(platform::lock_events_unavailable());
+    let quick_unlock_path = core
+        .quick_unlock_path()
+        .unwrap_or_else(|error| fatal(&error.message));
     app.manage(CoreState(Mutex::new(core)));
+    app.manage(native_coordinator::CoordinatorState::default());
+    app.manage(quick_runtime::QuickRuntime::new(quick_unlock_path));
     // Supervised beside the core, never inside it: the Vault core holds no helper state.
     app.manage(companion::Companion::new(companion::system_transport()));
 
@@ -278,6 +307,8 @@ fn background(app: &AppHandle) {
             core.activity_elsewhere(ago_ms);
         }
         core.tick();
+        native_coordinator::sync(app, &mut core);
+        quick_runtime::sync(app, &mut core);
         let key = without_countdowns(core.app_status());
         // Whatever locked the Vault (Auto-lock, Lock, a lost focus, an OS event), an Agent
         // Companion grant ends with it (ADR-0009). Only an atomic check unless one may run.
@@ -340,6 +371,10 @@ impl Clock for SystemClock {
             (Some(started), Some(now)) => now.saturating_sub(started),
             _ => u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX),
         }
+    }
+
+    fn continuous_ms(&self) -> Option<u64> {
+        platform::continuous_ms()
     }
 
     fn unix_secs(&self) -> i64 {

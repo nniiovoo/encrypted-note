@@ -16,8 +16,8 @@ use windows::core::{PCWSTR, w};
 use zeroize::Zeroizing;
 
 use super::{
-    Activity, Callback, PresentationState, PresentationUpdate, Prompt, PromptError, Reply, Request,
-    RevealMode, readout_text,
+    Activity, Authorization, Callback, PresentationState, PresentationUpdate, Prompt, PromptError,
+    Reply, Request, RevealMode, readout_text,
 };
 
 const SUBCLASS: usize = 0x454e_4352;
@@ -500,33 +500,60 @@ fn submit() {
     if !activity(false) {
         return;
     }
-    if ACTIVE.with(|active| {
-        active
-            .borrow()
-            .as_ref()
-            .is_some_and(|panel| matches!(&panel.prompt, Request::Reveal { .. }))
-    }) {
+    let target = ACTIVE.with(|active| {
+        let active = active.try_borrow().ok()?;
+        let panel = active.as_ref()?;
+        Some((
+            panel.id,
+            panel.fields.clone(),
+            panel.feedback,
+            matches!(&panel.prompt, Request::Reveal { .. }),
+        ))
+    });
+    let Some((id, fields, feedback, is_reveal)) = target else {
+        return;
+    };
+    if is_reveal {
         finish(Err(PromptError::Cancelled));
         return;
     }
+    let values = fields
+        .iter()
+        .map(|field| read_text(*field))
+        .collect::<Result<Vec<_>, _>>();
     let reply = ACTIVE.with(|active| {
-        let active = active.borrow();
-        let panel = active.as_ref()?;
-        let values = panel
-            .fields
-            .iter()
-            .map(|field| read_text(*field))
-            .collect::<Result<Vec<_>, _>>();
-        match values.and_then(|values| panel.prompt.reply(values)) {
-            Ok(reply) => Some(reply),
-            Err(message) => {
-                set_text(panel.feedback, message);
-                None
-            }
-        }
+        let active = active.try_borrow().ok()?;
+        let panel = active.as_ref().filter(|panel| panel.id == id)?;
+        Some(values.and_then(|values| panel.prompt.reply(values)))
     });
-    if let Some(reply) = reply {
-        finish(Ok(reply));
+    match reply {
+        Some(Ok(reply)) => finish(Ok(reply)),
+        Some(Err(message)) if current(id) => set_text(feedback, message),
+        _ => (),
+    }
+}
+
+struct ReadoutPaint {
+    readout: HWND,
+    viewport: HWND,
+    width: i32,
+    value: Zeroizing<String>,
+}
+
+fn current(id: u64) -> bool {
+    ACTIVE.with(|active| {
+        active
+            .try_borrow()
+            .ok()
+            .is_some_and(|active| active.as_ref().is_some_and(|panel| panel.id == id))
+    })
+}
+
+fn paint_readout(id: u64, paint: ReadoutPaint) {
+    if current(id) {
+        // Native setters synchronously dispatch subclass messages. The panel snapshot owns
+        // its wiping text and no ACTIVE borrow survives across these user32 calls.
+        set_readout(paint.readout, paint.viewport, paint.width, &paint.value);
     }
 }
 
@@ -534,29 +561,37 @@ fn held(show: bool) {
     if show && !activity(false) {
         return;
     }
-    ACTIVE.with(|active| {
-        let mut active = active.borrow_mut();
-        let Some(panel) = active.as_mut() else {
-            return;
-        };
-        if let (Request::Reveal { reveal, .. }, Some(readout), Some(viewport)) =
+    let paint = ACTIVE.with(|active| {
+        let mut active = active.try_borrow_mut().ok()?;
+        let panel = active.as_mut()?;
+        let (Request::Reveal { reveal, .. }, Some(readout), Some(viewport)) =
             (&panel.prompt, panel.readout, panel.readout_viewport)
-            && reveal.mode == RevealMode::Held
-            && panel.readout_shown != show
-        {
-            panel.readout_shown = show;
-            set_readout(
+        else {
+            return None;
+        };
+        if reveal.mode != RevealMode::Held || panel.readout_shown == show {
+            return None;
+        }
+        panel.readout_shown = show;
+        Some((
+            panel.id,
+            ReadoutPaint {
                 readout,
                 viewport,
-                panel.readout_width,
-                if show {
-                    &reveal.value
+                width: panel.readout_width,
+                value: if show {
+                    reveal.value.clone()
                 } else {
-                    "Hold Space or the button to show. Scroll to read long values."
+                    Zeroizing::new(
+                        "Hold Space or the button to show. Scroll to read long values.".into(),
+                    )
                 },
-            );
-        }
+            },
+        ))
     });
+    if let Some((id, paint)) = paint {
+        paint_readout(id, paint);
+    }
 }
 
 fn set_readout(readout: HWND, viewport: HWND, width: i32, value: &str) {
@@ -588,51 +623,51 @@ fn scroll_readout(command: Option<i32>, delta: i32) -> bool {
     if !activity(false) {
         return false;
     }
-    ACTIVE.with(|active| {
-        let active = active.borrow();
-        let Some(panel) = active.as_ref() else {
+    let target = ACTIVE.with(|active| {
+        let active = active.try_borrow().ok()?;
+        let panel = active.as_ref()?;
+        Some((
+            panel.id,
+            panel.readout_viewport?,
+            panel.readout?,
+            panel.readout_width,
+        ))
+    });
+    let Some((id, viewport, readout, width)) = target else {
+        return false;
+    };
+    let mut info = SCROLLINFO {
+        cbSize: std::mem::size_of::<SCROLLINFO>() as u32,
+        fMask: SIF_ALL,
+        ..Default::default()
+    };
+    // SAFETY: Local SCROLLINFO has its actual size. HWNDs were copied from this panel;
+    // all native calls run after dropping ACTIVE, including synchronous style/size callbacks.
+    unsafe {
+        if GetScrollInfo(viewport, SB_VERT, &mut info).is_err() || !current(id) {
             return false;
-        };
-        let (Some(viewport), Some(readout)) = (panel.readout_viewport, panel.readout) else {
-            return false;
-        };
-        let mut info = SCROLLINFO {
-            cbSize: std::mem::size_of::<SCROLLINFO>() as u32,
-            fMask: SIF_ALL,
-            ..Default::default()
-        };
-        // SAFETY: Local SCROLLINFO has its actual size. Only our live native child is moved;
-        // its parent clips it, keeping every glyph inside the protected main window.
-        unsafe {
-            if GetScrollInfo(viewport, SB_VERT, &mut info).is_err() {
-                return false;
-            }
-            let maximum = (info.nMax - info.nPage as i32 + 1).max(0);
-            let next = match command {
-                Some(0) => info.nPos.saturating_sub(24),
-                Some(1) => info.nPos.saturating_add(24),
-                Some(2) => info.nPos.saturating_sub(112),
-                Some(3) => info.nPos.saturating_add(112),
-                Some(4 | 5) => info.nTrackPos,
-                Some(6) => 0,
-                Some(7) => maximum,
-                _ => info.nPos.saturating_add(delta),
-            }
-            .clamp(0, maximum);
-            info.fMask = SIF_POS;
-            info.nPos = next;
-            SetScrollInfo(viewport, SB_VERT, &info, true);
-            let _ = MoveWindow(
-                readout,
-                0,
-                -next,
-                panel.readout_width,
-                (info.nMax + 1).max(112),
-                true,
-            );
         }
-        true
-    })
+        let maximum = (info.nMax - info.nPage as i32 + 1).max(0);
+        let next = match command {
+            Some(0) => info.nPos.saturating_sub(24),
+            Some(1) => info.nPos.saturating_add(24),
+            Some(2) => info.nPos.saturating_sub(112),
+            Some(3) => info.nPos.saturating_add(112),
+            Some(4 | 5) => info.nTrackPos,
+            Some(6) => 0,
+            Some(7) => maximum,
+            _ => info.nPos.saturating_add(delta),
+        }
+        .clamp(0, maximum);
+        info.fMask = SIF_POS;
+        info.nPos = next;
+        SetScrollInfo(viewport, SB_VERT, &info, true);
+        if !current(id) {
+            return false;
+        }
+        let _ = MoveWindow(readout, 0, -next, width, (info.nMax + 1).max(112), true);
+    }
+    true
 }
 
 fn extend() {
@@ -640,7 +675,7 @@ fn extend() {
         return;
     }
     let pending = ACTIVE.with(|active| {
-        let mut active = active.borrow_mut();
+        let mut active = active.try_borrow_mut().ok()?;
         let panel = active.as_mut()?;
         let Request::Reveal { reveal, extend } = &mut panel.prompt else {
             return None;
@@ -651,23 +686,24 @@ fn extend() {
         extend.take().map(|hook| (panel.id, hook))
     });
     if let Some((id, hook)) = pending {
-        let allowed = hook();
+        let authorization = hook();
         let present = ACTIVE.with(|active| {
-            let mut active = active.borrow_mut();
+            let Ok(mut active) = active.try_borrow_mut() else {
+                return false;
+            };
             let Some(panel) = active.as_mut().filter(|panel| panel.id == id) else {
                 return false;
             };
             if let Request::Reveal { extend, .. } = &mut panel.prompt {
                 *extend = Some(hook);
             }
-            if allowed {
+            if authorization == Authorization::Allowed {
                 panel.extensions += 1;
                 panel.expires = Some(Instant::now() + Duration::from_secs(20));
             }
             true
         });
-        if present && !allowed {
-            finish(Err(PromptError::Cancelled));
+        if !present || !apply_authorization(id, authorization) {
             return;
         }
     }
@@ -678,69 +714,103 @@ fn tick() {
     if !activity(false) {
         return;
     }
-    let expired = ACTIVE.with(|active| {
-        let active = active.borrow();
-        let Some(panel) = active.as_ref() else {
-            return false;
-        };
-        let Some(expires) = panel.expires else {
-            return false;
-        };
-        let remaining = expires.saturating_duration_since(Instant::now());
-        set_text(
-            panel.feedback,
-            &format!(
-                "Hides in {} seconds. {} extensions remaining.",
-                remaining.as_secs() + 1,
-                3 - panel.extensions
-            ),
-        );
-        remaining.is_zero()
+    let pending = ACTIVE.with(|active| {
+        let active = active.try_borrow().ok()?;
+        let panel = active.as_ref()?;
+        let remaining = panel.expires?.saturating_duration_since(Instant::now());
+        Some((panel.id, panel.feedback, remaining, panel.extensions))
     });
-    if expired {
-        finish(Err(PromptError::Cancelled));
+    if let Some((id, feedback, remaining, extensions)) = pending {
+        if !current(id) {
+            return;
+        }
+        if remaining.is_zero() {
+            finish(Err(PromptError::Cancelled));
+        } else {
+            set_text(
+                feedback,
+                &format!(
+                    "Hides in {} seconds. {} extensions remaining.",
+                    remaining.as_secs() + 1,
+                    3 - extensions
+                ),
+            );
+        }
     }
 }
 
 fn forget_suggestion() {
-    ACTIVE.with(|active| {
-        // SetWindowTextW during suggestion installation sends EN_CHANGE synchronously.
-        // Ignore that reentrant notification; owner edits arrive after the builder returns.
-        if let Ok(mut active) = active.try_borrow_mut()
-            && let Some(panel) = active.as_mut()
-            && panel.suggestion.take().is_some()
-            && let Some(label) = panel.sensitive_labels.last()
-        {
-            set_text(*label, "");
-        }
+    let target = ACTIVE.with(|active| {
+        let mut active = active.try_borrow_mut().ok()?;
+        let panel = active.as_mut()?;
+        panel.suggestion.take()?;
+        Some((panel.id, *panel.sensitive_labels.last()?))
     });
+    if let Some((id, label)) = target
+        && current(id)
+    {
+        set_text(label, "");
+    }
 }
 
 fn suggest() {
     if !activity(false) {
         return;
     }
-    ACTIVE.with(|active| {
-        let mut active = active.borrow_mut();
-        let Some(panel) = active.as_mut() else {
-            return;
-        };
+    let target = ACTIVE.with(|active| {
+        let active = active.try_borrow().ok()?;
+        let panel = active.as_ref()?;
         if !matches!(&panel.prompt, Request::Entry(Prompt::NewPassword { .. })) {
+            return None;
+        }
+        Some((
+            panel.id,
+            panel
+                .fields
+                .iter()
+                .rev()
+                .take(2)
+                .copied()
+                .collect::<Vec<_>>(),
+            panel.sensitive_labels.last().copied(),
+            panel.feedback,
+        ))
+    });
+    let Some((id, fields, label, feedback)) = target else {
+        return;
+    };
+    let suggestion = policy::suggest_passphrase();
+    // EDIT EN_CHANGE notifications run synchronously here, with no ACTIVE borrow held.
+    for field in fields {
+        if !current(id) {
             return;
         }
-        let suggestion = policy::suggest_passphrase();
-        for field in panel.fields.iter().rev().take(2) {
-            set_text(*field, &suggestion);
-        }
-        if let Some(label) = panel.sensitive_labels.last() {
-            set_text(*label, &suggestion);
-        }
-        panel.suggestion = Some(suggestion);
+        set_text(field, &suggestion);
+    }
+    let stored = ACTIVE.with(|active| {
+        let Ok(mut active) = active.try_borrow_mut() else {
+            return false;
+        };
+        let Some(panel) = active.as_mut().filter(|panel| panel.id == id) else {
+            return false;
+        };
+        panel.suggestion = Some(suggestion.clone());
+        true
+    });
+    if !stored || !activity(false) {
+        return;
+    }
+    if let Some(label) = label
+        && current(id)
+    {
+        set_text(label, &suggestion);
+    }
+    if current(id) {
         set_text(
-            panel.feedback,
+            feedback,
             "Suggested passphrase meets the strength rules. Write it somewhere private.",
         );
-    });
+    }
 }
 
 fn finish(result: Result<Reply, PromptError>) {
@@ -910,6 +980,26 @@ unsafe extern "system" fn owner_proc(
     unsafe { DefSubclassProc(hwnd, message, wparam, lparam) }
 }
 
+fn handles_input(message: u32) -> bool {
+    matches!(
+        message,
+        WM_KEYDOWN
+            | WM_KEYUP
+            | WM_CHAR
+            | WM_LBUTTONDOWN
+            | WM_NCLBUTTONDOWN
+            | WM_LBUTTONUP
+            | WM_CAPTURECHANGED
+            | WM_CANCELMODE
+            | WM_KILLFOCUS
+            | WM_MOUSEWHEEL
+            | WM_COPY
+            | WM_CUT
+            | WM_CONTEXTMENU
+            | WM_GETDLGCODE
+    )
+}
+
 unsafe extern "system" fn input_proc(
     hwnd: HWND,
     message: u32,
@@ -918,6 +1008,11 @@ unsafe extern "system" fn input_proc(
     _id: usize,
     _data: usize,
 ) -> LRESULT {
+    // SetScrollInfo and layout setters synchronously dispatch these subclass messages.
+    // Non-input messages must reach the native control without inspecting ACTIVE.
+    if !handles_input(message) {
+        return unsafe { DefSubclassProc(hwnd, message, wparam, lparam) };
+    }
     if message == WM_KEYDOWN && wparam.0 == 0x1b {
         finish(Err(PromptError::Cancelled));
         return LRESULT(0);
@@ -957,7 +1052,7 @@ unsafe extern "system" fn input_proc(
     }
     // SAFETY: GetDlgCtrlID reads the native child ID assigned during construction.
     let control_id = unsafe { GetDlgCtrlID(hwnd) };
-    let is_hold = control_id == HOLD as i32 || (control_id == READOUT as i32 && ACTIVE.with(|active| active.borrow().as_ref().is_some_and(|panel| matches!(&panel.prompt, Request::Reveal { reveal, .. } if reveal.mode == RevealMode::Held))));
+    let is_hold = control_id == HOLD as i32 || (control_id == READOUT as i32 && ACTIVE.with(|active| active.try_borrow().ok().is_some_and(|active| active.as_ref().is_some_and(|panel| matches!(&panel.prompt, Request::Reveal { reveal, .. } if reveal.mode == RevealMode::Held)))));
     if is_hold {
         if message == WM_LBUTTONDOWN {
             // SAFETY: Capture keeps mouse-up delivery on this control if the pointer leaves it.
@@ -1053,66 +1148,132 @@ fn activity(genuine: bool) -> bool {
         return false;
     };
     let authorization = hook(genuine);
-    let update = ACTIVE.with(|active| {
+    let present = ACTIVE.with(|active| {
+        let Ok(mut active) = active.try_borrow_mut() else {
+            return false;
+        };
+        let Some(panel) = active.as_mut().filter(|panel| panel.id == id) else {
+            return false;
+        };
+        panel.activity = Some(hook);
+        true
+    });
+    present && apply_authorization(id, authorization)
+}
+
+fn apply_authorization(id: u64, authorization: Authorization) -> bool {
+    let paint = ACTIVE.with(|active| {
         let mut active = active.try_borrow_mut().ok()?;
         let panel = active.as_mut().filter(|panel| panel.id == id)?;
-        panel.activity = Some(hook);
         let update = panel.presentation.authorize(authorization);
+        let mut texts = Vec::new();
+        let mut readout = None;
         match update {
             PresentationUpdate::Clear => {
-                for label in &panel.sensitive_labels {
-                    set_text(*label, "");
-                }
-                if let (Some(readout), Some(viewport)) = (panel.readout, panel.readout_viewport) {
-                    set_readout(readout, viewport, panel.readout_width, "");
+                texts.extend(
+                    panel
+                        .sensitive_labels
+                        .iter()
+                        .map(|label| (*label, Zeroizing::new(String::new()))),
+                );
+                if let (Some(value), Some(viewport)) = (panel.readout, panel.readout_viewport) {
+                    readout = Some(ReadoutPaint {
+                        readout: value,
+                        viewport,
+                        width: panel.readout_width,
+                        value: Zeroizing::new(String::new()),
+                    });
                 }
                 panel.readout_shown = false;
-                set_text(panel.feedback, "Please wait…");
+                texts.push((panel.feedback, Zeroizing::new("Please wait…".into())));
             }
             PresentationUpdate::Restore => {
                 if let Request::Entry(Prompt::RecoveryKit { recovery, .. }) = &panel.prompt
                     && let Some(label) = panel.sensitive_labels.first()
                 {
-                    set_text(*label, recovery);
+                    texts.push((*label, recovery.clone()));
                 }
-                if let (Request::Reveal { reveal, .. }, Some(readout), Some(viewport)) =
+                if let (Request::Reveal { reveal, .. }, Some(value), Some(viewport)) =
                     (&panel.prompt, panel.readout, panel.readout_viewport)
                 {
                     panel.readout_shown = reveal.mode == RevealMode::Timed
                         && panel
                             .expires
                             .is_some_and(|expires| Instant::now() < expires);
-                    set_readout(
-                        readout,
+                    readout = Some(ReadoutPaint {
+                        readout: value,
                         viewport,
-                        panel.readout_width,
-                        if panel.readout_shown {
-                            &reveal.value
+                        width: panel.readout_width,
+                        value: if panel.readout_shown {
+                            reveal.value.clone()
                         } else {
-                            "Hold Space or the button to show. Scroll to read long values."
+                            Zeroizing::new(
+                                "Hold Space or the button to show. Scroll to read long values."
+                                    .into(),
+                            )
                         },
-                    );
+                    });
                 }
                 if let Some(suggestion) = &panel.suggestion
                     && let Some(label) = panel.sensitive_labels.last()
                 {
-                    set_text(*label, suggestion);
+                    texts.push((*label, suggestion.clone()));
                 }
-                // Restore only a generated candidate, never a manually typed password.
-                set_text(
+                texts.push((
                     panel.feedback,
-                    "Credentials stay in native controls. Escape cancels.",
-                );
+                    Zeroizing::new("Credentials stay in native controls. Escape cancels.".into()),
+                ));
             }
             _ => (),
         }
-        Some(update)
+        Some((update, texts, readout))
     });
-    if update == Some(PresentationUpdate::Close) {
+    let Some((update, texts, readout)) = paint else {
+        return false;
+    };
+    if update == PresentationUpdate::Close {
         finish(Err(PromptError::Cancelled));
+        return false;
     }
-    matches!(
-        update,
-        Some(PresentationUpdate::Keep | PresentationUpdate::Restore)
-    )
+    // HWNDs and wiping strings are owned snapshots. Never retain a RefCell borrow while
+    // SetWindowTextW/SetScrollInfo/MoveWindow synchronously dispatch native callbacks.
+    for (target, text) in texts {
+        if !current(id) {
+            return false;
+        }
+        set_text(target, &text);
+    }
+    if let Some(readout) = readout {
+        paint_readout(id, readout);
+    }
+    current(id)
+        && matches!(
+            update,
+            PresentationUpdate::Keep | PresentationUpdate::Restore
+        )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::handles_input;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        WM_CHAR, WM_KEYDOWN, WM_KILLFOCUS, WM_SIZE, WM_STYLECHANGED, WM_STYLECHANGING,
+        WM_WINDOWPOSCHANGED, WM_WINDOWPOSCHANGING,
+    };
+
+    #[test]
+    fn native_layout_reentry_bypasses_panel_input_policy() {
+        for message in [
+            WM_SIZE,
+            WM_STYLECHANGING,
+            WM_STYLECHANGED,
+            WM_WINDOWPOSCHANGING,
+            WM_WINDOWPOSCHANGED,
+        ] {
+            assert!(!handles_input(message));
+        }
+        for message in [WM_CHAR, WM_KEYDOWN, WM_KILLFOCUS] {
+            assert!(handles_input(message));
+        }
+    }
 }
