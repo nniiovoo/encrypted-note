@@ -1,0 +1,16 @@
+{
+  "version": 2,
+  "ownerUid": null,
+  "agentUid": null,
+  "agentShortName": "enote-agent",
+  "credentialExpirySeconds": 3600,
+  "projectHardSpendLimitCents": 100,
+  "projectHardSpendCurrency": "USD",
+  "projectHardSpendInterval": "month",
+  "brokerHost": "127.0.0.1",
+  "brokerPort": 8789,
+  "providerModel": "gpt-6-luna",
+  "providerScope": "api.responses.write",
+  "bearerTokenFile": null,
+  "grantExpiresAt": null
+}
