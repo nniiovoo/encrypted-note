@@ -5,21 +5,27 @@ import policy from '../policy.json' with { type: 'json' };
 export const POLICY = Object.freeze(policy);
 const PUBLIC_ERRORS = Object.freeze({
   invalid_input: 'Provide one nonempty text string of at most 4096 UTF-8 bytes.',
-  busy: 'The companion is processing another request.',
-  usage_limit: 'The companion request limit has been reached.',
-  timeout: 'The provider request timed out. It was not retried and may still be billed.',
-  cancelled: 'The request was cancelled and was not retried.',
-  provider_auth: 'The separate Agent Key was rejected.',
-  provider_limit: 'The provider rejected the request because of a limit.',
-  provider_unavailable: 'The provider request could not be completed.',
-  invalid_response: 'The provider returned an unsupported response.',
-  grant_expired: 'The approved agent grant has ended. Ask the owner for a new grant.',
+  busy: 'The Agent Companion is working on another request. Wait for it to finish, then try again.',
+  usage_limit: 'The Agent Companion request limit has been reached. Wait a minute, then try once more. If it fails again, tell the owner.',
+  timeout: 'The provider request timed out. It was not retried and may still be billed. Try once more at most.',
+  cancelled: 'The request was cancelled and was not retried. Send it again only if it is still needed.',
+  provider_auth: 'The separate Agent Key was rejected. Tell the owner. Do not retry.',
+  provider_limit: 'The provider rejected the request because of a limit. Tell the owner. Do not retry.',
+  provider_unavailable: 'The provider request could not be completed. Try once more at most.',
+  invalid_response: 'The provider returned an unsupported response. Try once more at most.',
+  grant_expired: "The owner's grant has ended. Ask the owner to choose Start for up to one hour in encrypted-note. Do not look for keys or tokens.",
+  // Never says why the Agent Companion is off, so it carries nothing about the Vault being locked.
+  helper_off: "The Agent Companion isn't running. Ask the owner to choose Start for up to one hour in encrypted-note. Do not look for keys or tokens.",
 });
 export class CompanionError extends Error {
   constructor(code) {
     super(PUBLIC_ERRORS[code] ?? PUBLIC_ERRORS.provider_unavailable);
     this.code = Object.hasOwn(PUBLIC_ERRORS, code) ? code : 'provider_unavailable';
   }
+}
+// Only an exact fixed text crosses the bridge; anything else becomes the generic error.
+export function errorFromPublicText(text) {
+  return new CompanionError(Object.keys(PUBLIC_ERRORS).find(code => PUBLIC_ERRORS[code] === text));
 }
 // Checks the owner's grant before validation, admission or any provider work.
 export function guardGenerate(generate, isActive) {

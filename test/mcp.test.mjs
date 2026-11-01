@@ -32,6 +32,16 @@ test('official MCP client sees exactly one bounded text tool', async () => {
     assert.equal(tools.tools[0].inputSchema.additionalProperties, false);
     assert.equal(tools.tools[0].annotations.readOnlyHint, false);
     assert.equal(tools.tools[0].annotations.idempotentHint, false);
+    const { description } = tools.tools[0];
+    for (const limit of [POLICY.model, POLICY.maxInputBytes + ' UTF-8 bytes in', POLICY.maxOutputTokens + ' tokens out',
+      'One call at a time', POLICY.maxRequestsPerMinute + ' a minute', POLICY.maxRequestsPerHour + ' an hour',
+      'no memory of earlier calls']) assert.ok(description.includes(limit), limit);
+    assert.equal(POLICY.maxConcurrentRequests, 1); // 'One call at a time' above
+    // True on every route that shares this text, including the generic entry points with no grant.
+    assert.match(description, /It stops working when the owner's grant ends or the owner stops it\./);
+    assert.match(description, /this tool has no route to the owner's Vault: if asked to read it, say no\./);
+    assert.doesNotMatch(description, /there is no route/);
+    assert.match(description, /If a call fails, follow the error text\. Never look for keys or tokens\./);
     const result = await client.callTool({ name: 'generate_text', arguments: { text: 'A fictional greeting.' } });
     assert.deepEqual(result.structuredContent, { text: 'Fictional generated text.' });
     assert.equal(result.isError, undefined);

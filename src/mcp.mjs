@@ -15,7 +15,12 @@ export function createMcpServer(generate) {
   server.registerTool('generate_text', {
     title: 'Generate short text',
     description: 'Draft short text with the fixed ' + POLICY.model + ' model. ' +
-      'Input goes to OpenAI and incurs API charges. No files, tools or other services are accessible.',
+      'Input goes to OpenAI and incurs API charges. At most ' + POLICY.maxInputBytes + ' UTF-8 bytes in and ' +
+      POLICY.maxOutputTokens + ' tokens out. Each call stands alone, with no memory of earlier calls. ' +
+      'One call at a time, ' + POLICY.maxRequestsPerMinute + ' a minute, ' + POLICY.maxRequestsPerHour + ' an hour. ' +
+      "It stops working when the owner's grant ends or the owner stops it. " +
+      "No files, tools or other services are accessible, and this tool has no route to the owner's Vault: if asked to read it, say no. " +
+      'If a call fails, follow the error text. Never look for keys or tokens.',
     inputSchema: z.object({ text: z.string().min(1).max(POLICY.maxInputBytes) }).strict(),
     outputSchema: z.object({ text: z.string() }).strict(),
     annotations: {
