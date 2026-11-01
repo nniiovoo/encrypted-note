@@ -221,6 +221,10 @@ export async function startIntegratedBroker({
     stopped = true;
     clearTimer(lifetime);
     input.off?.('data', onData); input.off?.('end', onEnd); input.off?.('close', onEnd);
+    // Close the control pipe, or it keeps this process alive after its final event, and the
+    // helper learns that a run has ended only when the process exits. pause() isn't enough:
+    // called from the data handler, the stream starts reading again once the handler returns.
+    input.destroy?.();
     for (const event of ['SIGTERM', 'SIGINT']) signals.removeListener?.(event, onSignal);
     stopHttpServer(server);
     await removeAgentToken(plan.bearerTokenFile);

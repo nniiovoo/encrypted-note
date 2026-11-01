@@ -3,14 +3,18 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import net from 'node:net';
 import { PassThrough } from 'node:stream';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
+import { createInterface } from 'node:readline';
 import { promisify } from 'node:util';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
-import { POLICY } from '../src/generate.mjs';
+import { CompanionError, createGenerator, POLICY } from '../src/generate.mjs';
+import { startHttpServer, stopHttpServer } from '../src/http.mjs';
 import { MAX_GRANT_MS } from '../isolation/common.mjs';
+import { connectLocalBroker, tokenBridge } from '../isolation/agent-bridge.mjs';
 import {
   startIntegratedBroker, checkReadiness, encodeEvent, parseControlLine, dataPaths,
   checkHandoffDirectory, assertAgentNotAdmin, ERROR_CODES, MAX_CONTROL_LINE_BYTES,
@@ -18,6 +22,7 @@ import {
 
 const run = promisify(execFile);
 const ENTRY = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'isolation', 'integrated-broker.mjs');
+const BRIDGE = path.join(path.dirname(ENTRY), 'agent-bridge.mjs');
 const KEY = 'FAKE_OPENAI_AGENT_KEY_FOR_TESTS_ONLY';
 const TOKEN = 'FAKE_DELEGATED_TOKEN_FOR_TESTS_ONLY_0123456789';
 const MARKERS = [KEY, TOKEN, 'FAKE_PROVIDER_PRIVATE_ERROR', 'Bearer '];
@@ -175,6 +180,230 @@ test('expiry at the broker denies direct calls, reaches no provider and stops at
   } finally { await running?.broker.stop('owner'); await fx.cleanup(); }
 });
 
+// A real process on a real stdin pipe, doing what the entry point does: wait for done, then return.
+// The parent never closes that pipe, as the helper doesn't until the process has ended.
+function brokerProcess(fx, { expireDuringCall = false } = {}) {
+  const source = `
+    import fs from 'node:fs/promises';
+    import { startIntegratedBroker } from ${JSON.stringify(pathToFileURL(ENTRY).href)};
+    let expire = () => {};
+    const { done, server } = await startIntegratedBroker({
+      home: ${JSON.stringify(fx.home)}, uid: ${uid}, port: 0, createToken: () => ${JSON.stringify(TOKEN)},
+      io: { stat: fs.lstat, aclCheck: async () => {}, addReadAcl: async () => {},
+        verifyCode: async () => {}, assertAgentNotAdmin: async () => {} },
+      // Never answers, so this call is still in flight when the broker stops.
+      transport: () => { expire(); return new Promise(() => {}); },
+      ${expireDuringCall ? 'setTimer: callback => { expire = callback; return 0; },' : ''}
+    });
+    fetch('http://127.0.0.1:' + server.address().port + '/mcp', { method: 'POST',
+      headers: { authorization: 'Bearer ${TOKEN}', 'content-type': 'application/json',
+        accept: 'application/json, text/event-stream' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call',
+        params: { name: 'generate_text', arguments: { text: 'Fiction.' } } }) }).catch(() => {});
+    await done;
+    process.exitCode = 0;
+  `;
+  return observed(spawn(process.execPath, ['--input-type=module', '-e', source], { stdio: ['pipe', 'pipe', 'pipe'] }));
+}
+function observed(child) {
+  const output = { stdout: '', stderr: '' };
+  child.stderr.on('data', chunk => { output.stderr += chunk; });
+  // 'close' comes after the process has ended and its output has been read, and doesn't wait for stdin.
+  const closed = new Promise(resolve => child.once('close', (code, signal) => resolve({ code, signal })));
+  const ready = new Promise((resolve, reject) => {
+    child.stdout.on('data', chunk => {
+      output.stdout += chunk;
+      if (output.stdout.includes('"ready"')) resolve();
+    });
+    void closed.then(() => reject(new Error('The broker process ended before ready.')));
+  });
+  return { child, output, ready, closed };
+}
+test('the broker process exits after its final event while the control pipe stays open', { timeout: 300_000 }, async () => {
+  await Promise.all([
+    ['expired', { expireDuringCall: true }, () => {}],
+    ['owner', {}, child => child.stdin.write('{"v":1,"op":"stop"}\n')],
+    ['owner', {}, child => child.kill('SIGTERM')],
+    ['error', {}, child => child.stdin.write('{"v":1,"op":"restart"}\n')],
+  ].map(async ([reason, options, act]) => {
+    const fx = await fixture();
+    const { child, output, ready, closed } = brokerProcess(fx, options);
+    let timer;
+    try {
+      await ready;
+      act(child);
+      const ended = await Promise.race([closed, new Promise(resolve => {
+        timer = setTimeout(() => resolve('still running'), 30_000);
+      })]);
+      assert.deepEqual(ended, { code: 0, signal: null }, reason);
+      assert.deepEqual(parsed(output.stdout.trimEnd().split('\n')).at(-1), { v: 1, event: 'stopped', reason });
+      assert.equal(output.stderr, '');
+      assert.ok(noMarkers(output.stdout));
+      await assert.rejects(fs.stat(fx.plan.bearerTokenFile), { code: 'ENOENT' });
+    } finally {
+      clearTimeout(timer);
+      child.kill('SIGKILL');
+      await closed;
+      await fx.cleanup();
+    }
+  }));
+});
+
+// The real file with its real checks: fictional plan and key, real ACLs, the reviewed port and a
+// stdin pipe that is never closed. dsmemberutil needs an account that exists, so the plan names
+// `nobody`, which is not an administrator. The one seam is --import, passed only here: it shortens
+// the one timer set for over two minutes, the grant's lifetime. The broker itself has no such switch.
+const SHORT_GRANT_MS = 5000;
+const SHORTEN_GRANT_TIMER = 'data:text/javascript,' + encodeURIComponent(`
+  const realSetTimeout = globalThis.setTimeout;
+  globalThis.setTimeout = (callback, delay, ...rest) =>
+    realSetTimeout(callback, delay > 120000 ? ${SHORT_GRANT_MS} : delay, ...rest);
+`);
+test('the real entry point exits by itself and removes the token when its grant expires', {
+  skip: process.platform !== 'darwin' && 'Needs the Mac account and ACL tools.', timeout: 300_000,
+}, async t => {
+  const fx = await fixture({ planChanges: { agentShortName: 'nobody' } });
+  await run('/bin/chmod', ['+a', 'user:nobody allow search', fx.handoff]);
+  const { child, output, ready, closed } = observed(spawn(process.execPath, ['--import', SHORTEN_GRANT_TIMER, ENTRY], {
+    env: { HOME: fx.home, PATH: '/usr/bin:/bin' }, stdio: ['pipe', 'pipe', 'pipe'],
+  }));
+  let timer;
+  try {
+    try { await ready; }
+    catch {
+      const { code } = JSON.parse(output.stdout);
+      // Not a broker fault: the port is in use here, or this checkout or Node isn't protected.
+      if (['port_unavailable', 'code_unprotected'].includes(code)) { t.skip('The real checks refused: ' + code); return; }
+      assert.fail('The real entry point refused: ' + code);
+    }
+    const token = (await fs.readFile(fx.plan.bearerTokenFile, 'utf8')).trim();
+    // The bridge's own route to the fixed port. Listing makes no provider call; nothing here calls the tool.
+    const client = await connectLocalBroker(token);
+    try { assert.deepEqual((await client.listTools()).tools.map(tool => tool.name), ['generate_text']); }
+    finally { await client.close(); }
+    const ended = await Promise.race([closed, new Promise(resolve => {
+      timer = setTimeout(() => resolve('still running'), 30_000);
+    })]);
+    assert.deepEqual(ended, { code: 0, signal: null });
+    assert.equal(child.stdin.writableEnded, false);
+    const events = parsed(output.stdout.trimEnd().split('\n'));
+    assert.deepEqual(events.map(event => event.event), ['ready', 'stopped']);
+    assert.deepEqual(events[1], { v: 1, event: 'stopped', reason: 'expired' });
+    assert.equal(output.stderr, '');
+    assert.equal(output.stdout.includes(token), false);
+    assert.ok(noMarkers(output.stdout));
+    await assert.rejects(fs.stat(fx.plan.bearerTokenFile), { code: 'ENOENT' });
+    // The agent's next call: with the token gone, the bridge connects to nothing.
+    await assert.rejects(tokenBridge(fx.plan.bearerTokenFile, uid).generate({ text: 'Fiction.' }), { code: 'helper_off' });
+  } finally {
+    clearTimeout(timer);
+    child.kill('SIGKILL');
+    await closed;
+    await fx.cleanup();
+  }
+});
+
+// The real bridge file over real stdio and the fixed port, with the real HTTP server and a fictional
+// provider as the broker. Only its account check is stood in for, through --import: this Mac's account
+// is an administrator, so a run in a real Standard account stays a hands-on check.
+const STAND_IN_AGENT_ACCOUNT = 'data:text/javascript,' + encodeURIComponent(`
+  import childProcess from 'node:child_process';
+  import { syncBuiltinESMExports } from 'node:module';
+  import { promisify } from 'node:util';
+  const execFile = () => { throw new Error('Not used by the bridge.'); };
+  execFile[promisify.custom] = async (file, args) => {
+    if (file !== '/usr/bin/id') throw Object.assign(new Error('No sudo.'), { code: 1 });
+    return { stdout: args[0] === '-Gn' ? 'staff\\n' : 'enote-agent\\n', stderr: '' };
+  };
+  childProcess.execFile = execFile;
+  syncBuiltinESMExports();
+  process.getuid = () => ${uid + 1};
+`);
+const portFree = port => new Promise(resolve => {
+  const probe = net.createServer();
+  probe.once('error', () => resolve(false));
+  probe.listen(port, '127.0.0.1', () => probe.close(() => resolve(true)));
+});
+test('the real bridge file serves the tool with the helper off, follows each Start and leaves with its client', { timeout: 120_000 }, async t => {
+  const fx = await fixture();
+  // Checked first, so no fictional token is ever offered to whatever already holds the port.
+  if (!await portFree(fx.plan.brokerPort)) {
+    await fx.cleanup();
+    t.skip('Port 8789 is in use here.');
+    return;
+  }
+  const secondToken = 'FAKE_SECOND_DELEGATED_TOKEN_FOR_TESTS_ONLY_0123';
+  const helperOff = new CompanionError('helper_off').message;
+  const startBroker = async token => {
+    await fs.writeFile(fx.plan.bearerTokenFile, token + '\n', { mode: 0o600 });
+    return startHttpServer({ generate: createGenerator({ apiKey: KEY, transport: provider([]) }),
+      bearerToken: token, port: fx.plan.brokerPort });
+  };
+  const stopBroker = server => new Promise(resolve => { server.once('close', resolve); stopHttpServer(server); });
+  const child = spawn(process.execPath, ['--import', STAND_IN_AGENT_ACCOUNT, BRIDGE, fx.paths.plan],
+    { env: { PATH: '/usr/bin:/bin' }, stdio: ['pipe', 'pipe', 'pipe'] });
+  const output = { stdout: '', stderr: '' };
+  child.stderr.on('data', chunk => { output.stderr += chunk; });
+  const closed = new Promise(resolve => child.once('close', (code, signal) => resolve({ code, signal })));
+  const waiting = new Map();
+  createInterface({ input: child.stdout }).on('line', line => {
+    output.stdout += line + '\n';
+    const { id, result } = JSON.parse(line);
+    waiting.get(id)?.(result);
+  });
+  const send = message => child.stdin.write(JSON.stringify({ jsonrpc: '2.0', ...message }) + '\n');
+  let nextId = 0;
+  const request = (method, params) => new Promise((resolve, reject) => {
+    const id = ++nextId;
+    waiting.set(id, resolve);
+    void closed.then(() => reject(new Error('The bridge ended early.')));
+    send({ id, method, params });
+  });
+  const call = async () => {
+    const result = await request('tools/call', { name: 'generate_text', arguments: { text: 'Fiction.' } });
+    return result.isError ? result.content[0].text : result.structuredContent.text;
+  };
+  let server;
+  let timer;
+  try {
+    await request('initialize', { protocolVersion: '2025-06-18', capabilities: {},
+      clientInfo: { name: 'fictional-agent', version: '1.0.0' } });
+    send({ method: 'notifications/initialized' });
+    // Helper off, no token: the tool is listed and a call says what to do.
+    assert.deepEqual((await request('tools/list', {})).tools.map(tool => tool.name), ['generate_text']);
+    assert.equal(await call(), helperOff);
+    // Token written but no listener.
+    await fs.writeFile(fx.plan.bearerTokenFile, TOKEN + '\n', { mode: 0o600 });
+    assert.equal(await call(), helperOff);
+    await fs.rm(fx.plan.bearerTokenFile);
+    server = await startBroker(TOKEN);
+    assert.equal(await call(), 'Fictional output.');
+    // Stop removes the token; the next Start has a new one. Same process, no restart.
+    await fs.rm(fx.plan.bearerTokenFile);
+    await stopBroker(server);
+    assert.equal(await call(), helperOff);
+    server = await startBroker(secondToken);
+    assert.equal(await call(), 'Fictional output.');
+    // Still connected when the agent closes its end, the normal way out.
+    child.stdin.end();
+    const ended = await Promise.race([closed, new Promise(resolve => {
+      timer = setTimeout(() => resolve('still running'), 30_000);
+    })]);
+    assert.deepEqual(ended, { code: 0, signal: null });
+    assert.equal(output.stderr, '');
+    for (const secret of [KEY, TOKEN, secondToken, 'Bearer ']) assert.equal(output.stdout.includes(secret), false);
+  } catch (error) {
+    if (error.code !== 'EADDRINUSE') throw error;
+    t.skip('Port 8789 was taken during this test.');
+  } finally {
+    clearTimeout(timer);
+    child.kill('SIGKILL');
+    await closed;
+    if (server?.listening) await stopBroker(server);
+    await fx.cleanup();
+  }
+});
+
 test('every refusal path returns one fixed code and leaves no token behind', async () => {
   const cases = [
     ['plan_missing', async fx => fs.unlink(fx.paths.plan)],
@@ -211,7 +440,7 @@ test('every refusal path returns one fixed code and leaves no token behind', asy
 
 test('a busy reviewed port fails closed and removes the handed-off token', async () => {
   const fx = await fixture();
-  const blocker = (await import('node:net')).createServer();
+  const blocker = net.createServer();
   await new Promise(resolve => blocker.listen(0, '127.0.0.1', resolve));
   try {
     const lines = [];

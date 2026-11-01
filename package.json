@@ -9,8 +9,8 @@
   "scripts": {
     "start": "node src/stdio.mjs",
     "start:http": "node src/http.mjs",
-    "test": "node --test",
-    "check": "node --check src/stdio.mjs && node --check src/http.mjs && node --test"
+    "test": "node --test --test-concurrency=1",
+    "check": "node --check src/stdio.mjs && node --check src/http.mjs && node --test --test-concurrency=1"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.32.1",

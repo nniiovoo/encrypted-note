@@ -2,11 +2,13 @@
 
 A separate, optional local MCP tool for short text generation. This directory is outside encrypted-note. It neither imports that app nor opens its Vault, Notes, metadata, backups, recovery material, wallet keys or IPC. It is a runnable development implementation with fictional-provider tests; no live key, account configuration, deployment or ChatGPT connection has been performed.
 
-The default transport is stdio: importing the modules or running tests starts no production listener. Optional HTTP starts only with the explicit HTTP entry point and binds 127.0.0.1:8789. There is no hosted account system, public listener, telemetry, browser launcher or automatic tunnel setup.
+The default transport is stdio: importing the modules starts no listener, and tests listen only on loopback with fictional data. Optional HTTP starts only with the explicit HTTP entry point and binds 127.0.0.1:8789. There is no hosted account system, public listener, telemetry, browser launcher or automatic tunnel setup.
 
 ## Use from your agent or code without a provider key
 
 The selected deployment is: agent/code → stdio bridge → local owner broker → OpenAI → text result. The bridge receives a separate limited local token; only the owner broker reads the new Agent Key and adds provider authentication. Your code calls `generate_text({ text })` through MCP. It needs no OpenAI API key or secret-bearing client configuration.
+
+The bridge lists the tool even while the broker is off and reads the token again on each call, so a new Start needs no restart of the agent's MCP client. With no token or no listener, a call returns one fixed error telling the agent to ask the owner.
 
 [The keyless code example](docs/keyless-code.md) shows the client call and its prerequisites. This is one restricted operation, not a drop-in OpenAI SDK endpoint. The Mac identity boundary, provider controls and live connection remain unverified. The planned credential file format is plaintext with owner-only permissions, not encrypted Vault storage; no real credential file has been provisioned. OpenAI receives the key over HTTPS for authentication. Owner Vault and wallet keys are never part of this route.
 
@@ -39,11 +41,13 @@ Use Node 22 or later:
     npm ci --ignore-scripts
     npm test
 
-Tests inject a fictional provider in code and use obvious fake markers. They include the official MCP client over an actual stdio subprocess and optional loopback Streamable HTTP. No test calls the OpenAI API. There is no runtime provider-URL override or fake-provider switch in the production entry points.
+Tests inject a fictional provider in code and use obvious fake markers. They include the official MCP client over an actual stdio subprocess and optional loopback Streamable HTTP. No test calls the OpenAI API. Two tests run real entry points as processes on the reviewed port 8789 with a fictional plan and key, and report as skipped if that port is in use or, for the broker, if this checkout or Node isn't protected: `isolation/agent-bridge.mjs`, and on macOS `isolation/integrated-broker.mjs`, which only lists the tool. In those tests `node --import` stands in for the bridge's account check and shortens the broker's grant timer; neither entry point has a test switch of its own. `npm test` runs the test files one at a time, because those two tests share the port and the broker's real checks start thousands of short processes that can push other tests past their time limits. There is no runtime provider-URL override or fake-provider switch in the production entry points.
 
 Dependencies are exact-pinned: @modelcontextprotocol/sdk 1.32.1 supplies official MCP server/client protocol and transports; zod 4.6.7 supplies the SDK input/output schemas. package-lock.json pins their transitive resolution. No OpenAI SDK or separate HTTP framework is added directly; production inference uses Node HTTPS. The [official OpenAI MCP guide](https://developers.openai.com/plugins/build/mcp-server) recommends the official MCP SDKs.
 
 ## Development runtime entry points
+
+`npm start` (`src/stdio.mjs`) and `npm run start:http` (`src/http.mjs`) are for development only. They take the key from the environment, check no account or code protection, and have no owner grant, so only stopping the process ends them. The protected routes import the same modules but not these entry points: the owner launcher and the integrated helper add the grant and the protection checks, and the agent bridge holds no key.
 
 A live runtime needs a NEW, separately restricted Agent Key. It must never use an owner key or a value stored in the owner Vault.
 
@@ -100,7 +104,7 @@ The integrated entry point runs the same fixed broker with:
 - fixed data paths inside the helper's own container (`$HOME/Library/Application Support/encrypted-note-companion/plan.json` and `credential.env`), never chosen by a caller;
 - one new grant of at most one hour for each owner Start, enforced before the credential read, before listening and before every admission, including direct loopback calls;
 - a fresh delegated agent token for each Start, written owner-only (0600, plus the single agent read ACL) into the owner-prepared handoff folder, and removed on every stop;
-- a bounded owner-control protocol on stdin/stdout, separate from the agent MCP channel: one `{"v":1,"op":"stop"}` command in; `ready`, `stopped`, `error` and `check` events with fixed codes out. Control EOF, a malformed command, a signal or the grant deadline stops the broker. Nothing from the plan, credential, token, provider or MCP traffic is printed.
+- a bounded owner-control protocol on stdin/stdout, separate from the agent MCP channel: one `{"v":1,"op":"stop"}` command in; `ready`, `stopped`, `error` and `check` events with fixed codes out. Control EOF, a malformed command, a signal or the grant deadline stops the broker, and the process then exits without waiting for the helper to close the pipe. Nothing from the plan, credential, token, provider or MCP traffic is printed.
 
 Its `--check` mode reports readiness booleans and never reads the credential's contents. Code and runtime ancestors may be admin-group-writable (an app in /Applications) only after the agent account is confirmed not to be an administrator.
 

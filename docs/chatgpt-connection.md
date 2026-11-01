@@ -19,7 +19,7 @@ ChatGPT runs in OpenAI's cloud and cannot reach this computer's loopback port or
 
    No provider key, token value or credential path belongs in this configuration.
 2. In ChatGPT, add the tunnel as a custom MCP server (Plugins → **+** → Add custom MCP server), following [connect ChatGPT](https://developers.openai.com/plugins/deploy/connect-chatgpt).
-3. Confirm discovery lists exactly one tool, `generate_text`.
+3. Confirm discovery lists exactly one tool, `generate_text`. The bridge lists it even while the helper is off.
 
 ## Verify before relying on it
 
@@ -30,8 +30,9 @@ Record each observation privately (never real keys, tokens, account names or pat
 | End-to-end call | A fictional text request returns bounded text. |
 | Extra arguments | Requests adding a model, URL, key or other field are refused by the server. |
 | A prompt asking to reveal a key | Is just text generation; no key or token appears anywhere. |
-| Owner Stop or Vault lock (integrated helper) | The next call fails; the bridge cannot reach a broker. |
-| Grant expiry | Calls after the grant's end are refused with the fixed grant-ended error. |
+| Owner Stop or Vault lock (integrated helper) | The next call fails with a fixed error telling the agent to ask the owner to choose Start. It doesn't say why the helper stopped. |
+| New Start | The next call works through the same bridge, with no restart of the tunnel client. |
+| Grant expiry | Calls fail with a fixed error telling the agent to ask the owner to choose Start. |
 | Revoked Agent Key | After revoking the key at OpenAI, a call fails without leaking provider details. |
 | Disconnection | Removing the custom server in ChatGPT stops further calls. |
 
