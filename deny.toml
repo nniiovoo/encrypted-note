@@ -1,5 +1,7 @@
-# cargo-deny policy (ADR-0001, ADR-0003): known-vulnerable crates fail the check, and anything
-# that can talk to the network is banned outright. The app must never connect to the internet.
+# cargo-deny policy (ADR-0001, ADR-0003): known-vulnerable crates fail the check, and named
+# networking crates are banned. The Vault core must never connect to the internet. This list
+# can't see std::net or libc sockets; scripts/check-network-source.mjs looks for those in this
+# repo's own sources, not in dependencies or build.rs.
 
 [graph]
 all-features = false
@@ -45,6 +47,8 @@ deny = [
     { crate = "openssl" },
     { crate = "tokio-tungstenite" },
     { crate = "tungstenite" },
+    { crate = "mio" },
+    { crate = "socket2" },
     # Tauri plugins that reach outside the app
     { crate = "tauri-plugin-http" },
     { crate = "tauri-plugin-updater" },
