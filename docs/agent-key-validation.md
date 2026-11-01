@@ -89,7 +89,7 @@ The owner approved bundling the companion as encrypted-note's optional **Agent C
 
 The integration therefore uses an XPC service. The official Node.js v24.22.1 binary is signed with `get-task-allow`, `allow-dyld-environment-variables` and `disable-library-validation`; the bundled copy is re-signed with only sandbox inheritance and `allow-jit`, and it runs.
 
-The table records the 2026-10-26 run. A later run on 2026-11-01, at companion pin `1c983a7`: the companion's 63 tests pass, and `scripts/verify-companion.sh` passes 42 of 42, with new checks for the Time Machine exclusion, a refused key file, Stop reaching the broker after the helper moves, and the code check finishing with an account that exists and isn't an admin.
+The table records the 2026-10-26 run. A later run on 2026-11-01, at companion pin `1c983a7`: the companion's 63 tests pass, and `scripts/verify-companion.sh` passes 42 of 42, with new checks for the Time Machine exclusion, a refused key file, Stop reaching the broker after the helper moves, and the code check finishing with an account that exists and isn't an admin. The same day, after the source moved into `companion/`, a helper packaged from a fresh clone at `357e240` passed the same 42 checks, and `scripts/check.sh` passed there with the companion's 63 tests. The source move changed none of the helper's runtime code.
 
 | Area | Result |
 | --- | --- |
