@@ -32,14 +32,16 @@ for step in CommandLine.arguments.dropFirst() {
         call("install", 4, plan, credential)
         close(plan)
         close(credential)
-    case "install-fixtures":
+    case "install-fixtures", "install-wrong-key":
         // FICTIONAL owner files inside this stand-in's own container (a sandboxed process can't
         // open files elsewhere unless the owner picks them in an OS panel, as the real app does).
+        // install-wrong-key picks a 100-byte file that isn't an Agent Key as the second file.
         let dir = NSHomeDirectory() + "/fixtures"
         try! FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
         let plan = "{\"version\":2,\"ownerUid\":\(getuid()),\"agentUid\":\(getuid() + 1000),\"agentShortName\":\"enote-agent-fake-verify\",\"credentialExpirySeconds\":3600,\"projectHardSpendLimitCents\":100,\"projectHardSpendCurrency\":\"USD\",\"projectHardSpendInterval\":\"month\",\"brokerHost\":\"127.0.0.1\",\"brokerPort\":8789,\"providerModel\":\"gpt-6-luna\",\"providerScope\":\"api.responses.write\",\"bearerTokenFile\":\"/Users/Shared/encrypted-note-companion/agent-token\",\"grantExpiresAt\":null}"
         try! plan.write(toFile: dir + "/plan.json", atomically: true, encoding: .utf8)
-        try! "OPENAI_AGENT_API_KEY=FAKE_OPENAI_AGENT_KEY_FOR_VERIFY_ONLY\n".write(toFile: dir + "/credential.env", atomically: true, encoding: .utf8)
+        let credential = parts[0] == "install-wrong-key" ? String(repeating: "FAKE ", count: 20) : "OPENAI_AGENT_API_KEY=FAKE_OPENAI_AGENT_KEY_FOR_VERIFY_ONLY\n"
+        try! credential.write(toFile: dir + "/credential.env", atomically: true, encoding: .utf8)
         let planFd = open(dir + "/plan.json", O_RDONLY)
         let credentialFd = open(dir + "/credential.env", O_RDONLY)
         call("install", 4, planFd, credentialFd)

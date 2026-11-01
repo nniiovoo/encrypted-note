@@ -88,7 +88,9 @@ func enoteCompanionCall(_ operation: Int32, _ planFd: Int32, _ credentialFd: Int
     _ state: UnsafeMutablePointer<Int32>?, _ flags: UnsafeMutablePointer<UInt32>?,
     _ expires: UnsafeMutablePointer<Int64>?, _ error: UnsafeMutablePointer<Int32>?) -> Int32 {
     guard let state, let flags, let expires, let error, timeoutMs > 0, timeoutMs <= 60_000 else { return 4 }
-    guard Connection.shared.bundled else { return 1 }
+    // Stop still goes out when the helper has gone from the bundle: an open connection reaches a
+    // broker that is still running.
+    guard Connection.shared.bundled || operation == 3 else { return 1 }
     let reply = Reply()
     guard let proxy = Connection.shared.proxy(onError: { reply.fail() }) else { return 2 }
     let receive: (Int32, UInt32, Int64, Int32) -> Void = { reply.set($0, $1, $2, $3) }

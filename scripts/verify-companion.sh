@@ -8,8 +8,9 @@
 #   * the real pinned broker: refusal paths inside the actual sandbox;
 #   * an isolation probe: the helper cannot read or list the stand-in's container or a FAKE
 #     Vault canary in it, and can listen on loopback;
-#   * fictional supervision payloads: stop, crash, expiry, ignored stop, protocol garbage with
-#     fake key/token markers, oversized output, and both orphan directions.
+#   * fictional supervision payloads: stop, stop with the helper moved out of the app, crash,
+#     expiry, ignored stop, protocol garbage with fake key/token markers, oversized output, and
+#     both orphan directions.
 # Use a test identifier (e.g. com.encryptednote.companiontest) so nothing touches a real Vault.
 # Payload-swapped helpers are re-signed copies with the SAME helper binary and entitlements.
 set -euo pipefail
@@ -18,7 +19,7 @@ ROOT=$(pwd)
 HELPER=${1:?"usage: scripts/verify-companion.sh HELPER.xpc [WORK_DIR]"}
 WORK=${2:-$ROOT/target/companion-verify}
 BUILT=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$HELPER/Contents/Info.plist")
-[[ "${BUILT%.companion}" != com.encryptednote.app ]] || { echo "Use a test identifier; never verify against the real app's container." >&2; exit 1; }
+[[ "${BUILT%.companion}" != com.encryptednote.app ]] || { echo "Use a test identifier; never verify against the real app's container. Build one with: scripts/package-companion.sh --identifier com.encryptednote.companiontest" >&2; exit 1; }
 # A fresh identifier per run: new, empty, fictional containers every time. (Old test containers
 # stay in ~/Library/Containers; remove them by hand if wanted.)
 APP_ID="${BUILT%.companion}.v$(date +%s)"
@@ -61,7 +62,9 @@ field() { sed -n "s/^$1 .*$2=\([^ ]*\).*/\1/p" <<<"$3" | head -1; }
 helper_pids() { pgrep -f "$SERVICE.xpc/Contents/MacOS/companion-helper" || true; }
 node_pids() { pgrep -f "$SERVICE.xpc/Contents/MacOS/node" || true; }
 settle() { for _ in $(seq 1 20); do [[ -z "$(helper_pids)$(node_pids)" ]] && return 0; sleep 0.5; done; return 1; }
-wait_for_broker() { for _ in $(seq 1 60); do [[ -n "$(node_pids)" ]] && return 0; sleep 0.5; done; return 1; }
+# The first launch after signing can take well over 30 s on a busy Mac or a slow drive: macOS checks
+# the whole bundle before it runs. These two waits give it 2 minutes.
+wait_for_broker() { for _ in $(seq 1 240); do [[ -n "$(node_pids)" ]] && return 0; sleep 0.5; done; return 1; }
 expect() { # name, step, key, value, output
   local got; got=$(field "$2" "$3" "$5")
   [[ "$got" == "$4" ]] && pass "$1" || fail "$1 (expected $2 $3=$4, got ${got:-nothing})"
@@ -74,6 +77,13 @@ expect "real: runtime verified, nothing else ready" status flags 1 "$out"
 expect "real: start without a plan is refused (plan_missing)" start error 1 "$out"
 settle && pass "real: no broker left running" || fail "real: processes left running"
 
+# ---- 1b. a file that isn't an Agent Key: refused before anything is written
+assemble real
+out=$(harness install-wrong-key status)
+expect "real: a file that isn't an Agent Key is refused (install_invalid)" install error 27 "$out"
+expect "real: nothing kept from a refused setup" status flags 1 "$out"
+settle && pass "real: nothing left running after a refused setup" || fail "real: processes left running after a refused setup"
+
 # ---- 2. real broker with a fictional plan and FAKE key, no agent account on this Mac
 assemble real
 out=$(harness install-fixtures status start)
@@ -82,6 +92,8 @@ expect "real: plan and credential ready; handoff/agent/code not" status flags 7 
 expect "real: start refused until the agent account is verified (agent_unverified)" start error 5 "$out"
 grep -q FAKE_OPENAI_AGENT_KEY_FOR_VERIFY_ONLY <<<"$out" && fail "real: key marker in output" || pass "real: no key marker in output"
 settle && pass "real: no broker left running" || fail "real: processes left running"
+tmutil isexcluded "$HOME/Library/Containers/$SERVICE/Data/Library/Application Support/encrypted-note-companion" | grep -q '\[Excluded\]' \
+  && pass "real: Agent Key folder asks to stay out of Time Machine" || fail "real: Agent Key folder is not excluded from Time Machine"
 
 # ---- 3. isolation probe against a FAKE Vault canary in the stand-in's container
 assemble probe
@@ -98,6 +110,18 @@ expect "supervision: grant expiry reported" start expires set "$out"
 expect "supervision: owner stop" stop state 1 "$out"
 settle && pass "supervision: nothing left after stop" || fail "supervision: processes left after stop"
 
+# The helper moved out of the app while a broker runs: Stop still reaches the broker.
+assemble fake:normal
+"$APP/Contents/MacOS/Harness" start sleep:4 stop > "$WORK/moved.log" 2>&1 &
+holder=$!
+for _ in $(seq 1 240); do grep -q '^start ' "$WORK/moved.log" && break; sleep 0.5; done
+grep -q '^start rc=0' "$WORK/moved.log" && pass "helper moved away: broker running before the move" || fail "helper moved away: broker did not start before the move"
+mv "$APP/Contents/XPCServices/$SERVICE.xpc" "$WORK/moved.xpc"
+wait "$holder" || true
+expect "helper moved away: stop still reaches the broker" stop state 1 "$(cat "$WORK/moved.log")"
+settle && pass "helper moved away: nothing left after stop" || fail "helper moved away: processes left after stop"
+/bin/rm -rf "$WORK/moved.xpc"
+
 assemble fake:crash
 out=$(harness start sleep:3 status sleep:2)
 expect "crash: reported as unexpected_exit" status error 24 "$out"
@@ -107,6 +131,7 @@ settle || true
 assemble fake:expire
 out=$(harness start sleep:4 status)
 expect "expiry: reported as expired" status state 5 "$out"
+expect "expiry: no error shown" status error 0 "$out"
 settle && pass "expiry: nothing left" || fail "expiry: processes left"
 
 assemble fake:ignore-stop

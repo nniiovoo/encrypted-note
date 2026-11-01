@@ -250,7 +250,9 @@ impl Companion {
 
     fn run(&self, op: Op, files: Option<(&File, &File)>, timeout_ms: i32) -> CompanionView {
         let mut inner = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
-        if !self.transport.bundled() {
+        // Stop still goes out when the helper has gone from the bundle (the app was moved or
+        // deleted while running): an open connection reaches a broker that is still running.
+        if !self.transport.bundled() && op != Op::Stop {
             return self.view(&mut inner, Err(TransportError::Unavailable));
         }
         match op {
@@ -297,13 +299,23 @@ impl Companion {
                         TransportError::Invalid => "invalid_reply",
                         _ => "helper_unreachable",
                     });
-                    // The broker's state is unknown: keep lifecycle stops armed while the
-                    // owner expected it to run.
-                    self.active.store(inner.owner_started, Ordering::SeqCst);
-                } else {
-                    inner.owner_started = false;
-                    self.active.store(false, Ordering::SeqCst);
+                } else if inner.owner_started {
+                    // The app was moved or deleted under a running broker: keep showing it and
+                    // its Stop, rather than saying this build never had a helper.
+                    view.helper_bundled = true;
+                    view.state = "running";
+                    if let Some(raw) = inner.last {
+                        view.expires_at = self.shown_end(raw.expires);
+                        view.local = readiness(raw.flags);
+                        // No helper to ask, so go by the clock. Stay armed for the next stop.
+                        if raw.expires > 0 && raw.expires <= (self.now)() {
+                            view.state = "expired";
+                        }
+                    }
                 }
+                // The broker's state is unknown: keep lifecycle stops armed while the owner
+                // expected it to run, even if the helper has since gone from the bundle.
+                self.active.store(inner.owner_started, Ordering::SeqCst);
                 return view;
             }
         };
@@ -324,7 +336,6 @@ impl Companion {
         }
         self.active.store(running, Ordering::SeqCst);
         inner.last = Some(raw);
-        let now = (self.now)();
         view.state = state;
         view.error = error_name(raw.error).or(if state == "stopped" {
             inner.noticed
@@ -334,14 +345,17 @@ impl Companion {
         if view.error == Some("helper_restarted") {
             view.state = "error";
         }
-        if matches!(state, "running" | "expired")
-            && raw.expires > now - 2 * MAX_GRANT_SECONDS
-            && raw.expires <= now + MAX_GRANT_SECONDS + 60
-        {
-            view.expires_at = Some(raw.expires);
+        if matches!(state, "running" | "expired") {
+            view.expires_at = self.shown_end(raw.expires);
         }
         view.local = readiness(raw.flags);
         view
+    }
+
+    fn shown_end(&self, expires: i64) -> Option<i64> {
+        let now = (self.now)();
+        (expires > now - 2 * MAX_GRANT_SECONDS && expires <= now + MAX_GRANT_SECONDS + 60)
+            .then_some(expires)
     }
 }
 
@@ -469,14 +483,14 @@ mod tests {
     struct Script {
         replies: Mutex<Vec<Result<Raw, TransportError>>>,
         calls: Mutex<Vec<Op>>,
-        bundled: bool,
+        bundled: AtomicBool,
     }
 
     struct Fake(Arc<Script>);
 
     impl Transport for Fake {
         fn bundled(&self) -> bool {
-            self.0.bundled
+            self.0.bundled.load(Ordering::SeqCst)
         }
         fn call(&self, op: Op, _: Option<(&File, &File)>, _: i32) -> Result<Raw, TransportError> {
             self.0.calls.lock().unwrap().push(op);
@@ -495,7 +509,7 @@ mod tests {
         let script = Arc::new(Script {
             replies: Mutex::new(replies),
             calls: Mutex::new(Vec::new()),
-            bundled: true,
+            bundled: AtomicBool::new(true),
         });
         (
             Companion::with_clock(Box::new(Fake(Arc::clone(&script))), || NOW),
@@ -528,6 +542,55 @@ mod tests {
         );
         assert!(script.calls.lock().unwrap().is_empty());
         assert!(!companion.active.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn a_helper_gone_from_the_bundle_still_gets_the_lifecycle_stop() {
+        let (companion, script) = companion(vec![raw(3, 0, NOW + 3600, 0), raw(1, 0, 0, 0)]);
+        companion.start();
+        // The app was moved or deleted while the broker runs.
+        script.bundled.store(false, Ordering::SeqCst);
+        let running = companion.status();
+        assert!(running.helper_bundled, "the owner must still see its Stop");
+        assert_eq!(running.state, "running");
+        assert_eq!(running.expires_at, Some(NOW + 3600));
+        assert!(companion.active.load(Ordering::SeqCst));
+        companion.stop_if_active();
+        assert!(!companion.active.load(Ordering::SeqCst));
+        assert_eq!(*script.calls.lock().unwrap(), vec![Op::Start, Op::Stop]);
+        // Stopped: later polls and locks make no call, and Start stays refused.
+        assert!(!companion.status().helper_bundled);
+        assert!(!companion.active.load(Ordering::SeqCst));
+        companion.stop_if_active();
+        assert!(!companion.start().helper_bundled);
+        assert_eq!(*script.calls.lock().unwrap(), vec![Op::Start, Op::Stop]);
+    }
+
+    #[test]
+    fn a_helper_gone_from_the_bundle_still_shows_the_grant_ending() {
+        static CLOCK: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(NOW);
+        let script = Arc::new(Script {
+            replies: Mutex::new(vec![raw(3, 0, NOW + 3600, 0), raw(1, 0, 0, 0)]),
+            calls: Mutex::new(Vec::new()),
+            bundled: AtomicBool::new(true),
+        });
+        let companion = Companion::with_clock(Box::new(Fake(Arc::clone(&script))), || {
+            CLOCK.load(Ordering::SeqCst)
+        });
+        companion.start();
+        script.bundled.store(false, Ordering::SeqCst);
+        assert_eq!(companion.status().state, "running");
+        CLOCK.store(NOW + 3600, Ordering::SeqCst);
+        let ended = companion.status();
+        assert_eq!(ended.state, "expired");
+        assert!(ended.helper_bundled);
+        CLOCK.store(NOW + 3 * 3600, Ordering::SeqCst);
+        assert_eq!(companion.status().state, "expired");
+        // The broker's state is still unknown, so the next lifecycle stop goes out.
+        assert!(companion.active.load(Ordering::SeqCst));
+        companion.stop_if_active();
+        assert!(!companion.active.load(Ordering::SeqCst));
+        assert_eq!(*script.calls.lock().unwrap(), vec![Op::Start, Op::Stop]);
     }
 
     #[test]
@@ -627,10 +690,15 @@ mod tests {
         );
         assert!(!companion.active.load(Ordering::SeqCst));
         assert_eq!(*script.calls.lock().unwrap(), vec![Op::Start, Op::Status]);
-        let (companion, _) = self::companion(vec![raw(3, 0, NOW + 3600, 0), raw(5, 0, NOW, 0)]);
+        let (companion, script) =
+            self::companion(vec![raw(3, 0, NOW + 3600, 0), raw(5, 63, NOW, 0)]);
         companion.start();
-        assert_eq!(companion.status().state, "expired");
+        let expired = companion.status();
+        assert_eq!((expired.state, expired.error), ("expired", None));
+        assert!(expired.local.ready);
         assert!(!companion.active.load(Ordering::SeqCst));
+        companion.stop_if_active(); // nothing running: no call
+        assert_eq!(*script.calls.lock().unwrap(), vec![Op::Start, Op::Status]);
     }
 
     #[test]

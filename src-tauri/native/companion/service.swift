@@ -244,8 +244,15 @@ final class Broker: NSObject, EnoteCompanionService {
         do {
             try FileManager.default.createDirectory(atPath: paths.data, withIntermediateDirectories: true,
                                                     attributes: [.posixPermissions: 0o700])
-            return chmod(paths.data, 0o700) == 0
+            guard chmod(paths.data, 0o700) == 0 else { return false }
         } catch { return false }
+        // Best effort: asks macOS to leave the Agent Key copy out of Time Machine. A failure here
+        // must not change readiness or block Start.
+        var folder = URL(fileURLWithPath: paths.data)
+        var values = URLResourceValues()
+        values.isExcludedFromBackup = true
+        try? folder.setResourceValues(values)
+        return true
     }
 
     /// Readiness from the broker's metadata-only check mode, plus the runtime check here.
@@ -463,8 +470,11 @@ final class Broker: NSObject, EnoteCompanionService {
             plan.withUnsafeMutableBytes { _ = memset_s($0.baseAddress, $0.count, 0, $0.count) }
             credential.withUnsafeMutableBytes { _ = memset_s($0.baseAddress, $0.count, 0, $0.count) }
         }
+        // A key file that doesn't start with the assignment is refused here. The broker's parser
+        // judges the rest at Start.
         guard !plan.isEmpty, plan.count <= maxPlanBytes,
-              credential.count >= minCredentialBytes, credential.count <= maxCredentialBytes else { return false }
+              credential.count >= minCredentialBytes, credential.count <= maxCredentialBytes,
+              credential.starts(with: Array("OPENAI_AGENT_API_KEY=".utf8)) else { return false }
         return replace(paths.data + "/plan.json", with: plan)
             && replace(paths.data + "/credential.env", with: credential)
     }
