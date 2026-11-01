@@ -29,7 +29,7 @@ Note's Hidden Fields, find its number in that list, then run again with --note <
 --reveal: nothing of the other Notes is printed.
 
 Options:
-  --recovery-key        Ask for the Recovery Key (from your Recovery Kit) instead.
+  --recovery-key        Ask for the Recovery Key (from your paper) instead.
   --note <number>       Print only the Note with this number in the list (--note=<number>
                         works too). A Note keeps its number for as long as the file stays
                         the same.
@@ -148,6 +148,13 @@ fn run() -> Result<(), Failure> {
     let (text, undecryptable) =
         report::render(&document, &selection, options.reveal, wallet.as_ref());
     print(&text)?;
+    if options.reveal {
+        let _ = writeln!(
+            io::stderr(),
+            "Close this terminal window when you've finished: until you do, what's printed \
+             above stays in its history, and your terminal may also save it."
+        );
+    }
     match undecryptable {
         0 => Ok(()),
         n => Err(Failure::Damaged(format!(
