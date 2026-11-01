@@ -46,6 +46,11 @@ jobs:
         run: cargo install cargo-deny --version 0.20.2 --locked
       - name: Install frontend dependencies
         run: npm ci --ignore-scripts
+      # The helper exists only on Mac, so check.sh runs the companion's tests only there.
+      - name: Install companion dependencies
+        if: runner.os == 'macOS'
+        working-directory: companion
+        run: npm ci --ignore-scripts
       # Automated checks do not establish physical native UI, capture or biometric acceptance.
       - name: Run unified checks
         run: bash scripts/check.sh
