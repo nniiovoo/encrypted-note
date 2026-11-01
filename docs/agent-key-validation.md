@@ -89,6 +89,8 @@ The owner approved bundling the companion as encrypted-note's optional **Agent C
 
 The integration therefore uses an XPC service. The official Node.js v24.22.1 binary is signed with `get-task-allow`, `allow-dyld-environment-variables` and `disable-library-validation`; the bundled copy is re-signed with only sandbox inheritance and `allow-jit`, and it runs.
 
+The table records the 2026-10-26 run. A later run on 2026-10-31, at companion pin `de90644`: the companion's 58 tests pass, and `scripts/verify-companion.sh` passes 38 of 38, with new checks for the Time Machine exclusion, a refused key file, and Stop reaching the broker after the helper moves.
+
 | Area | Result |
 | --- | --- |
 | Companion (separate repository) | 49 tests pass on Node 26.8.2 and on the pinned Node 24.22.1. They cover grant validity, expiry at the broker (including direct loopback calls without the bridge), monotonic time limits, the control protocol, the per-Start token handoff and every refusal code, and they check that no fictional key, token or provider-error marker reaches protocol output or tool results. |

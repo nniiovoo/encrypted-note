@@ -22,7 +22,7 @@ A personal app for storing secrets, encrypted and saved only on this computer.
 - App with a fictional Vault: `ENOTE_DEV_DATA_DIR="$(mktemp -d)" npm run tauri dev` (add `ENOTE_DEV_ALLOW_CAPTURE=1` for screenshots)
 - Screens without Rust: `npm run dev` (port 1420 must be free), then open `http://127.0.0.1:1420/fixture.html?phase=unlocked&companion=running`. Replies are fictional; this proves nothing about native panels, locks or the helper.
 
-Several sessions may share this checkout: check `git status` and stage named paths only. On an exFAT drive, macOS writes `._*` files that break the Tauri build: set `CARGO_TARGET_DIR` and `TMPDIR` to an APFS disk, and first run `find src-tauri/capabilities src-tauri/permissions -name '._*' -delete 2>/dev/null || true`.
+Several sessions may share this checkout: check `git status` and stage named paths only. On an exFAT drive, macOS writes `._*` files that break the Tauri build: set `CARGO_TARGET_DIR` and `TMPDIR` to an APFS disk, pass `--out` and `--cache` on that disk to `scripts/package-companion.sh`, and first run `find src-tauri/capabilities src-tauri/permissions -name '._*' -delete 2>/dev/null || true`.
 
 ## Agent skills
 

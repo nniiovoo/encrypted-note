@@ -1,6 +1,6 @@
 # Agent Companion (optional)
 
-> **Status:** implemented and checked with fictional data only. No real Agent Key, OpenAI account setting, macOS account, live request or ChatGPT connection has been used, and nobody has yet run the agent-account steps below in a real standard account. Each step marked **Owner** is yours to do; nothing in the app does it for you. Design and limits: [ADR-0009](adr/0009-optional-agent-companion-helper.md).
+> **Status:** implemented and checked with fictional data only. No real Agent Key, OpenAI account setting, macOS account, live request or ChatGPT connection has been used, and nobody has yet run the agent-account steps below in a real standard account. **Known problem:** with a real agent account, the helper's readiness check takes longer than the 10 seconds it's allowed, so Start stays off until that's fixed. Each step marked **Owner** is yours to do; nothing in the app does it for you. Design and limits: [ADR-0009](adr/0009-optional-agent-companion-helper.md).
 
 The Agent Companion lets **one approved AI agent** use **one fixed OpenAI text tool** (`generate_text`, model `gpt-6-luna`) with a **separate Agent Key** you create only for it. It never sees your Vault.
 
@@ -42,7 +42,7 @@ Your account                                     Agent account (standard, not ad
 
 ## Before you start
 
-1. **A build that includes the helper (Mac only).** On a trusted build machine with what the [README's Build section](../README.md#build) lists, run `npm ci --ignore-scripts`, then `scripts/package-companion.sh --app`. It verifies the pinned companion commit, its policy hash and the Node.js release, then builds the app with the helper inside. Move the app it prints to `/Applications` and keep it there, because the paths below depend on it (a test build made with `--identifier` has a different helper folder name). An ordinary `tauri build` has no helper, and Settings says so.
+1. **A build that includes the helper (Mac only).** On a trusted build machine with what the [README's Build section](../README.md#build) lists, run `npm ci --ignore-scripts`, then `scripts/package-companion.sh --app`. It verifies the pinned companion commit, its policy hash and the Node.js release, then builds the app with the helper inside. The companion's source is in a private repository, so this machine needs read access to it, or a clean local clone at the pinned commit passed with `--companion-source`. Move the app it prints to `/Applications` and keep it there, because the paths below depend on it (a test build made with `--identifier` has a different helper folder name). An ordinary `tauri build` has no helper, and Settings says so.
 2. **Owner: a standard agent account.** In System Settings → Users & Groups, add a new **Standard** user. Type `enote-agent` as its **Account name** (the short name), which can otherwise fill itself in from the full name. Leave administrator off. Run every agent tool only in that account, and never put your own passwords, Apple Account or keys there.
 3. **Owner: the private agent folder.** In Terminal, in your own account, replacing `enote-agent` with your agent account's short name:
 
@@ -52,7 +52,7 @@ Your account                                     Agent account (standard, not ad
    chmod +a "user:enote-agent allow search" /Users/Shared/encrypted-note-companion
    ```
 
-   On each Start, the helper writes a fresh agent token there that only the agent account can read. It removes the token when it stops.
+   On each Start, the helper writes a fresh agent token there that only your account and the agent account can read. It removes the token when it stops.
 4. **Owner: a fake Agent Key file for the first pass.** The route and the account rows in [Order and account use](#order-and-account-use) come before any real key, so start with this one:
 
    ```bash
@@ -132,8 +132,10 @@ The bridge refuses to start unless it's running as the plan's standard agent acc
 | The tool is listed, and a call says "The Agent Companion isn't running." | Normal while it's off. Choose **Start for up to one hour** in your own account. |
 | A call says "The Agent Companion isn't running.", but Settings shows it on | The bridge can't read the token. The helper keeps its own copy of the plan, and the bridge reads the plan only when it starts. After any edit to the plan, run **Set up…** again, then restart the agent tool. |
 | The tool is missing, or the agent tool reports that the server didn't start | The bridge stopped at launch. In the agent account, check the Node and plan paths, that `id -u` and `id -un` match `agentUid` and `agentShortName`, and that the account has no admin or `sudo` rights. |
-| A call says the Agent Key was rejected, or a limit was hit | Expected with the fake key. Otherwise the key expired, was revoked or is wrong, or a limit at OpenAI was reached, so check there. For a new key, choose **Stop**, then **Set up…** with the plan and the new key file. |
-| The plan row and every row below it show ✗ | The plan didn't load. Fix it, then run **Set up…** again. A ✗ on "The agent's Mac user is Standard, not an admin" also clears "The helper is protected from the agent's Mac user". |
+| A call says "The separate Agent Key was rejected." | Expected with the fake key. Otherwise the key expired, was revoked or is wrong. For a new key, choose **Stop**, then **Set up…** with the plan and the new key file. |
+| A call says "The provider rejected the request because of a limit." | A limit at OpenAI was reached, so check there. |
+| A call says "The Agent Companion request limit has been reached." | The helper's own limit of 6 a minute and 60 an hour. Wait a minute, then try again. |
+| The plan row and every row below it show ✗ | The plan didn't load, or the helper's check didn't finish. Fix the plan, then run **Set up…** again. A ✗ on "The agent's Mac user is Standard, not an admin" also clears "The helper is protected from the agent's Mac user". |
 
 ## Order and account use
 
@@ -141,11 +143,11 @@ The bridge refuses to start unless it's running as the plan's standard agent acc
 - **Don't switch users during a grant.** Fast user switching locks the Vault and ends the grant, so switching to the agent account to talk to the agent stops what it needs.
 - **Terminal counts as idle.** Work in Terminal or any other app doesn't count as use, so Auto-lock fires (after 5 minutes by default) and the grant ends. **Settings → Auto-lock → Count my activity anywhere on this computer** changes that, but it also keeps your Vault Unlocked while you work elsewhere (up to 60 minutes after your last activity in its window). If **Lock when I switch to another app** is on, the grant ends as soon as you leave the app.
 
-**Still open: how to reach the agent account while your own session stays active.** This is the owner's decision. This guide doesn't pick a route, and no route has been validated. Remote access to the account, or launching the tool with `su` or `sudo`, each carries its own risks, so treat them as part of that decision, not as workarounds. Before any real key, choose a route and run these rows of [Separate macOS account validation](agent-account-validation.md) through it, with fake data: **Account identity**, **Clipboard**, **Screen capture** and **Input observation**. The other rows there are still pending too.
+**Still open: how to reach the agent account while your own session stays active.** This is the owner's decision. This guide doesn't pick a route, and no route has been validated. Remote access to the account, or launching the tool with `su` or `sudo`, each carries its own risks, so treat them as part of that decision, not as workarounds. Before any real key, choose a route and run these rows of [Separate macOS account validation](agent-account-validation.md) through it, with fake data: **Account identity**, **Privilege**, **Owner fixture read**, **Owner fixture write**, **Clipboard**, **Screen capture** and **Input observation**. Then check the **Custody and code** row of [Agent Key validation](agent-key-validation.md). The other rows in both docs are still pending too.
 
 ## The real Agent Key
 
-Only after the route is chosen and those rows are run. At OpenAI, create a **new** key for a dedicated project with:
+Only after the route is chosen and all of those rows pass. At OpenAI, create a **new** key for a dedicated project with:
 
 - only the `api.responses.write` permission;
 - a model allowlist of `gpt-6-luna` only;
@@ -159,7 +161,7 @@ Never reuse a key that's in your Vault. Copy the key at OpenAI, then run this in
 ( umask 077; printf 'OPENAI_AGENT_API_KEY=%s\n' "$(pbpaste)" > ~/enote-agent-key.env )
 ```
 
-Choose **Stop**, then **Set up…** with the plan and this file, then **Start for up to one hour**. Delete the file once Start has worked: the helper keeps its own copy, but **Set up…** asks for both files if you redo it. The full provider checklist is in [Agent Key validation](agent-key-validation.md).
+Choose **Stop**, then **Set up…** with the plan and this file, then **Start for up to one hour**. Delete the file and empty the Trash once Start has worked: the helper keeps its own copy, but **Set up…** asks for both files if you redo it. The full provider checklist is in [Agent Key validation](agent-key-validation.md).
 
 ## Private ChatGPT connection (optional)
 
