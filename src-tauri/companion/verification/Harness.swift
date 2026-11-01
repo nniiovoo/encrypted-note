@@ -32,13 +32,18 @@ for step in CommandLine.arguments.dropFirst() {
         call("install", 4, plan, credential)
         close(plan)
         close(credential)
-    case "install-fixtures", "install-wrong-key":
+    case "install-fixtures", "install-wrong-key", "install-existing-agent":
         // FICTIONAL owner files inside this stand-in's own container (a sandboxed process can't
         // open files elsewhere unless the owner picks them in an OS panel, as the real app does).
         // install-wrong-key picks a 100-byte file that isn't an Agent Key as the second file.
+        // install-existing-agent names `nobody`, an account that exists and isn't an admin, so
+        // the helper's check goes on to walk every file in its code.
         let dir = NSHomeDirectory() + "/fixtures"
         try! FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
-        let plan = "{\"version\":2,\"ownerUid\":\(getuid()),\"agentUid\":\(getuid() + 1000),\"agentShortName\":\"enote-agent-fake-verify\",\"credentialExpirySeconds\":3600,\"projectHardSpendLimitCents\":100,\"projectHardSpendCurrency\":\"USD\",\"projectHardSpendInterval\":\"month\",\"brokerHost\":\"127.0.0.1\",\"brokerPort\":8789,\"providerModel\":\"gpt-6-luna\",\"providerScope\":\"api.responses.write\",\"bearerTokenFile\":\"/Users/Shared/encrypted-note-companion/agent-token\",\"grantExpiresAt\":null}"
+        let existing = parts[0] == "install-existing-agent"
+        let agentUid = existing ? getpwnam("nobody")!.pointee.pw_uid : getuid() + 1000
+        let agentName = existing ? "nobody" : "enote-agent-fake-verify"
+        let plan = "{\"version\":2,\"ownerUid\":\(getuid()),\"agentUid\":\(agentUid),\"agentShortName\":\"\(agentName)\",\"credentialExpirySeconds\":3600,\"projectHardSpendLimitCents\":100,\"projectHardSpendCurrency\":\"USD\",\"projectHardSpendInterval\":\"month\",\"brokerHost\":\"127.0.0.1\",\"brokerPort\":8789,\"providerModel\":\"gpt-6-luna\",\"providerScope\":\"api.responses.write\",\"bearerTokenFile\":\"/Users/Shared/encrypted-note-companion/agent-token\",\"grantExpiresAt\":null}"
         try! plan.write(toFile: dir + "/plan.json", atomically: true, encoding: .utf8)
         let credential = parts[0] == "install-wrong-key" ? String(repeating: "FAKE ", count: 20) : "OPENAI_AGENT_API_KEY=FAKE_OPENAI_AGENT_KEY_FOR_VERIFY_ONLY\n"
         try! credential.write(toFile: dir + "/credential.env", atomically: true, encoding: .utf8)

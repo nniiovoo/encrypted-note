@@ -99,6 +99,14 @@ settle && pass "real: no broker left running" || fail "real: processes left runn
 tmutil isexcluded "$HOME/Library/Containers/$SERVICE/Data/Library/Application Support/encrypted-note-companion" | grep -q '\[Excluded\]' \
   && pass "real: Agent Key folder asks to stay out of Time Machine" || fail "real: Agent Key folder is not excluded from Time Machine"
 
+# ---- 2b. an agent account that exists and isn't an admin: the real check also walks every file in
+# the helper's code, inside the sandbox, within the 10 seconds the helper allows it. The private
+# agent folder isn't set up for this account, so only that row stays off (1+2+4+16+32).
+assemble real
+out=$(harness install-existing-agent status)
+expect "real: with a real non-admin account, the code check finishes and passes" status flags 55 "$out"
+settle && pass "real: no broker left running" || fail "real: processes left running"
+
 # ---- 3. isolation probe against a FAKE Vault canary in the stand-in's container
 assemble probe
 out=$(harness canary start sleep:1 stop)

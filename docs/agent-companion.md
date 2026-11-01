@@ -1,6 +1,6 @@
 # Agent Companion (optional)
 
-> **Status:** implemented and checked with fictional data only. No real Agent Key, OpenAI account setting, macOS account, live request or ChatGPT connection has been used, and nobody has yet run the agent-account steps below in a real standard account. **Known problem:** with a real agent account, the helper's readiness check takes longer than the 10 seconds it's allowed, so Start stays off until that's fixed. Each step marked **Owner** is yours to do; nothing in the app does it for you. Design and limits: [ADR-0009](adr/0009-optional-agent-companion-helper.md).
+> **Status:** implemented and checked with fictional data only. No real Agent Key, OpenAI account setting, macOS account, live request or ChatGPT connection has been used, and nobody has yet run the agent-account steps below in a real standard account. Each step marked **Owner** is yours to do; nothing in the app does it for you. Design and limits: [ADR-0009](adr/0009-optional-agent-companion-helper.md).
 
 The Agent Companion lets **one approved AI agent** use **one fixed OpenAI text tool** (`generate_text`, model `gpt-6-luna`) with a **separate Agent Key** you create only for it. It never sees your Vault.
 
