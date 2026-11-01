@@ -40,6 +40,13 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+need() { command -v "$1" >/dev/null 2>&1 || { echo "$1 not found: $2" >&2; exit 1; }; }
+need node "install Node.js 24 or newer"
+need npm "install Node.js 24 or newer"
+need git "run 'xcode-select --install'"
+need xcrun "run 'xcode-select --install'"
+[[ $BUILD_APP == 0 || -d node_modules ]] || { echo "node_modules not found: run 'npm ci --ignore-scripts'" >&2; exit 1; }
+
 LOCK="$ROOT/src-tauri/companion/companion.lock.json"
 lock() { node -e 'const v = require(process.argv[1]); const r = process.argv[2].split(".").reduce((o, k) => o?.[k], v); if (typeof r !== "string") process.exit(1); process.stdout.write(r);' "$LOCK" "$1"; }
 conf() { node -e 'const v = require(process.argv[1]); process.stdout.write(String(process.argv[2].split(".").reduce((o, k) => o?.[k], v)));' "$ROOT/src-tauri/tauri.conf.json" "$1"; }
@@ -141,15 +148,18 @@ if [[ $BUILD_APP == 1 ]]; then
     const config = { identifier, bundle: { macOS: { files: { ["XPCServices/" + service + ".xpc"]: xpc } } } };
     require("node:fs").writeFileSync(overlay, JSON.stringify(config, null, 2));
   ' "$OVERLAY" "$IDENTIFIER" "$SERVICE" "$XPC"
-  npm run --silent tauri -- build --bundles app --config "$OVERLAY"
+  npm run --silent tauri -- build --bundles app --config "$OVERLAY" -- --locked
   APP=$(find "${CARGO_TARGET_DIR:-$ROOT/target}/release/bundle/macos" -maxdepth 1 -name '*.app' -print -quit)
   [[ -n "$APP" ]] || { echo "No app bundle was produced." >&2; exit 1; }
   BUNDLED="$APP/Contents/XPCServices/$SERVICE.xpc"
   [[ -d "$BUNDLED" ]] || { echo "The helper is missing from the app." >&2; exit 1; }
   codesign --verify --deep --strict "$APP"
+  app_signature=$(codesign -dv "$APP" 2>&1)
+  grep -q 'flags=.*runtime' <<<"$app_signature" || { echo "The app is not signed with the hardened runtime." >&2; exit 1; }
   helper_ents=$(codesign -d --entitlements - --xml "$BUNDLED" 2>/dev/null)
   grep -q network.server <<<"$helper_ents" || { echo "The bundled helper lost its own entitlements." >&2; exit 1; }
   app_ents=$(codesign -d --entitlements - --xml "$APP" 2>/dev/null)
   if grep -q network.server <<<"$app_ents"; then echo "The Vault app gained the helper's server entitlement." >&2; exit 1; fi
+  if grep -q get-task-allow <<<"$app_ents"; then echo "The app kept the get-task-allow entitlement." >&2; exit 1; fi
   echo "App: $APP"
 fi

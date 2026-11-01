@@ -1,0 +1,4 @@
+# Keep in step with RUSTUP_TOOLCHAIN and the install step in .github/workflows/check.yml.
+[toolchain]
+channel = "1.96.0"
+components = ["rustfmt", "clippy"]

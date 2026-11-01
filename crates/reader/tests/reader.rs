@@ -32,6 +32,7 @@ const MASK: &str = "••••••";
 /// These tests read the reader's output through a pipe, and `--reveal` refuses to print into
 /// anything but a terminal unless it is told to.
 const REVEAL: [&str; 2] = ["--reveal", "--allow-non-terminal"];
+const CLOSE_WINDOW: &str = "Close this terminal window";
 
 // The Text + Login Vault.
 const TEXT_TITLE: &str = "Test shopping list";
@@ -393,6 +394,37 @@ fn reveal_prints_hidden_fields() {
     assert!(run.stdout.contains("fake-text-body-line-1"));
     assert!(run.stdout.contains("fake-text-body-line-2"));
     assert!(!run.stdout.contains(MASK));
+}
+
+/// What `--reveal` prints stays in the terminal's history, so the owner is told to close the
+/// window. The sentence goes to stderr, and only after a run that printed Hidden Fields.
+#[test]
+fn reveal_tells_the_owner_to_close_the_window() {
+    let vault = text_and_login();
+
+    let revealed = run("reveal-close", &vault.bytes, &REVEAL, PASSWORD);
+    assert_exit(&revealed, 0);
+    assert!(
+        revealed.stderr.contains(CLOSE_WINDOW),
+        "{}",
+        revealed.stderr
+    );
+    assert!(!revealed.stdout.contains(CLOSE_WINDOW));
+
+    for (test, extra, credential, code) in [
+        ("masked-close", &[][..], PASSWORD, 0),
+        ("reveal-refused-close", &["--reveal"][..], PASSWORD, 3),
+        ("reveal-wrong-close", &REVEAL[..], WRONG_PASSWORD, 1),
+    ] {
+        let quiet = run(test, &vault.bytes, extra, credential);
+        assert_exit(&quiet, code);
+        assert!(
+            !quiet.stderr.contains(CLOSE_WINDOW),
+            "{test}: {}",
+            quiet.stderr
+        );
+        assert!(!quiet.stdout.contains(CLOSE_WINDOW), "{test}");
+    }
 }
 
 #[test]
@@ -849,6 +881,8 @@ fn revealing_one_note_leaves_the_hidden_fields_of_the_others_alone() {
     assert!(key.field_line("Key").contains("damaged"));
     assert!(!key.stdout.contains(LOGIN_TITLE));
     assert!(!key.stdout.contains(LOGIN_PASSWORD));
+    // The rest of what it revealed is still on screen, so it still says to close the window.
+    assert!(key.stderr.contains(CLOSE_WINDOW), "{}", key.stderr);
 }
 
 #[test]

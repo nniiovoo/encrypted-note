@@ -23,7 +23,8 @@ if (MODE === 'markers') {
   } else if (MODE === 'crash') {
     setTimeout(() => process.exit(3), 1000);
   } else if (MODE === 'expire') {
-    setTimeout(() => { say({ event: 'stopped', reason: 'expired' }); process.exit(0); }, 2000);
+    // Like the real broker: closes its control pipe and exits with nothing left to do.
+    setTimeout(() => { say({ event: 'stopped', reason: 'expired' }); process.stdin.destroy(); }, 2000);
   } else if (MODE === 'ignore-stop') {
     process.stdin.on('data', () => {}); process.stdin.on('end', () => {});
     process.on('SIGTERM', () => {}); // only SIGKILL ends it

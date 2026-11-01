@@ -237,7 +237,16 @@ fn dev_allow_capture() -> bool {
     cfg!(debug_assertions) && std::env::var("ENOTE_DEV_ALLOW_CAPTURE").as_deref() == Ok("1")
 }
 
-/// Mac: `<app data>/Vault.noindex` (the suffix keeps Spotlight out). Windows: LocalAppData, not
+const RELEASE_VAULT_FOLDER: &str = "Vault.noindex";
+const DEV_VAULT_FOLDER: &str = "Vault.dev.noindex";
+/// A dev run gets its own folder, so forgetting `ENOTE_DEV_DATA_DIR` can't open the real Vault.
+const VAULT_FOLDER: &str = if cfg!(debug_assertions) {
+    DEV_VAULT_FOLDER
+} else {
+    RELEASE_VAULT_FOLDER
+};
+
+/// Mac: `<app data>/` + `VAULT_FOLDER` (the suffix keeps Spotlight out). Windows: LocalAppData, not
 /// Roaming, so the Vault never follows a roaming profile.
 fn data_dir(app: &AppHandle) -> Result<PathBuf, String> {
     // Developers only: test runs must never touch the owner's real Vault folder.
@@ -249,7 +258,7 @@ fn data_dir(app: &AppHandle) -> Result<PathBuf, String> {
     let base = app.path().app_local_data_dir();
     #[cfg(not(windows))]
     let base = app.path().app_data_dir();
-    base.map(|dir| dir.join("Vault.noindex"))
+    base.map(|dir| dir.join(VAULT_FOLDER))
         .map_err(|e| e.to_string())
 }
 
@@ -386,10 +395,20 @@ impl Clock for SystemClock {
 
 #[cfg(test)]
 mod tests {
-    use super::{Url, is_app_url};
+    use super::{DEV_VAULT_FOLDER, RELEASE_VAULT_FOLDER, Url, VAULT_FOLDER, is_app_url};
 
     fn url(text: &str) -> Url {
         Url::parse(text).expect("a valid test URL")
+    }
+
+    #[test]
+    fn only_a_release_build_uses_the_real_vault_folder() {
+        assert_eq!(RELEASE_VAULT_FOLDER, "Vault.noindex");
+        assert_eq!(DEV_VAULT_FOLDER, "Vault.dev.noindex");
+        assert_eq!(
+            VAULT_FOLDER == RELEASE_VAULT_FOLDER,
+            !cfg!(debug_assertions)
+        );
     }
 
     #[test]

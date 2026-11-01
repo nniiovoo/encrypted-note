@@ -144,7 +144,7 @@ fn recovery_key_failure(error: RecoveryKeyError) -> Failure {
         RecoveryKeyError::Checksum => "That Recovery Key has a typo.".to_string(),
     };
     Failure::WrongCredential(format!(
-        "{problem} Check it against your Recovery Kit and try again."
+        "{problem} Check it against your paper and try again."
     ))
 }
 

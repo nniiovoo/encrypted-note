@@ -25,9 +25,10 @@
 //! Safety Copy retention: keep the 10 newest `auto-*`, and also the first `auto-*` of each day
 //! for 30 days. Every save makes a copy, so by count alone eleven quick saves would push out
 //! everything older; the first copy of a day is the Vault as it was before that day's changes,
-//! and it stays whatever happens later that day. Keep `replaced-*` for at least 30 days (delete
-//! older ones), and the newest `replaced-*` for as long as it is the newest, so one wrong clock
-//! reading can't remove it. Timestamps come from the caller (`now`, Unix seconds). A new Safety
+//! and it stays whatever happens later that day. Keep `replaced-*` for at least 30 days, and the
+//! newest `replaced-*` for as long as it is the newest, so one wrong clock reading can't remove
+//! it. Past 30 days, each save removes the oldest copy of each kind, so one wrong clock can't
+//! remove the others at once either. Timestamps come from the caller (`now`, Unix seconds). A new Safety
 //! Copy is stamped with `max(now, newest existing created_at)` so that a clock going backwards
 //! can never make the copy just taken look older than the others (and be pruned at once); the
 //! same-second counter `<n>` is shared by both kinds, so "newest first" is always exact. A
@@ -271,30 +272,39 @@ impl VaultDir {
     }
 
     /// Best effort: the save itself already succeeded, so failing to prune is not an error.
+    ///
+    /// Age alone removes only the oldest copy of each kind per save: one save under a clock far
+    /// ahead must not delete every older copy at once. Copies stamped in the future keep the
+    /// daily rule degraded until real time passes them.
     fn apply_retention(&self, now: i64) {
         let Ok(copies) = self.safety_copies() else {
             return;
         };
-        let autos: Vec<&SafetyCopyInfo> = copies
-            .iter()
-            .filter(|c| c.kind == SafetyKind::Automatic)
-            .collect();
+        let of_kind =
+            |kind| -> Vec<&SafetyCopyInfo> { copies.iter().filter(|c| c.kind == kind).collect() };
+        let too_old = |c: &SafetyCopyInfo, keep| now.saturating_sub(c.created_at) > keep;
+        let autos = of_kind(SafetyKind::Automatic);
         // Newest first, so the last copy seen for a day is that day's first.
         let mut first_of_day: std::collections::BTreeMap<i64, &str> = Default::default();
         for copy in &autos {
             first_of_day.insert(copy.created_at.div_euclid(DAY_SECS), &copy.id);
         }
-        let expired_autos = autos.iter().skip(AUTO_SAFETY_KEEP).filter(|c| {
-            let days_first = first_of_day.get(&c.created_at.div_euclid(DAY_SECS));
-            days_first != Some(&c.id.as_str())
-                || now.saturating_sub(c.created_at) > DAILY_SAFETY_KEEP_SECS
-        });
-        let expired_replaced = copies
+        let days_first = |c: &SafetyCopyInfo| {
+            first_of_day.get(&c.created_at.div_euclid(DAY_SECS)) == Some(&c.id.as_str())
+        };
+        let beyond_keep = || autos.iter().skip(AUTO_SAFETY_KEEP).copied();
+        let later_in_a_day = beyond_keep().filter(|c| !days_first(c));
+        let oldest_daily = beyond_keep()
+            .rev()
+            .find(|c| days_first(c) && too_old(c, DAILY_SAFETY_KEEP_SECS));
+        let replaced = of_kind(SafetyKind::Replaced);
+        let oldest_replaced = replaced
             .iter()
-            .filter(|c| c.kind == SafetyKind::Replaced)
             .skip(1)
-            .filter(|c| now.saturating_sub(c.created_at) > REPLACED_SAFETY_KEEP_SECS);
-        for copy in expired_autos.copied().chain(expired_replaced) {
+            .rev()
+            .copied()
+            .find(|c| too_old(c, REPLACED_SAFETY_KEEP_SECS));
+        for copy in later_in_a_day.chain(oldest_daily).chain(oldest_replaced) {
             let _ = fs::remove_file(self.safety_dir().join(&copy.id));
         }
     }

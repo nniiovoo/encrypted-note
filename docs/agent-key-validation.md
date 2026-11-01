@@ -4,7 +4,7 @@ Status: ready-for-human — separate companion source published privately; 30 fi
 
 The owner selected OpenAI API text generation with one fixed model and a new separate restricted Agent Key. Agents receive no owner Vault, Notes, metadata, Master Password, Recovery Key, Wallet Kind, Backup, Safety Copy or Emergency Reader access ([ADR-0007](adr/0007-agents-use-separate-restricted-keys.md)). The operation and outstanding gate are recorded in [ADR-0008](adr/0008-agent-gateway-awaits-a-concrete-api.md).
 
-This workflow is an optional companion outside encrypted-note. The app adds no network code, dependency, listener, account login or agent interface ([ADR-0001](adr/0001-local-only-vault-moved-by-hand.md)). The local Vault needs no OpenAI account or server. Local agents use MCP over stdio; no hosted service or public listener is required.
+The standalone companion stays outside encrypted-note. The Vault core and WebView add no network code, listener, account login or agent interface ([ADR-0001](adr/0001-local-only-vault-moved-by-hand.md)). A build packaged with `--app` also holds the Agent Companion helper, which listens on 127.0.0.1:8789 only after the owner chooses Start ([ADR-0009](adr/0009-optional-agent-companion-helper.md)). The local Vault needs no OpenAI account or server. Local agents use MCP over stdio; no hosted service or public listener is required.
 
 ## Reviewed development contract, 2026-10-21
 
@@ -25,7 +25,7 @@ The companion source is published in the private [encrypted-note-agent-companion
 
 All 30 automated fictional tests passed: 21 exercise provider/protocol behavior, and 9 exercise isolation preparation with fictional fixtures. Independent review found no remaining request-override or direct credential-disclosure defect in the inspected implementation. These results establish the tested source and preparation behavior; they do not establish an actual separate OS identity, deployed permissions, provider control, secure erasure, real billing behavior or resistance to an unrestricted same-account agent.
 
-Published source remains separate from this app and its bundle. Operational logs remain private; repository publication is not evidence of a completed protected deployment or live pilot. Publish only sanitized findings and source versions; do not copy private paths, raw settings, account names, real credentials, headers or account transcripts into GitHub.
+Published source stays in its own repository; only packaging bundles a pinned copy. Operational logs remain private; repository publication is not evidence of a completed protected deployment or live pilot. Publish only sanitized findings and source versions; do not copy private paths, raw settings, account names, real credentials, headers or account transcripts into GitHub.
 
 ## Current official provider evidence
 
@@ -89,6 +89,8 @@ The owner approved bundling the companion as encrypted-note's optional **Agent C
 
 The integration therefore uses an XPC service. The official Node.js v24.22.1 binary is signed with `get-task-allow`, `allow-dyld-environment-variables` and `disable-library-validation`; the bundled copy is re-signed with only sandbox inheritance and `allow-jit`, and it runs.
 
+The table records the 2026-10-26 run. A later run on 2026-11-01, at companion pin `1c983a7`: the companion's 63 tests pass, and `scripts/verify-companion.sh` passes 42 of 42, with new checks for the Time Machine exclusion, a refused key file, Stop reaching the broker after the helper moves, and the code check finishing with an account that exists and isn't an admin.
+
 | Area | Result |
 | --- | --- |
 | Companion (separate repository) | 49 tests pass on Node 26.8.2 and on the pinned Node 24.22.1. They cover grant validity, expiry at the broker (including direct loopback calls without the bridge), monotonic time limits, the control protocol, the per-Start token handoff and every refusal code, and they check that no fictional key, token or provider-error marker reaches protocol output or tool results. |
@@ -105,4 +107,4 @@ The integration therefore uses an XPC service. The official Node.js v24.22.1 bin
 - Windows (the section shows "not available");
 - Developer ID signing and notarization.
 
-**Owner actions still required:** the standard agent account, the handoff folder, the restricted OpenAI key and its provider controls, the reviewed plan, a live call, and the ChatGPT tunnel. Every row in the operational tables above is still pending.
+**Owner actions still required:** the standard agent account, the private agent folder, the restricted OpenAI key and its provider controls, the reviewed plan, a live call, and the ChatGPT tunnel. Every row in the operational tables above is still pending.
