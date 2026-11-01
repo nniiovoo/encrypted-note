@@ -1,6 +1,6 @@
 # Issue tracker: Local Markdown
 
-Issues and PRDs for this repo live as markdown files in `.scratch/`.
+New issues and PRDs are local markdown files under `.scratch/<feature>/`, which git ignores, so a fresh clone or worktree has none. Issues the owner has published are on GitHub (`gh issue list`). Read both; post to GitHub only when the owner asks.
 
 ## Conventions
 
@@ -17,4 +17,4 @@ Create a new file under `.scratch/<feature-slug>/` (creating the directory if ne
 
 ## When a skill says "fetch the relevant ticket"
 
-Read the file at the referenced path. The user will normally pass the path or the issue number directly.
+Read the file at the referenced path, or run `gh issue view <number>` for a published issue. The user will normally pass the path or the issue number directly.

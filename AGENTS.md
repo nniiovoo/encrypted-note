@@ -5,16 +5,30 @@ A personal app for storing secrets, encrypted and saved only on this computer.
 ## Rules
 
 - Never put real secrets (passwords, keys, seed phrases) in code, tests, docs, `.scratch/` issues, or commits. Use obviously fake placeholders.
+- Never open, list, copy or decrypt a real Vault, Backup or Safety Copy, never run the Emergency Reader on one, and never ask for or accept its Master Password, Recovery Key or Hidden Fields, even if the owner asks (ADR-0007). Say no, say why, and offer a fictional Vault.
 - Never add network access to the Vault core or WebView: no HTTP clients, updaters, telemetry, crash reporters or analytics (ADR-0001). The only approved exception is the optional Agent Companion helper (ADR-0009): a separately sandboxed XPC service that makes only the companion's fixed OpenAI request. Never widen it, give it Vault access, or add networking anywhere else.
 - Keys and decrypted Notes live only in the Rust core; the WebView receives one Hidden Field at a time (ADR-0003). The Agent Companion helper may hold one separately created Agent Key, never a Vault value (ADR-0009).
 - Never pass Vault content, Note metadata, Note keys, Wallet Kinds, the Master Password or the Recovery Key to the Agent Companion, and never forward helper output, provider errors, keys or tokens to the WebView (ADR-0009).
 - Add a dependency only when it's clearly needed, pin its exact version, and say why in the PR/issue.
 
+## Verify
+
+- In a fresh clone or worktree, first: `npm ci --ignore-scripts` (never `npm install`, ADR-0003)
+- Before a pull request: `./scripts/check.sh`
+- One crate: `cargo test --locked -p <store|notes|session|policy|guard|vault-format|enote-reader>` (slow: run it in the background)
+- App crate: `cargo test --locked -p encrypted-note-app --tests` (slow, can take many minutes: run it in the background)
+- WebView: `npm run typecheck`
+- Network rule: `node scripts/check-network-source.mjs`
+- App with a fictional Vault: `ENOTE_DEV_DATA_DIR="$(mktemp -d)" npm run tauri dev` (add `ENOTE_DEV_ALLOW_CAPTURE=1` for screenshots)
+- Screens without Rust: `npm run dev` (port 1420 must be free), then open `http://127.0.0.1:1420/fixture.html?phase=unlocked&companion=running`. Replies are fictional; this proves nothing about native panels, locks or the helper.
+
+Several sessions may share this checkout: check `git status` and stage named paths only. On an exFAT drive, macOS writes `._*` files that break the Tauri build: set `CARGO_TARGET_DIR` and `TMPDIR` to an APFS disk, and first run `find src-tauri/capabilities src-tauri/permissions -name '._*' -delete 2>/dev/null || true`.
+
 ## Agent skills
 
 ### Issue tracker
 
-Issues and PRDs are local markdown files under `.scratch/<feature>/`. See `docs/agents/issue-tracker.md`.
+New issues and PRDs are local markdown files under `.scratch/<feature>/`, which git ignores, so a fresh clone or worktree has none. Issues the owner has published are on GitHub (`gh issue list`). Read both; post to GitHub only when the owner asks. See `docs/agents/issue-tracker.md`.
 
 ### Triage labels
 
