@@ -110,22 +110,32 @@ export async function readAgentToken(file, uid = process.getuid()) {
     return token;
   } finally { await handle.close(); }
 }
-export async function verifyCodeTree(directory, ownerUid, { ancestorsChecked = false } = {}) {
+// A process per entry takes longer over the real dependency tree than the helper's readiness
+// check is allowed, so ACLs are listed in batches.
+const ACL_BATCH_SIZE = 128;
+export async function verifyCodeTree(directory, ownerUid, { ancestorsChecked = false, aclBatch = checkAclBatch } = {}) {
   // Callers that verified the directory and its ancestors themselves pass ancestorsChecked.
   if (!ancestorsChecked) await assertProtectedPath(directory, ownerUid);
   const { readdir } = await import('node:fs/promises');
-  for (const entry of await readdir(directory, { withFileTypes: true })) {
-    // npm command shims are not part of this runtime and are never executed.
-    if (entry.name === '.bin' && path.basename(directory) === 'node_modules') continue;
-    const child = path.join(directory, entry.name);
-    const info = await lstat(child);
-    await checkAcl(child, null);
-    if (info.isSymbolicLink() || ![0, ownerUid].includes(info.uid) || (info.mode & 0o022) !== 0) {
-      throw new Error('A code or dependency path is not protected.');
+  const pending = [];
+  const flush = async () => { if (pending.length > 0) await aclBatch(pending.splice(0)); };
+  const walk = async current => {
+    for (const entry of await readdir(current, { withFileTypes: true })) {
+      // npm command shims are not part of this runtime and are never executed.
+      if (entry.name === '.bin' && path.basename(current) === 'node_modules') continue;
+      const child = path.join(current, entry.name);
+      const info = await lstat(child);
+      if (info.isSymbolicLink() || ![0, ownerUid].includes(info.uid) || (info.mode & 0o022) !== 0) {
+        throw new Error('A code or dependency path is not protected.');
+      }
+      pending.push(child);
+      if (pending.length >= ACL_BATCH_SIZE) await flush();
+      if (entry.isDirectory()) await walk(child);
+      else if (!entry.isFile()) throw new Error('Unexpected runtime file type.');
     }
-    if (entry.isDirectory()) await verifyCodeTree(child, ownerUid, { ancestorsChecked: true });
-    else if (!entry.isFile()) throw new Error('Unexpected runtime file type.');
-  }
+  };
+  await walk(directory);
+  await flush();
 }
 
 export function parseConfirmedCredential(contents) {
@@ -164,4 +174,17 @@ export function validateAclListing(listing, permitted = null) {
 export async function checkAcl(file, permitted = null) {
   const { stdout } = await run('/bin/ls', ['-lde', file], { maxBuffer: 8192, timeout: 5000 });
   validateAclListing(stdout, permitted);
+}
+// `ls -lde` prints each file on a line starting with its mode, then its ACL entries on indented
+// lines. A file name can hold any text, including a newline, so only indented lines are read: a
+// name that looks like an entry can only cause a refusal, never hide a real one.
+export function validateAclBatchListing(listing) {
+  for (const line of listing.split('\n')) {
+    if (/^\s/.test(line) && /\ballow\b/.test(line)) throw new Error('Unexpected ACL allow grant.');
+  }
+}
+async function checkAclBatch(files) {
+  // A missing file, a timeout or too much output rejects here, so the check fails closed.
+  const { stdout } = await run('/bin/ls', ['-lde', ...files], { maxBuffer: 1024 * 1024, timeout: 5000 });
+  validateAclBatchListing(stdout);
 }

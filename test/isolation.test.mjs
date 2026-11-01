@@ -10,8 +10,8 @@ import { fileURLToPath } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { validatePlan, requireRole, parseConfirmedCredential, readBounded,
-  validateAclListing, assertProtectedPath, assertStandardIdentity, assertGrantActive,
-  grantGuard, MAX_GRANT_MS } from '../isolation/common.mjs';
+  validateAclListing, validateAclBatchListing, verifyCodeTree, assertProtectedPath,
+  assertStandardIdentity, assertGrantActive, grantGuard, MAX_GRANT_MS } from '../isolation/common.mjs';
 import { CompanionError, createGenerator, errorFromPublicText, guardGenerate, POLICY } from '../src/generate.mjs';
 import { createMcpServer } from '../src/mcp.mjs';
 import { startHttpServer, stopHttpServer } from '../src/http.mjs';
@@ -429,4 +429,81 @@ test('an expired grant reaches neither validation counters nor the provider', as
   await assert.rejects(guarded({ text: 'Fiction.' }), error => error.code === 'grant_expired');
   await assert.rejects(guarded({ text: 'Fiction.', model: 'other' }), error => error.code === 'grant_expired');
   assert.equal(providerCalls, 1);
+});
+
+test('a batch ACL listing refuses any allow entry and is not fooled by a file name', () => {
+  validateAclBatchListing('-rw-r--r-- 1 o s 0 Jan 1 /fake/a\ndrwxr-xr-x 1 o s 0 Jan 1 /fake/b\n');
+  validateAclBatchListing('drwx------+ 1 o s 0 Jan 1 /fake/a\n 0: group:everyone deny delete\n');
+  validateAclBatchListing('-rw-r--r-- 1 o s 0 Jan 1 /fake/allow-list/allow.js\n');
+  assert.throws(() => validateAclBatchListing('-rw-r--r-- 1 o s 0 Jan 1 /fake/a\n-rw-r--r--+ 1 o s 0 Jan 1 /fake/b\n 0: user:enote-agent allow read\n'), /allow/);
+  // A name holding a newline and an indented "entry" can only cause a refusal.
+  assert.throws(() => validateAclBatchListing('-rw-r--r-- 1 o s 0 Jan 1 /fake/a\n 0: user:x allow read\n'), /allow/);
+});
+
+const fakeCodeTree = async (count) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'enote-code-'));
+  await fs.mkdir(path.join(root, 'package', 'nested'), { recursive: true });
+  for (let i = 0; i < count; i += 1) await fs.writeFile(path.join(root, 'package', 'nested', `fake-${i}.js`), '// fake\n');
+  await fs.writeFile(path.join(root, 'top.js'), '// fake\n');
+  return root;
+};
+
+test('the code check lists every entry once, in bounded batches, and skips only npm shims', async () => {
+  const root = await fakeCodeTree(300);
+  try {
+    await fs.mkdir(path.join(root, 'node_modules', '.bin'), { recursive: true });
+    await fs.symlink('/fake/shim', path.join(root, 'node_modules', '.bin', 'shim'));
+    const batches = [];
+    await verifyCodeTree(root, ownerUid, { ancestorsChecked: true, aclBatch: async files => { batches.push(files); } });
+    const seen = batches.flat();
+    // 300 files, top.js, package, nested and node_modules.
+    assert.equal(seen.length, 304);
+    assert.equal(new Set(seen).size, 304);
+    assert.ok(!seen.some(file => file.includes('.bin')));
+    assert.ok(batches.every(files => files.length > 0 && files.length <= 128));
+    assert.ok(batches.length <= 3, `${batches.length} processes for 304 entries`);
+  } finally { await fs.rm(root, { recursive: true, force: true }); }
+});
+
+test('the code check refuses an unprotected entry, or a failed ACL listing', async () => {
+  const noAcl = { ancestorsChecked: true, aclBatch: async () => {} };
+  for (const spoil of [
+    root => fs.chmod(path.join(root, 'top.js'), 0o666),
+    root => fs.symlink('/fake/elsewhere', path.join(root, 'package', 'link')),
+  ]) {
+    const root = await fakeCodeTree(1);
+    try {
+      await spoil(root);
+      await assert.rejects(verifyCodeTree(root, ownerUid, noAcl), /not protected/);
+    } finally { await fs.rm(root, { recursive: true, force: true }); }
+  }
+  const root = await fakeCodeTree(1);
+  try {
+    await assert.rejects(verifyCodeTree(root, ownerUid + 1, noAcl), /not protected/);
+    await assert.rejects(verifyCodeTree(root, ownerUid, { ancestorsChecked: true, aclBatch: async () => { throw new Error('listing failed'); } }), /listing failed/);
+  } finally { await fs.rm(root, { recursive: true, force: true }); }
+});
+
+test('the code check finds a real ACL grant anywhere in a batch', { skip: process.platform !== 'darwin' }, async t => {
+  const root = await fakeCodeTree(200);
+  try {
+    await fs.writeFile(path.join(root, 'package', 'allow-list.js'), '// a name is not a grant\n');
+    await verifyCodeTree(root, ownerUid, { ancestorsChecked: true });
+    try {
+      await promisify(execFile)('/bin/chmod', ['+a', 'user:nobody allow read', path.join(root, 'package', 'nested', 'fake-150.js')]);
+    } catch { t.skip('this disk has no ACLs'); return; }
+    await assert.rejects(verifyCodeTree(root, ownerUid, { ancestorsChecked: true }), /allow/);
+  } finally { await fs.rm(root, { recursive: true, force: true }); }
+});
+
+test('the code check of a large real tree stays fast', { skip: process.platform !== 'darwin' }, async () => {
+  const root = await fakeCodeTree(1000);
+  try {
+    const started = performance.now();
+    await verifyCodeTree(root, ownerUid, { ancestorsChecked: true });
+    // The helper's readiness check gets 10 seconds for this and more; one process per entry took
+    // about 4 s for 1,000 entries on the Mac where this was found.
+    const elapsed = performance.now() - started;
+    assert.ok(elapsed < 3000, `took ${Math.round(elapsed)} ms`);
+  } finally { await fs.rm(root, { recursive: true, force: true }); }
 });
