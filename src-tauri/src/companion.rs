@@ -253,7 +253,12 @@ impl Companion {
         // Stop still goes out when the helper has gone from the bundle (the app was moved or
         // deleted while running): an open connection reaches a broker that is still running.
         if !self.transport.bundled() && op != Op::Stop {
-            return self.view(&mut inner, Err(TransportError::Unavailable));
+            let mut view = self.view(&mut inner, Err(TransportError::Unavailable));
+            // Still showing the moved app's grant, with its buttons: say why this one did nothing.
+            if view.helper_bundled && op != Op::Status {
+                view.error = Some("helper_unreachable");
+            }
+            return view;
         }
         match op {
             Op::Start => {
@@ -586,6 +591,12 @@ mod tests {
         assert!(ended.helper_bundled);
         CLOCK.store(NOW + 3 * 3600, Ordering::SeqCst);
         assert_eq!(companion.status().state, "expired");
+        assert_eq!(companion.status().error, None);
+        // Start can do nothing with the helper gone, and says so instead of ignoring the press.
+        let refused = companion.start();
+        assert_eq!(refused.state, "expired");
+        assert_eq!(refused.error, Some("helper_unreachable"));
+        assert_eq!(*script.calls.lock().unwrap(), vec![Op::Start]);
         // The broker's state is still unknown, so the next lifecycle stop goes out.
         assert!(companion.active.load(Ordering::SeqCst));
         companion.stop_if_active();

@@ -82,12 +82,16 @@ assemble real
 out=$(harness install-wrong-key status)
 expect "real: a file that isn't an Agent Key is refused (install_invalid)" install error 27 "$out"
 expect "real: nothing kept from a refused setup" status flags 1 "$out"
+owner_files="$HOME/Library/Containers/$SERVICE/Data/Library/Application Support/encrypted-note-companion"
+[[ ! -e "$owner_files/plan.json" && ! -e "$owner_files/credential.env" ]] && pass "real: neither file is on disk after a refused setup" || fail "real: a refused setup left a file on disk"
 settle && pass "real: nothing left running after a refused setup" || fail "real: processes left running after a refused setup"
 
 # ---- 2. real broker with a fictional plan and FAKE key, no agent account on this Mac
 assemble real
 out=$(harness install-fixtures status start)
 expect "real: owner files installed into the helper's own container" install rc 0 "$out"
+# Also shows this script can see that folder, so the refused-setup check above means something.
+[[ -e "$owner_files/plan.json" && -e "$owner_files/credential.env" ]] && pass "real: both files are on disk after a good setup" || fail "real: a good setup left no files this script can see"
 expect "real: plan and credential ready; handoff/agent/code not" status flags 7 "$out"
 expect "real: start refused until the agent account is verified (agent_unverified)" start error 5 "$out"
 grep -q FAKE_OPENAI_AGENT_KEY_FOR_VERIFY_ONLY <<<"$out" && fail "real: key marker in output" || pass "real: no key marker in output"
