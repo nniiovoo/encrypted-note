@@ -48,6 +48,7 @@ const COMMANDS: &[&str] = &[
     "set_settings",
     "mark_seed_explainer_seen",
     "vault_location",
+    "reveal_vault_folder",
     "dismiss_sharing_guard",
     // The optional Agent Companion (ADR-0009): status, start and stop, plus native owner setup.
     "companion_status",

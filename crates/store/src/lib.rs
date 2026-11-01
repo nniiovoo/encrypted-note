@@ -1,7 +1,7 @@
 //! Vault store: everything about the files on disk. Knows nothing about crypto; it moves
 //! opaque bytes and calls a `verify` callback the app supplies (which decrypts in memory).
 //!
-//! Layout inside the data folder (created 0700 on Unix; files 0600):
+//! Layout inside the Vault folder (created 0700 on Unix; files 0600):
 //! ```text
 //! <root>/                      e.g. ~/Library/Application Support/<bundle-id>/Vault.noindex
 //!   vault.enote                the Vault
@@ -9,6 +9,7 @@
 //!   settings.json              non-secret preferences (opaque bytes to this crate)
 //!   safety/auto-<unix>-<n>.enote      automatic Safety Copies (previous version on each save)
 //!   safety/replaced-<unix>-<n>.enote  Safety Copies made when a Backup replaced the Vault
+//!   quick-unlock.sealed        Touch ID registration, written by the app shell (not this crate)
 //!   .tmp-<random>              in-flight writes (removed at open if left over)
 //! ```
 //!

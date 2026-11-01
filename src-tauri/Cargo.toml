@@ -15,6 +15,11 @@ crate-type = ["rlib"]
 name = "encrypted-note"
 path = "src/main.rs"
 
+# AppKit views need the main thread, and libtest never runs a test on it.
+[[test]]
+name = "mac_typed_line"
+harness = false
+
 [build-dependencies]
 tauri-build = { version = "=2.6.3", features = ["isolation"] }
 
@@ -76,8 +81,10 @@ objc2-core-graphics = { version = "=0.3.2", default-features = false, features =
 ] }
 objc2-app-kit = { version = "=0.3.2", default-features = false, features = [
     "std",
+    "NSActionCell",
     "NSApplication",
     "NSButtonCell",
+    "NSCell",
     "NSFontDescriptor",
     "objc2-core-foundation",
     "NSFont",
@@ -87,6 +94,7 @@ objc2-app-kit = { version = "=0.3.2", default-features = false, features = [
     "NSButton",
     "NSSecureTextField",
     "NSTextField",
+    "NSTextFieldCell",
     "NSView",
     "NSScrollView",
     "NSClipView",
@@ -101,9 +109,11 @@ objc2-app-kit = { version = "=0.3.2", default-features = false, features = [
 # Windows adapters (platform.rs): Capture Hiding self-check and re-apply, running processes for
 # the Sharing Guard, private clipboard, and session-lock/sleep notifications. tao already brings
 # the `windows` crate (an older minor); this is the current one, with only these API families.
+# Input_Ime turns the input method off on the Recovery Key retype box (native_credential/windows.rs).
 [target.'cfg(windows)'.dependencies]
 windows = { version = "=0.62.2", default-features = false, features = [
     "Win32_Foundation",
+    "Win32_UI_Input_Ime",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_Controls",
     "Win32_System_Threading",

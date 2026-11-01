@@ -6,6 +6,9 @@ use vault_format::{QuickUnlockBinding, QuickUnlockKey};
 
 const QUICK_OPERATION_MS: u64 = 2 * 60_000;
 
+/// Only for a failure that really turned Touch ID off.
+pub(crate) const MSG_TOUCH_ID_TURNED_OFF: &str = "Touch ID didn't work, so it was turned off. Unlock with your Master Password. Before you turn it on again in Settings, check that only your fingers are listed in your Mac's System Settings, under Touch ID & Password.";
+
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct QuickUnlockStatus {
     pub available: bool,
@@ -137,9 +140,11 @@ impl AppCore {
             });
         let reason = self.quick_unlock_reason.or_else(|| {
             if self.clock.continuous_ms().is_none() {
-                Some("Touch ID needs a clock that keeps counting through sleep.")
+                Some("Touch ID can't be used on this computer right now. Use your Master Password.")
             } else if enabled && !can_unlock && matches!(self.phase, Phase::Locked) {
-                Some("Use your Master Password before Touch ID.")
+                Some(
+                    "Each time you start this app, and at least every 7 days, you must type your Master Password once before Touch ID works.",
+                )
             } else {
                 None
             }
@@ -306,7 +311,11 @@ impl AppCore {
             Ok(open) => open,
             Err(error) => {
                 self.invalidate_quick_unlock_registration()?;
-                return Err(error);
+                return Err(if error == quick_required() {
+                    err("invalid_input", MSG_TOUCH_ID_TURNED_OFF)
+                } else {
+                    error
+                });
             }
         };
         self.quick_unlock

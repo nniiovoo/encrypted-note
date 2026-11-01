@@ -1,7 +1,7 @@
 //! Serializes local biometric custody outside the core mutex; no key is an IPC value.
 use crate::commands::CoreState;
 use crate::core::native::{NativeAction, NativeResult};
-use crate::core::{ApiError, AppCore};
+use crate::core::{ApiError, AppCore, MSG_TOUCH_ID_TURNED_OFF};
 use crate::native_credential::{self, Authorization, Biometric, PromptError};
 use crate::{biometry, commands, native_coordinator};
 use std::path::PathBuf;
@@ -159,19 +159,31 @@ async fn core_work<T: Send + 'static>(
         .map_err(|_| unavailable())?
 }
 
-async fn failed(app: &AppHandle, error: biometry::Error) {
-    let disable = !matches!(error, biometry::Error::Cancelled);
-    let _ = core_work(app, move |core| {
+/// What may keep Touch ID on after a failure: a cancel, or a touch that simply didn't work.
+fn keeps_registration(error: biometry::Error) -> bool {
+    matches!(
+        error,
+        biometry::Error::Cancelled | biometry::Error::TryAgain
+    )
+}
+
+/// True only when this call really turned Touch ID off: it can skip that for a late result after
+/// a Lock, and a failed settings write leaves it undone.
+async fn failed(app: &AppHandle, error: biometry::Error) -> bool {
+    let disable = !keeps_registration(error);
+    core_work(app, move |core| {
         // A late result must not cancel a new native action after an owner Lock.
-        if core.quick_unlock_pending() {
-            core.cancel_all_native();
-            if disable {
-                core.disable_quick_unlock()?;
-            }
+        if !core.quick_unlock_pending() {
+            return Ok(false);
         }
-        Ok(())
+        core.cancel_all_native();
+        if disable {
+            core.disable_quick_unlock()?;
+        }
+        Ok(disable)
     })
-    .await;
+    .await
+    .unwrap_or(false)
 }
 
 fn panel_id(request: u64) -> u64 {
@@ -232,15 +244,15 @@ async fn present_touch_id(
     let id = panel_id(request);
     let biometric = Biometric {
         title: if enrollment {
-            "Enable Touch ID for this Vault"
+            "Turn on Touch ID for this Vault"
         } else {
             "Unlock with Touch ID"
         }
         .to_owned(),
         detail: if enrollment {
-            "Touch the sensor to finish enabling Touch ID. Your Master Password keeps working."
+            "Touch the sensor to finish turning on Touch ID. Your Master Password keeps working."
         } else {
-            "Touch the sensor to unlock your Vault. You can still use your Master Password instead."
+            "Touch the sensor to unlock your Vault. To use your Master Password instead, choose Cancel."
         }
         .to_owned(),
         request,
@@ -336,7 +348,7 @@ pub async fn enable(app: AppHandle) -> Result<(), ApiError> {
         }
         Err(error) => {
             failed(&app, error).await;
-            Err(map_error(error))
+            Err(enable_failure(error))
         }
     };
     if result.is_ok() {
@@ -381,8 +393,8 @@ pub async fn unlock(app: AppHandle) -> Result<(), ApiError> {
             Err(cancelled())
         }
         Err(error) => {
-            failed(&app, error).await;
-            Err(map_error(error))
+            let turned_off = failed(&app, error).await;
+            Err(unlock_failure(error, turned_off))
         }
     }
 }
@@ -392,11 +404,31 @@ pub async fn disable(app: AppHandle) -> Result<(), ApiError> {
     core_work(&app, AppCore::disable_quick_unlock).await
 }
 
-fn map_error(error: biometry::Error) -> ApiError {
+/// Fixed strings only, never OS error text. "Turned off" is said only when that really happened.
+fn unlock_failure(error: biometry::Error, turned_off: bool) -> ApiError {
+    match error {
+        biometry::Error::Cancelled => cancelled(),
+        biometry::Error::TryAgain => ApiError {
+            code: "invalid_input",
+            message: "Touch ID didn't work this time. Try again or use your Master Password."
+                .to_owned(),
+        },
+        _ if turned_off => ApiError {
+            code: "invalid_input",
+            message: MSG_TOUCH_ID_TURNED_OFF.to_owned(),
+        },
+        _ => unavailable(),
+    }
+}
+fn enable_failure(error: biometry::Error) -> ApiError {
     if error == biometry::Error::Cancelled {
         cancelled()
     } else {
-        unavailable()
+        ApiError {
+            code: "invalid_input",
+            message: "Touch ID couldn't be turned on. It stays off, and your Master Password still works."
+                .to_owned(),
+        }
     }
 }
 fn cancelled() -> ApiError {
@@ -414,9 +446,53 @@ fn unavailable() -> ApiError {
 
 #[cfg(test)]
 mod tests {
-    use super::{TOUCH_ID_PANEL, panel_id, touch_id_authorization};
-    use crate::biometry::Cancellation;
+    use super::{
+        MSG_TOUCH_ID_TURNED_OFF, TOUCH_ID_PANEL, cancelled, enable_failure, keeps_registration,
+        panel_id, touch_id_authorization, unavailable, unlock_failure,
+    };
+    use crate::biometry::{Cancellation, Error};
     use crate::native_credential::Authorization;
+
+    #[test]
+    fn only_a_cancel_or_a_missed_touch_keeps_touch_id_on() {
+        for kept in [Error::Cancelled, Error::TryAgain] {
+            assert!(keeps_registration(kept), "{kept:?}");
+        }
+        for ended in [Error::Failed, Error::InvalidPayload, Error::Missing] {
+            assert!(!keeps_registration(ended), "{ended:?}");
+        }
+    }
+
+    #[test]
+    fn an_unlock_failure_says_turned_off_only_when_it_really_was() {
+        assert_eq!(unlock_failure(Error::Cancelled, false), cancelled());
+        assert_eq!(unlock_failure(Error::Cancelled, true), cancelled());
+        assert_eq!(unlock_failure(Error::Failed, false), unavailable());
+        let off = unlock_failure(Error::Failed, true);
+        assert_eq!(off.code, "invalid_input");
+        assert_eq!(off.message, MSG_TOUCH_ID_TURNED_OFF);
+        for turned_off in [false, true] {
+            let again = unlock_failure(Error::TryAgain, turned_off);
+            assert_eq!(again.code, "invalid_input");
+            assert_eq!(
+                again.message,
+                "Touch ID didn't work this time. Try again or use your Master Password."
+            );
+        }
+    }
+
+    #[test]
+    fn an_enable_failure_says_touch_id_stays_off() {
+        assert_eq!(enable_failure(Error::Cancelled), cancelled());
+        for error in [Error::Failed, Error::TryAgain, Error::CleanupFailed] {
+            let failure = enable_failure(error);
+            assert_eq!(failure.code, "invalid_input");
+            assert_eq!(
+                failure.message,
+                "Touch ID couldn't be turned on. It stays off, and your Master Password still works."
+            );
+        }
+    }
 
     #[test]
     fn touch_id_panel_stays_only_for_its_pending_unguarded_live_request() {

@@ -2,6 +2,7 @@
 
 import { Fragment, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent as KeyEvent } from "react";
 import {
+  activity,
   cancelNativeOperation,
   copyField,
   deleteForever,
@@ -12,6 +13,7 @@ import {
   KINDS,
   listNotes,
   restoreNote,
+  vaultLocation,
   type AppStatus,
   type Filter,
   type Kind,
@@ -58,7 +60,8 @@ type Pane =
   | { type: "new"; kind: Kind; seed?: Prefill; savedBefore?: boolean; draft?: Draft }
   // The draft of an edit is coming back: its Note is being fetched, and nothing is drawn yet.
   | { type: "restoring"; id: string; draft: Draft }
-  | { type: "trashed" }
+  // `id`: the Note just moved, so that it can come straight back.
+  | { type: "trashed"; id: string }
   | null;
 
 type Sort = "recent" | "az";
@@ -89,7 +92,7 @@ export interface Place {
 }
 export const START: Place = { nav: ALL, noteId: null, sort: "recent" };
 
-export function Home({ status, place, onPlace, readDraft, onDraft, onLock, onOperationOutcome }: {
+export function Home({ status, place, onPlace, readDraft, onDraft, onLock, onOperationOutcome, afterKit }: {
   status: AppStatus;
   /** Where to start, and how to tell App where the owner is now. */
   place: Place;
@@ -103,6 +106,8 @@ export function Home({ status, place, onPlace, readDraft, onDraft, onLock, onOpe
   /** The Lock button. */
   onLock: () => void;
   onOperationOutcome: (message: string) => void;
+  /** For Settings: says how a Recovery Key step ended, once its command has answered. */
+  afterKit: (notSaved: string, e?: unknown) => void;
 }) {
   const [nav, setNav] = useState(place.nav);
   // For the key handler below, which is set up only once.
@@ -138,6 +143,12 @@ export function Home({ status, place, onPlace, readDraft, onDraft, onLock, onOpe
   // the first render, the only one this value is taken from, `pane` is what the draft made it.
   const dirty = useRef(pane?.type === "restoring" || (pane?.type === "new" && !!pane.draft));
   const [leaving, setLeaving] = useState<(() => void) | null>(null);
+  // The part of Settings to open at. Never in Place, or every unlock that restores Settings would
+  // scroll there again.
+  const [settingsTarget, setSettingsTarget] = useState<"backups" | null>(null);
+  // Where this computer's Vault is, for the first-run page.
+  const [folder, setFolder] = useState<string | null>(null);
+  useEffect(() => void vaultLocation().then(setFolder, () => {}), []);
   const search = useRef<HTMLInputElement>(null);
   const firstTile = useRef<HTMLButtonElement>(null);
   const listId = useId();
@@ -184,7 +195,8 @@ export function Home({ status, place, onPlace, readDraft, onDraft, onLock, onOpe
             : undefined;
     return !!note && (n.type === "all" || (n.type === "favorites" ? note.favorite : n.type === "kind" && n.kind === note.kind));
   };
-  const go = (n: Nav, expiring = false) => {
+  // `after`: runs once the view has changed, so a cancelled Discard leaves nothing pending.
+  const go = (n: Nav, expiring = false, after?: () => void) => {
     if (sameNav(n, nav) && expiryOnly === expiring) return;
     void cancelNativeOperation().catch(() => {});
     setCopyError(null);
@@ -199,6 +211,7 @@ export function Home({ status, place, onPlace, readDraft, onDraft, onLock, onOpe
       setExpiryOnly(expiring);
       if (!keepSearch || expiring) setQuery("");
       open(null);
+      after?.();
     });
   };
   // In a Kind filter New goes straight to that Kind's Editor and the filter stays. From Settings
@@ -212,7 +225,9 @@ export function Home({ status, place, onPlace, readDraft, onDraft, onLock, onOpe
     });
   const copyRow = (id: string, field: string) => {
     setCopyError(null);
-    copyField(id, field).catch((e) => setCopyError(isApiError(e) ? e.message : s.somethingWentWrong));
+    copyField(id, field).catch((e) => {
+      if (!isApiError(e) || e.code !== "cancelled") setCopyError(isApiError(e) ? e.message : s.somethingWentWrong);
+    });
   };
   // From the search box: arrows move the mark, Enter opens it (or the first match), Escape clears.
   const onSearchKey = (e: KeyEvent) => {
@@ -271,6 +286,13 @@ export function Home({ status, place, onPlace, readDraft, onDraft, onLock, onOpe
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      // Escape leaves the Kind picker: not a held key, an input method's, or one meant for a
+      // dialog or the search box.
+      if (e.key === "Escape" && paneNow.current?.type === "pick") {
+        if (e.repeat || e.isComposing || e.keyCode === 229) return;
+        if (document.querySelector("[role=dialog]") || document.activeElement?.matches("[data-search]")) return;
+        return open(null);
+      }
       if (!cmdKey(e)) return;
       if (document.querySelector("[role=dialog]")) return;
       const key = e.key.toLowerCase();
@@ -319,6 +341,10 @@ export function Home({ status, place, onPlace, readDraft, onDraft, onLock, onOpe
     onPlace({ nav, noteId, sort });
   }, [nav, pane, sort]);
   useEffect(() => setMarked(null), [list, sort, query, expiryOnly]);
+  // The last expiring key was renewed or moved: the filter and its way out would be left empty.
+  useEffect(() => {
+    if (expiryOnly && !apiKeys.some(withinExpiryWarning)) setExpiryOnly(false);
+  }, [apiKeys, expiryOnly]);
   useEffect(() => {
     if (marked) document.getElementById(rowId(marked))?.scrollIntoView({ block: "nearest" });
   }, [marked]);
@@ -332,6 +358,9 @@ export function Home({ status, place, onPlace, readDraft, onDraft, onLock, onOpe
     changed();
   };
 
+  // This view is empty, not just this search. `list.query`: right after the search box is cleared
+  // the rows still answer the old search.
+  const nothingListed = !pane && !query && list?.query === "" && notes?.length === 0;
   let detail;
   if (pane?.type === "note")
     detail = (
@@ -343,7 +372,7 @@ export function Home({ status, place, onPlace, readDraft, onDraft, onLock, onOpe
         onDuplicate={(kind, seed) => open({ type: "new", kind, seed })}
         onChanged={changed}
         onTrashed={() => {
-          open({ type: "trashed" });
+          open({ type: "trashed", id: pane.id });
           changed();
         }}
         // The Note that was open before a lock may be gone by now.
@@ -386,9 +415,11 @@ export function Home({ status, place, onPlace, readDraft, onDraft, onLock, onOpe
     );
   else if (pane?.type === "trashed")
     detail = (
-      <p className="empty-state" role="status">
-        {s.movedToTrash}
-      </p>
+      <Trashed
+        id={pane.id}
+        // The answer comes later: an owner who has moved on stays there, in an Editor above all.
+        onRestored={() => (paneNow.current === pane ? saved(pane.id) : changed())}
+      />
     );
   else if (pane?.type === "restoring") detail = null;
   else if (pane?.type === "pick" || (nav.type === "all" && !query && notes?.length === 0)) {
@@ -404,6 +435,12 @@ export function Home({ status, place, onPlace, readDraft, onDraft, onLock, onOpe
     detail = (
       <div className="stack">
         <h1>{picking ? s.pickKind : s.firstNote}</h1>
+        {!picking && folder && (
+          <>
+            <p className="hint">{s.storage.firstNoteWhere}</p>
+            <p className="hint path">{folder}</p>
+          </>
+        )}
         <div className="tiles" onKeyDown={picking ? byDigit : undefined}>
           {KINDS.map((kind, i) => (
             <button
@@ -422,7 +459,22 @@ export function Home({ status, place, onPlace, readDraft, onDraft, onLock, onOpe
         </div>
       </div>
     );
-  } else if (notes?.length) detail = <p className="empty-state">{s.pickNote}</p>;
+  } else if (nav.type === "kind" && nothingListed)
+    detail = expiryOnly ? (
+      <div className="empty-state column">
+        <p>{s.noExpiringKeys}</p>
+        <button onClick={() => go(API_KEYS, false)}>{s.showAllApiKeys}</button>
+      </div>
+    ) : (
+      <div className="empty-state column">
+        <p>{s.emptyKind(s.kindPlurals[nav.kind])}</p>
+        <button className="primary" onClick={newNote}>
+          {s.newTitle(s.kindNames[nav.kind])}
+        </button>
+      </div>
+    );
+  else if (nav.type === "favorites" && nothingListed) detail = <p className="empty-state">{s.noFavorites}</p>;
+  else if (notes?.length) detail = <p className="empty-state">{s.pickNote}</p>;
 
   const markedNote = marked ? shown.find((n) => n.id === marked) : undefined;
   // Counted against today's date at every draw (the status redraws this screen each second), so
@@ -497,11 +549,26 @@ export function Home({ status, place, onPlace, readDraft, onDraft, onLock, onOpe
             </>
           )}
         </header>
+        {/* Out here, not in the Editor's form: a click can't submit it, and it can't scroll away. The
+            time stays away from a screen reader, or it would be read out every second. */}
+        {(pane?.type === "new" || pane?.type === "edit") &&
+          dirty.current &&
+          status.lock_in_ms !== null &&
+          status.lock_in_ms <= Math.min(60000, status.settings.idle_minutes * 15000) && (
+            <div className="banner">
+              <Icon name="warning" />
+              <span role="alert">{s.lockSoonDraft}</span>
+              <span aria-hidden="true">{minSec(status.lock_in_ms)}</span>
+              <button type="button" className="small" onClick={() => activity().catch(() => {})}>
+                {s.keepWorking}
+              </button>
+            </div>
+          )}
         {status.backup.reminder_due && nav.type !== "settings" && (
           <div className="banner">
             <Icon name="warning" />
             {s.backupReminder}
-            <button onClick={() => go(SETTINGS)}>{s.goToBackups}</button>
+            <button onClick={() => go(SETTINGS, false, () => setSettingsTarget("backups"))}>{s.goToBackups}</button>
           </div>
         )}
         {(expiredKeys > 0 || expiringKeys > 0) && nav.type !== "settings" && (
@@ -513,7 +580,13 @@ export function Home({ status, place, onPlace, readDraft, onDraft, onLock, onOpe
         )}
         {status.purge_trash_failed && <div className="banner" role="alert">{s.trashPurgeFailed}</div>}
         {nav.type === "settings" ? (
-          <Settings status={status} onOperationOutcome={onOperationOutcome} />
+          <Settings
+            status={status}
+            onOperationOutcome={onOperationOutcome}
+            afterKit={afterKit}
+            scrollTo={settingsTarget}
+            onScrolled={() => setSettingsTarget(null)}
+          />
         ) : nav.type === "trash" ? (
           <Trash
             notes={notes}
@@ -574,18 +647,28 @@ export function Home({ status, place, onPlace, readDraft, onDraft, onLock, onOpe
                   );
                 })}
               </ul>
-              {notes?.length === 0 && (query || nav.type !== "all") && <p className="hint">{query ? s.noMatches : s.nothingHere}</p>}
+              {notes?.length === 0 && query && <p className="hint">{s.noMatches}</p>}
             </section>
             <section className="detail-pane">{detail}</section>
           </div>
         )}
         <footer className="status-line">
           <span>
-            {s.statusLine}
+            {s.statusEncrypted}
+            {" · "}
+            {nav.type !== "settings" ? (
+              <button className="link" onClick={() => go(SETTINGS)}>
+                {s.statusSaved}
+              </button>
+            ) : (
+              s.statusSaved
+            )}
+            {" · "}
+            {s.statusOffline}
             {status.lock_in_ms !== null && ` · ${s.locksIn(minSec(status.lock_in_ms), !!status.settings.count_activity_anywhere)}`}
             {" · "}
             {unbacked && nav.type !== "settings" ? (
-              <button className="link" onClick={() => go(SETTINGS)}>
+              <button className="link" onClick={() => go(SETTINGS, false, () => setSettingsTarget("backups"))}>
                 {backupText}
               </button>
             ) : (
@@ -593,7 +676,7 @@ export function Home({ status, place, onPlace, readDraft, onDraft, onLock, onOpe
             )}
           </span>
           <span className={capture ? "badge" : "badge warn"}>
-            {capture ? s.captureOn(status.platform === "mac") : capture === false ? s.captureOff : s.captureUnknown}
+            {capture ? s.captureOn : capture === false ? s.captureOff : s.captureUnknown}
           </span>
         </footer>
       </div>
@@ -628,6 +711,25 @@ export function Home({ status, place, onPlace, readDraft, onDraft, onLock, onOpe
           onClose={() => setLeaving(null)}
         />
       )}
+    </div>
+  );
+}
+
+/** After Move to Trash: the way straight back. Like Restore in Trash, it asks for no password. */
+function Trashed({ id, onRestored }: { id: string; onRestored: () => void }) {
+  const { busy, error, run } = useAction();
+  const restore = () =>
+    run(async () => {
+      await restoreNote(id);
+      onRestored();
+    });
+  return (
+    <div className="empty-state column">
+      <p role="status">{s.movedToTrash}</p>
+      <ErrorLine error={error} />
+      <button disabled={busy} onClick={restore}>
+        {s.restore}
+      </button>
     </div>
   );
 }
@@ -694,6 +796,10 @@ function Trash(props: {
     });
   // A key still held down from the press that moved the keyboard here doesn't press these too.
   const noRepeat = (e: KeyEvent) => e.repeat && e.preventDefault();
+  // What the question on screen is about. The native panel can't list titles, so Empty Trash with
+  // a Wallet Kind in it names them in the question.
+  const removing = notes?.filter((n) => !confirm || n.id === confirm) ?? [];
+  const removesWallet = removing.some((n) => isWalletKind(n.kind));
   return (
     <section className="page stack">
       {openId ? (
@@ -768,12 +874,11 @@ function Trash(props: {
       {confirm !== null && (
         <Confirm
           title={confirm ? s.deleteForever : s.emptyTrash}
-          text={confirm ? s.deleteForeverText : s.emptyTrashText}
+          text={confirm ? s.deleteForeverText : removesWallet ? s.emptyTrashWalletText(removing.map((n) => n.title)) : s.emptyTrashText}
           confirmLabel={confirm ? s.deleteForever : s.emptyTrash}
           onConfirm={() => {
             setConfirm(null);
-            const removing = notes?.filter((n) => !confirm || n.id === confirm) ?? [];
-            if (removing.some((n) => isWalletKind(n.kind))) setAskPassword({ id: confirm, titles: removing.map((n) => n.title) });
+            if (removesWallet) setAskPassword({ id: confirm, titles: removing.map((n) => n.title) });
             else act(() => (confirm ? deleteForever(confirm) : emptyTrash()), confirm);
           }}
           onClose={() => setConfirm(null)}
@@ -783,7 +888,6 @@ function Trash(props: {
         <NativeActionModal
           title={askPassword.id ? s.noteAction(s.deleteForever, askPassword.titles[0]!) : s.emptyTrash}
           text={askPassword.id ? s.walletDeleteText : s.walletEmptyTrashText(askPassword.titles)}
-          submitLabel={askPassword.id ? s.deleteForever : s.emptyTrash}
           onSubmit={async () => {
             await (askPassword.id ? deleteForever(askPassword.id) : emptyTrash());
             props.onChanged();

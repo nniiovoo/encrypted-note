@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState } from "react";
-import { activity, appStatus, cancelNativeOperation, dismissSharingGuard, lock, onStatusChanged, type AppStatus } from "./api";
+import { activity, appStatus, cancelNativeOperation, dismissSharingGuard, isApiError, lock, onStatusChanged, type AppStatus } from "./api";
 import { cmdKey, ErrorLine, mac, TitlebarDrag, useAction } from "./components";
 import { Home, START, type Place } from "./Home";
 import { Icon } from "./icons";
 import type { Draft } from "./Note";
-import { Locked, NativeRecoveryKit, NewPasswordScreen, NoVault } from "./Start";
+import { Locked, NativeRecoveryKit, NewPasswordScreen, NoVault, type SetupStep } from "./Start";
 import { strings as s } from "./strings";
 
 export function App() {
@@ -22,6 +22,10 @@ export function App() {
   // that is already drawn starts again instead of keeping the place it was given.
   const [restarts, setRestarts] = useState(0);
   const lockedOnPurpose = useRef(false);
+  // Whether the Recovery Key step was drawn since the last command that could reach it reported.
+  const kitSeen = useRef(false);
+  // Where first run goes back to when NoVault is drawn again. Never the open dialog.
+  const setupStep = useRef<SetupStep>("welcome");
   const phase = status?.phase;
   const forgetPlace = () => setPlace((p) => ({ ...START, sort: p.sort }));
   // A Backup or Safety Copy was installed, or the password changed: start afresh.
@@ -37,6 +41,20 @@ export function App() {
     lock().catch(() => {
       lockedOnPurpose.current = false;
     });
+  };
+  // Told by the command that creates a Vault or changes keys, once it has answered. The result
+  // comes only from there: a phase change can't say it, because the same jump to Locked can
+  // follow a save that worked, and then this message would throw away a key that works.
+  const afterKit = (notSaved: string, e?: unknown) => {
+    const shown = kitSeen.current;
+    kitSeen.current = false;
+    if (!shown) return;
+    if (e === undefined) {
+      setOperationOutcome(null);
+      return;
+    }
+    const cause = isApiError(e) && e.code !== "cancelled" && e.code !== "interrupted" ? `${e.message} ` : "";
+    setOperationOutcome(cause + notSaved);
   };
 
   useEffect(() => {
@@ -72,10 +90,17 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    if (phase === "confirm_recovery_kit") {
+      kitSeen.current = true;
+      setOperationOutcome(null);
+      setupStep.current = "create";
+    } else if (phase !== "no_vault") setupStep.current = "welcome";
     // The place survives an Auto-lock and an app-switch lock, but not a lock the owner asked for,
     // nor a Vault that is new, was opened with the Recovery Key or is getting new keys.
     if (phase === "locked" ? lockedOnPurpose.current : phase !== "unlocked") forgetPlace();
     lockedOnPurpose.current = false;
+    // lockNow has already emptied the draft, so a lock the owner asked for stays quiet here.
+    if (phase === "locked" && draft.current) setOperationOutcome((m) => (m ? `${m} ${s.lockedDraftLost}` : s.lockedDraftLost));
     // A draft survives the Shield only: never a lock of any kind, nor any other way out of Home.
     if (phase !== "unlocked") draft.current = null;
     // Cmd/Ctrl+L works whenever the Vault is open.
@@ -91,22 +116,42 @@ export function App() {
     return () => window.removeEventListener("keydown", onKey);
   }, [phase]);
 
+  const lockEvents = status?.lock_events_unavailable ?? [];
+  // Kept for after the Shield: it can say what the owner was doing, and the Shield is on screen
+  // because something may be capturing it.
+  const outcomeNow = status?.sharing_guard.up ? null : operationOutcome;
+  const notices = status?.save_durability_uncertain || status?.settings_unreadable || lockEvents.length > 0 || outcomeNow;
+
   // Home draws its own drag areas over this strip.
   return (
     <main className="app">
       <TitlebarDrag />
-      {status?.save_durability_uncertain && <p className="warn">{s.saveDurabilityWarning}</p>}
-      {status?.settings_unreadable && <p className="warn">{s.settingsUnreadable}</p>}
-      {status && status.lock_events_unavailable.length > 0 && (
-        <p className="warn" role="alert">{s.lockEventsUnavailable(status.lock_events_unavailable.map((event) => s.lockEventNames[event]).join(", "))}</p>
+      {notices && (
+        <div className="app-notices">
+          {status?.save_durability_uncertain && <p className="warn">{s.saveDurabilityWarning}</p>}
+          {status?.settings_unreadable && <p className="warn">{s.settingsUnreadable}</p>}
+          {lockEvents.length > 0 && (
+            <p className="warn" role="alert">{s.lockEventsUnavailable(lockEvents.map((event) => s.lockEventNames[event]).join(", "))}</p>
+          )}
+          {outcomeNow && <p className="warn" role="status">{outcomeNow}<button className="small" onClick={() => setOperationOutcome(null)}>{s.dismiss}</button></p>}
+        </div>
       )}
-      {operationOutcome && <p className="warn" role="status">{operationOutcome}<button className="small" onClick={() => setOperationOutcome(null)}>{s.dismiss}</button></p>}
+      {/* Says a sudden lock or Shield to a screen reader. Fixed text; always here, because a status
+          line is only read out when it changes. */}
+      <p className="sr-only" role="status">
+        {status?.sharing_guard.up ? s.shieldTitle : phase === "locked" ? s.vaultLockedAnnounce : null}
+      </p>
       {status && (
         <Screen
           status={status}
           place={place}
           onPlace={setPlace}
           restarts={restarts}
+          setupStep={setupStep.current}
+          onSetupStep={(step) => {
+            setupStep.current = step;
+          }}
+          afterKit={afterKit}
           // A reader, not the draft itself: a prop would go on holding the draft after a lock
           // has emptied the ref.
           readDraft={() => draft.current}
@@ -128,12 +173,17 @@ export function App() {
   );
 }
 
-function Screen({ status, place, onPlace, restarts, readDraft, onDraft, onLock, onOperationOutcome, onOutcomeOutside }: {
+function Screen({ status, place, onPlace, restarts, setupStep, onSetupStep, afterKit, readDraft, onDraft, onLock, onOperationOutcome, onOutcomeOutside }: {
   status: AppStatus;
   place: Place;
   onPlace: (place: Place) => void;
   /** Keys Home: when it changes, Home starts again from `place`. */
   restarts: number;
+  /** Where NoVault starts when it appears, and how it says where it is now. */
+  setupStep: SetupStep;
+  onSetupStep: (step: SetupStep) => void;
+  /** Says how a Recovery Key step ended. Not an outcome: it moves nobody and restarts nothing. */
+  afterKit: (notSaved: string, e?: unknown) => void;
   /** Read by Home once, when it appears; see Home. */
   readDraft: () => Draft | null;
   onDraft: (draft: Draft | null) => void;
@@ -152,7 +202,7 @@ function Screen({ status, place, onPlace, restarts, readDraft, onDraft, onLock, 
   if (shield) return <Shield apps={status.sharing_guard.apps} afterUnlock={status.phase !== "locked" && seen.before === "locked"} />;
   switch (status.phase) {
     case "no_vault":
-      return <NoVault onOperationOutcome={onOutcomeOutside} />;
+      return <NoVault onOperationOutcome={onOutcomeOutside} afterKit={afterKit} initialStep={setupStep} onStep={onSetupStep} />;
     case "confirm_recovery_kit":
       return <NativeRecoveryKit />;
     case "locked":
@@ -170,6 +220,7 @@ function Screen({ status, place, onPlace, restarts, readDraft, onDraft, onLock, 
           onDraft={onDraft}
           onLock={onLock}
           onOperationOutcome={onOperationOutcome}
+          afterKit={afterKit}
         />
       );
   }
@@ -187,6 +238,9 @@ function Shield({ apps, afterUnlock }: { apps: string[]; afterUnlock: boolean })
       <h1>{s.shieldTitle}</h1>
       <p>{s.shieldApps(apps.join(", "))}</p>
       <p>{s.shieldText}</p>
+      {/* One fixed sentence: text that changed with the phase or a draft could show, in a captured
+          frame, that a half-typed Note exists. */}
+      <p>{s.shieldClosed}</p>
       <button
         className="primary big"
         autoFocus={afterUnlock}

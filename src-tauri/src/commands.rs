@@ -11,7 +11,8 @@
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::{Mutex, MutexGuard, PoisonError, mpsc};
+use std::time::Duration;
 
 use crate::core::native::{NativeAction, NativeResult};
 use notes::seed::SeedCheck;
@@ -73,16 +74,17 @@ async fn blocking<T: Send + 'static>(
         .map_err(|_| internal())?
 }
 
+/// Its own text, not the core's: a panic can land here after a save has already happened.
 fn internal() -> ApiError {
     ApiError {
         code: "internal",
-        message: "Something went wrong inside encrypted-note. Nothing was changed.".to_owned(),
+        message: "Something went wrong inside encrypted-note. Your last action may not have finished. Check it before you try again. If it keeps happening, restart the app.".to_owned(),
     }
 }
 
 pub fn os_event(app: &AppHandle, event: OsEvent) {
     if !matches!(event, OsEvent::FocusGained) {
-        crate::native_coordinator::cancel(app);
+        crate::native_coordinator::interrupt(app);
         crate::quick_runtime::cancel(app);
     }
     with_core(app, |core| core.os_event(event));
@@ -481,6 +483,33 @@ pub fn vault_location(app: AppHandle) -> String {
     core(&app).vault_location()
 }
 
+/// Show this computer's Vault in Finder or File Explorer. No argument of any kind: the screens
+/// can't choose what opens. `DIALOG_OPEN` stays off because this is a real switch to another app,
+/// so losing focus still cancels native work and locks if the owner chose that.
+#[tauri::command(async)]
+pub fn reveal_vault_folder(app: AppHandle) -> Result<(), ApiError> {
+    if crate::native_coordinator::busy(&app) {
+        return Err(crate::core::not_now());
+    }
+    let target = with_core(&app, AppCore::vault_reveal_target)?;
+    let (tx, rx) = mpsc::channel();
+    let opened = app
+        .run_on_main_thread(move || {
+            let _ = tx.send(crate::platform::reveal_in_file_manager(&target));
+        })
+        .is_ok()
+        && rx.recv_timeout(Duration::from_secs(5)).unwrap_or(false);
+    if opened {
+        Ok(())
+    } else {
+        Err(ApiError {
+            code: "io",
+            message: "The folder couldn't be opened. You can copy the path and open it yourself."
+                .to_owned(),
+        })
+    }
+}
+
 #[tauri::command(async)]
 pub fn dismiss_sharing_guard(app: AppHandle) {
     with_core(&app, AppCore::dismiss_sharing_guard);
@@ -512,10 +541,16 @@ fn home_dir(app: &AppHandle) -> PathBuf {
     core(app).home_dir().to_path_buf()
 }
 
-/// `encrypted-note-backup-YYYY-MM-DD.enote` (UTC date).
+/// `encrypted-note-backup-YYYY-MM-DD-HHMM.enote` (UTC date and time), so a second Backup on one
+/// day doesn't land on the first one's name, which the app can't safely replace.
 fn backup_file_name(unix_secs: i64) -> String {
     let (y, m, d) = civil_date(unix_secs);
-    format!("encrypted-note-backup-{y:04}-{m:02}-{d:02}.enote")
+    let mins = unix_secs.rem_euclid(86_400) / 60;
+    format!(
+        "encrypted-note-backup-{y:04}-{m:02}-{d:02}-{:02}{:02}.enote",
+        mins / 60,
+        mins % 60
+    )
 }
 
 /// Unix seconds to (year, month, day) in UTC (Howard Hinnant's `civil_from_days`).
@@ -578,7 +613,7 @@ pub async fn companion_setup(app: AppHandle) -> Result<CompanionView, ApiError> 
         let home = home.clone();
         move || {
             rfd::FileDialog::new()
-                .set_title("Choose the reviewed Agent Companion plan")
+                .set_title("Choose the Agent Companion plan file.")
                 .set_directory(&home)
                 .add_filter("Companion plan", &["json"])
                 .pick_file()
@@ -600,7 +635,7 @@ pub async fn companion_setup(app: AppHandle) -> Result<CompanionView, ApiError> 
     .await
     .map_err(|_| ApiError {
         code: "internal",
-        message: "The Agent Companion setup did not finish.".to_owned(),
+        message: "The Agent Companion setup didn't finish. Try Set up… again.".to_owned(),
     })
 }
 
@@ -615,7 +650,7 @@ fn open_chosen(path: &std::path::Path) -> Result<std::fs::File, ApiError> {
     }
     options.open(path).map_err(|_| ApiError {
         code: "io",
-        message: "That file could not be opened.".to_owned(),
+        message: "That file couldn't be opened. Check that it still exists and isn't a link to another file, then choose it again.".to_owned(),
     })
 }
 
@@ -635,20 +670,25 @@ mod tests {
     }
 
     #[test]
-    fn backup_file_names_carry_the_utc_date() {
+    fn backup_file_names_carry_the_utc_date_and_time() {
         assert_eq!(
             backup_file_name(0),
-            "encrypted-note-backup-1970-01-01.enote"
+            "encrypted-note-backup-1970-01-01-0000.enote"
         );
         // 2024-02-29 23:59:59 UTC (leap day).
         assert_eq!(
             backup_file_name(1_709_251_199),
-            "encrypted-note-backup-2024-02-29.enote"
+            "encrypted-note-backup-2024-02-29-2359.enote"
         );
         // 2026-09-23 12:00:00 UTC.
         assert_eq!(
             backup_file_name(1_790_164_800),
-            "encrypted-note-backup-2026-09-23.enote"
+            "encrypted-note-backup-2026-09-23-1200.enote"
+        );
+        // Before 1970, the time of day still counts forward from midnight.
+        assert_eq!(
+            backup_file_name(-60),
+            "encrypted-note-backup-1969-12-31-2359.enote"
         );
     }
 }

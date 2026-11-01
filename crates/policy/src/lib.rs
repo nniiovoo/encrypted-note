@@ -43,11 +43,12 @@ pub const MIN_GUESSES_LOG10: f64 = 16.0;
 const EFF_LIST: &str = include_str!("../data/eff_large_wordlist.txt");
 const FAMOUS_PHRASES: &str = include_str!("../data/famous_phrases.txt");
 
-const HINT_LENGTH: &str = "Use at least 15 characters. A few random words work well.";
+const HINT_LENGTH: &str =
+    "Use at least 15 characters. 5 or 6 random words work well, or press Suggest a password.";
 const HINT_WELL_KNOWN: &str = "This is a well-known phrase that attackers try early. \
-     Choose something of your own, or use a suggested passphrase.";
+     Choose your own words, or press Suggest a password.";
 const HINT_GUESSABLE: &str =
-    "This could still be guessed. Add another uncommon word or two, or use a suggested passphrase.";
+    "This could still be guessed. Add another unusual word or two, or press Suggest a password.";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Assessment {
@@ -57,6 +58,11 @@ pub struct Assessment {
     pub score: u8,
     /// Zero or more short plain-English hints, most important first.
     pub feedback: Vec<String>,
+}
+
+/// Characters on the NFC form the Vault uses: what the 15-character rule in [`assess`] counts.
+pub fn char_count(password: &str) -> usize {
+    password.nfc().count()
 }
 
 pub fn assess(password: &str) -> Assessment {
@@ -107,7 +113,7 @@ fn push_unique(feedback: &mut Vec<String>, hint: &str) {
 /// The weaker of two readings of the password, as typed and without its separators: zxcvbn's
 /// analysis of that reading, and log10 of the guesses it comes to (see [`guesses_log10`]).
 ///
-/// zxcvbn can take seconds on a long password full of symbols and this runs as the owner types,
+/// zxcvbn can take seconds on a long password full of symbols and this runs at typing pauses,
 /// so the second reading is made only when it can change the answer: the password passes as
 /// typed, and taking the separators out leaves something different to judge. Neither reading is
 /// cut shorter than zxcvbn's own 100 characters: a cut can land inside a repeat and raise the

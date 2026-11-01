@@ -53,6 +53,7 @@
     "allow-set-settings",
     "allow-mark-seed-explainer-seen",
     "allow-vault-location",
+    "allow-reveal-vault-folder",
     "allow-dismiss-sharing-guard",
     "allow-cancel-native-operation",
     "allow-enable-quick-unlock",
