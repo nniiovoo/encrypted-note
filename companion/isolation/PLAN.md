@@ -1,6 +1,6 @@
 # Isolated local-agent setup: review package
 
-Status: PREPARED ONLY. No account, OS setting, ACL, credential or running broker has been created or changed by this package. Current owner-account Codex and its tools remain unisolated. Review these artifacts before execution.
+Status: PREPARED ONLY. No account, OS setting, ACL, credential or running broker has been created or changed by this package. Agent tools running in the owner's account remain unisolated. Review these artifacts before execution.
 
 The selected first trial is one NEW separate OpenAI Agent Key, provider-enforced one-hour expiry, and a $1 USD enforced monthly project hard cap. These are approved trial values; they are not yet applied account settings. The operation remains only generate_text with gpt-6-luna, 4096 UTF-8 input bytes and 512 output tokens.
 

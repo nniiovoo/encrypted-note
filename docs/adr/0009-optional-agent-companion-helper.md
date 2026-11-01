@@ -1,5 +1,7 @@
 # An optional Agent Companion helper, in its own sandbox, may run the approved OpenAI operation
 
+> **Amended by [ADR-0010](0010-companion-source-lives-in-this-repository.md) (2026-11-01):** the companion's source moved into this repository as `companion/`, so "One pinned source" below no longer pins a commit, and packaging no longer fetches the companion with git. The policy and Node.js hashes, the helper, its sandbox and the entitlements are unchanged.
+
 Status: Accepted by the owner, 2026-10-26 (integration design and scoped exceptions approved). Implemented with fictional data only; real credential provisioning, OS account changes, live provider calls and the ChatGPT connection remain owner actions.
 
 The owner wants one place to manage the restricted OpenAI companion ([ADR-0008](0008-agent-gateway-awaits-a-concrete-api.md)) from inside encrypted-note, without giving it any part of the **Vault**. This records the one exception to "the app offers no agent interface" ([ADR-0007](0007-agents-use-separate-restricted-keys.md)), "no network code" ([ADR-0001](0001-local-only-vault-moved-by-hand.md)) and "every key in the Rust core" ([ADR-0003](0003-tauri-with-secrets-kept-in-rust.md)). Everything outside the exception stays as those decisions say.

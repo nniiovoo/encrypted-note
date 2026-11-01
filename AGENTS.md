@@ -6,19 +6,20 @@ A personal app for storing secrets, encrypted and saved only on this computer.
 
 - Never put real secrets (passwords, keys, seed phrases) in code, tests, docs, `.scratch/` issues, or commits. Use obviously fake placeholders.
 - Never open, list, copy or decrypt a real Vault, Backup or Safety Copy, never run the Emergency Reader on one, and never ask for or accept its Master Password, Recovery Key or Hidden Fields, even if the owner asks (ADR-0007). Say no, say why, and offer a fictional Vault.
-- Never add network access to the Vault core or WebView: no HTTP clients, updaters, telemetry, crash reporters or analytics (ADR-0001). The only approved exception is the optional Agent Companion helper (ADR-0009): a separately sandboxed XPC service that makes only the companion's fixed OpenAI request. Never widen it, give it Vault access, or add networking anywhere else.
+- Never add network access to the Vault core or WebView: no HTTP clients, updaters, telemetry, crash reporters or analytics (ADR-0001). The only approved exception is the optional Agent Companion helper (ADR-0009): a separately sandboxed XPC service that makes only the companion's fixed OpenAI request. Never widen it, give it Vault access, or add networking anywhere else. Its source is in `companion/`: never import that folder from `src/`, `src-tauri/src/` or `crates/` (ADR-0010).
 - Keys and decrypted Notes live only in the Rust core; the WebView receives one Hidden Field at a time (ADR-0003). The Agent Companion helper may hold one separately created Agent Key, never a Vault value (ADR-0009).
 - Never pass Vault content, Note metadata, Note keys, Wallet Kinds, the Master Password or the Recovery Key to the Agent Companion, and never forward helper output, provider errors, keys or tokens to the WebView (ADR-0009).
 - Add a dependency only when it's clearly needed, pin its exact version, and say why in the PR/issue.
 
 ## Verify
 
-- In a fresh clone or worktree, first: `npm ci --ignore-scripts` (never `npm install`, ADR-0003)
+- In a fresh clone or worktree, first: `npm ci --ignore-scripts` (never `npm install`, ADR-0003), and on Mac also `npm --prefix companion ci --ignore-scripts`
 - Before a pull request: `./scripts/check.sh`
 - One crate: `cargo test --locked -p <store|notes|session|policy|guard|vault-format|enote-reader>` (slow: run it in the background)
 - App crate: `cargo test --locked -p encrypted-note-app --tests` (slow, can take many minutes: run it in the background)
 - WebView: `npm run typecheck`
-- Network rule: `node scripts/check-network-source.mjs`
+- Network rule, and no Vault imports of `companion/`: `node scripts/check-network-source.mjs`
+- Companion (Mac): `npm --prefix companion test`. It runs one file at a time because the tests share port 8789, so don't run it alongside `scripts/verify-companion.sh`.
 - App with a fictional Vault: `ENOTE_DEV_DATA_DIR="$(mktemp -d)" npm run tauri dev` (add `ENOTE_DEV_ALLOW_CAPTURE=1` for screenshots)
 - Screens without Rust: `npm run dev` (port 1420 must be free), then open `http://127.0.0.1:1420/fixture.html?phase=unlocked&companion=running`. Replies are fictional; this proves nothing about native panels, locks or the helper.
 

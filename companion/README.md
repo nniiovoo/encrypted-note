@@ -1,6 +1,6 @@
 # Restricted OpenAI text companion
 
-A separate, optional local MCP tool for short text generation. This directory is outside encrypted-note. It neither imports that app nor opens its Vault, Notes, metadata, backups, recovery material, wallet keys or IPC. It is a runnable development implementation with fictional-provider tests; no live key, account configuration, deployment or ChatGPT connection has been performed.
+A separate, optional local MCP tool for short text generation. Its source is in the encrypted-note repository, but it's a separate program ([ADR-0010](../docs/adr/0010-companion-source-lives-in-this-repository.md)). It neither imports that app nor opens its Vault, Notes, metadata, backups, recovery material, wallet keys or IPC. It is a runnable development implementation with fictional-provider tests; no live key, account configuration, deployment or ChatGPT connection has been performed.
 
 The default transport is stdio: importing the modules starts no listener, and tests listen only on loopback with fictional data. Optional HTTP starts only with the explicit HTTP entry point and binds 127.0.0.1:8789. There is no hosted account system, public listener, telemetry, browser launcher or automatic tunnel setup.
 
@@ -97,7 +97,7 @@ This implementation is ready for code review and fictional-data development. It 
 
 ## Integrated with encrypted-note
 
-encrypted-note can bundle this companion as its optional **Agent Companion** helper ([encrypted-note ADR-0009](https://github.com/nniiovoo/encrypted-note/blob/main/docs/adr/0009-optional-agent-companion-helper.md)). The app pins one commit of this repository, the SHA-256 of policy.json and an official Node.js release, and runs `isolation/integrated-broker.mjs` inside a separate XPC service with its own macOS sandbox container. A fictional-data spike showed that a plain child process of the sandboxed app could read the app's container, while that XPC service could not; the app's Vault therefore stays outside this companion's reach.
+encrypted-note can bundle this companion as its optional **Agent Companion** helper ([ADR-0009](../docs/adr/0009-optional-agent-companion-helper.md)). Packaging bundles this folder as committed, verifies it against the pinned SHA-256 of policy.json, adds a pinned official Node.js release, and the app runs `isolation/integrated-broker.mjs` inside a separate XPC service with its own macOS sandbox container. A fictional-data spike showed that a plain child process of the sandboxed app could read the app's container, while that XPC service could not; the app's Vault therefore stays outside this companion's reach.
 
 The integrated entry point runs the same fixed broker with:
 
@@ -113,3 +113,7 @@ Reviewed plans are now version 2 with `grantExpiresAt`: a canonical UTC instant 
 ## Prepared isolated Mac setup
 
 [The reviewed setup package](isolation/PLAN.md) prepares a Standard-account boundary, an owner-controlled launcher that reads only the secure helper’s confirmed 0600 key file, and an agent-side local stdio bridge. No account, ACL, provider setting, key or runtime was changed. The generic environment-based entry points above remain development interfaces; the selected protected deployment uses this separate setup and keeps the provider key out of environment/configuration.
+
+## License
+
+MIT, like the rest of this repository: see [LICENSE](../LICENSE).
