@@ -515,6 +515,51 @@ fn replaced_safety_copies_older_than_30_days_are_deleted_except_the_newest() {
 }
 
 #[test]
+fn a_clock_far_ahead_for_one_save_keeps_the_older_copies() {
+    let (_tmp, root) = data_dir();
+    let dir = VaultDir::open(&root).unwrap();
+    for day in 0..20 {
+        let bytes = format!("fake-day{day}");
+        dir.save_vault(bytes.as_bytes(), &accept, T0 + day * DAY)
+            .unwrap();
+    }
+    dir.replace_vault(b"fake-backup-1", &accept, T0 + 20 * DAY)
+        .unwrap();
+    dir.replace_vault(b"fake-backup-2", &accept, T0 + 21 * DAY)
+        .unwrap();
+    dir.replace_vault(b"fake-backup-3", &accept, T0 + 22 * DAY)
+        .unwrap();
+    let stamps = |dir: &VaultDir, kind: SafetyKind| -> Vec<i64> {
+        let copies = dir.safety_copies().unwrap();
+        let of_kind = copies.iter().filter(|c| c.kind == kind);
+        of_kind.map(|c| c.created_at).collect()
+    };
+    let autos = stamps(&dir, SafetyKind::Automatic);
+    assert_eq!(autos.len(), 19);
+    let replaced = stamps(&dir, SafetyKind::Replaced);
+    assert_eq!(replaced.len(), 3);
+
+    // One save with the clock far ahead makes every older copy look expired. Only the oldest of
+    // each kind goes, so real dated copies survive the mistake.
+    let ahead = T0 + 400 * DAY;
+    dir.save_vault(b"fake-wrong-clock", &accept, ahead).unwrap();
+    let mut expected_autos = vec![ahead];
+    expected_autos.extend_from_slice(&autos[..autos.len() - 1]);
+    assert_eq!(stamps(&dir, SafetyKind::Automatic), expected_autos);
+    assert_eq!(stamps(&dir, SafetyKind::Replaced), replaced[..2].to_vec());
+
+    // The clock is right again: nothing else expires, and the new copy keeps the future stamp so
+    // it still lists first.
+    let right = T0 + 23 * DAY;
+    dir.save_vault(b"fake-clock-fixed", &accept, right).unwrap();
+    assert_eq!(
+        stamps(&dir, SafetyKind::Automatic).len(),
+        expected_autos.len() + 1
+    );
+    assert_eq!(stamps(&dir, SafetyKind::Replaced), replaced[..2].to_vec());
+}
+
+#[test]
 fn safety_copies_ignore_unrelated_files() {
     let (_tmp, root) = data_dir();
     let dir = VaultDir::open(&root).unwrap();
