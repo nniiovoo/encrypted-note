@@ -2,7 +2,7 @@
 
 Status: ready-for-human — not run. Refs [#26](https://github.com/nniiovoo/encrypted-note/issues/26).
 
-This is a future owner-scoped test of the proposed separation between an owner account and a standard account for local agents. It makes no claim that the accounts are isolated on a particular Mac. The accepted boundary is separate restricted Agent Keys and absolutely no agent access to the owner's Vault, Notes, Master Password, Recovery Key, Backups or Safety Copies; [#25](https://github.com/nniiovoo/encrypted-note/issues/25) records that decision. The app keeps decrypted Notes in Rust ([ADR-0003](adr/0003-tauri-with-secrets-kept-in-rust.md)); it does not provide an agent interface.
+This is a future owner-scoped test of the proposed separation between an owner account and a standard account for local agents. It makes no claim that the accounts are isolated on a particular Mac. The accepted boundary is separate restricted Agent Keys and absolutely no agent access to the owner's Vault, Notes, Master Password, Recovery Key, Backups or Safety Copies; [#25](https://github.com/nniiovoo/encrypted-note/issues/25) records that decision. The app keeps decrypted Notes in Rust ([ADR-0003](adr/0003-tauri-with-secrets-kept-in-rust.md)); it offers agents no route to the Vault.
 
 ## Before a run
 
