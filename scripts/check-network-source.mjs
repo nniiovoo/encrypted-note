@@ -11,9 +11,10 @@
 // EventSource, WebTransport and RTCPeerConnection names; Rust std::net/tokio::net, socket types,
 // libc socket/connect/getaddrinfo and NSURLSession/NSURLConnection names.
 // Native URLSession/NSURLSession/URLRequest/NSURLConnection, Network NWConnection/NWListener and
-// nw_connection names, importing or including Network or CFNetwork, socket() calls, getaddrinfo,
-// CFStream/CFReadStream/CFWriteStream, and
-// URLs built from a string (URL(string:), URLWithString:); file URLs are allowed.
+// nw_connection/nw_listener names, importing or including Network or CFNetwork, socket() calls,
+// getaddrinfo, CFStream/CFReadStream/CFWriteStream, and
+// URLs built from a string (URL(string:), NSURL(string:), URLComponents(string:),
+// URLWithString:, initWithString:); file URLs are allowed.
 // Approved IPC stays distinct: src/api.ts invoke/listen and the isolation hook use
 // Tauri's SDK. Its ipc:/http://ipc.localhost transport and tauri.localhost app URLs
 // are not network API calls. URL literals (including navigation tests) are allowed.
@@ -28,12 +29,12 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const browserApi = /\b(?:fetch|sendBeacon)(?=\s*(?:\?\.\s*)?\()|\b(?:XMLHttpRequest|WebSocket|EventSource|WebTransport|(?:webkit|moz)?RTCPeerConnection)\b/g;
-const rustApi = /\b(?:std|tokio)\s*::\s*net\b|\b(?:TcpStream|TcpListener|UdpSocket)\b|\blibc\s*::\s*(?:socket|connect|getaddrinfo)\b|\blibc\s*::\s*\{[^}]*\b(?:socket|connect|getaddrinfo)\b|\bNSURL(?:Session|Connection)\b/g;
-const nativeApi = /\b(?:URLSession|NSURLSession|URLRequest|NSURLConnection|NWConnection|NWListener|getaddrinfo)\b|\b(?:import|include)\s+<?(?:Network|CFNetwork)\b|\bsocket\s*\(|\bCF(?:Read|Write)?Stream\w*|\bnw_connection\w*|\bURL\(string:|\bURLWithString:/g;
+const rustApi = /\b(?:std|tokio)\s*::\s*net\b|\b(?:TcpStream|TcpListener|UdpSocket)\b|\blibc\s*::\s*(?:socket|connect|getaddrinfo)\b|\blibc\s*::\s*\{[^;]*\b(?:socket|connect|getaddrinfo)\b|\blibc\s*::\s*\*|\bNSURL(?:Session|Connection)\b/g;
+const nativeApi = /\b(?:URLSession|NSURLSession|URLRequest|NSURLConnection|NWConnection|NWListener|getaddrinfo)\b|\b(?:import|include)\s*[<"]?\s*(?:Network|CFNetwork)\b|\bimport\s+\w+\s+(?:Network|CFNetwork)\b|\bsocket\s*\(|\bCF(?:Read|Write)?Stream\w*|\bnw_(?:connection|listener)\w*|\b(?:NS)?URL(?:Components)?(?:\s*\.\s*init)?\s*\(\s*string\s*:|\bURLWithString\s*:|\[\s*NSURL\s+alloc\s*\]\s*initWithString\s*:/g;
 const rootPage = /^(?:index|fixture)\.html$/;
 const browserSource = /^(?:src|isolation)\/.*\.(?:[cm]?[jt]s|jsx|tsx|html)$/;
 const rustSource = /^(?:src-tauri\/src|crates\/[^/]+\/src)\/.*\.rs$/;
-const nativeSource = /^src-tauri\/native\/.*\.(?:swift|m|mm|c|cc|cpp|h)$/;
+const nativeSource = /^src-tauri\/native\/.*\.(?:swift|m|mm|c|cc|cpp|cxx|c\+\+|h|hh|hpp|hxx|inl)$/;
 
 function patternFor(path) {
   if (rootPage.test(path) || browserSource.test(path)) return browserApi;
@@ -97,6 +98,8 @@ for (const source of [
   "libc::getaddrinfo(fake_host, fake_port, fake_hints, fake_result)",
   "use libc::{c_int, socket};",
   "use libc :: {\n  connect,\n};",
+  "use libc::*;",
+  "use libc::{c_int, fake::{socket}};",
   "let session = msg_send![class!(NSURLSession), sharedSession];",
   "let connection = msg_send![class!(NSURLConnection), alloc];",
 ]) {
@@ -116,6 +119,12 @@ for (const source of [
   'CFStreamCreatePairWithSocketToHost(nil, fakeHost, 443, &fakeRead, &fakeWrite)',
   'let connection = nw_connection_create(fakeEndpoint, fakeParameters)',
   'let page = try Data(contentsOf: URL(string: "https://example.invalid/fake")!)',
+  'let page = URL (string: "https://example.invalid/fake")',
+  'let page = URL.init(string: "https://example.invalid/fake")',
+  'let page = NSURL(string: "https://example.invalid/fake")',
+  'let parts = URLComponents(string: "https://example.invalid/fake")',
+  'import class Network.NWEndpoint',
+  'let listener = nw_listener_create(fakeParameters)',
 ]) {
   assert.equal(matches("src-tauri/native/nested/fake.swift", source).length, 1, source);
 }
@@ -131,8 +140,17 @@ for (const [path, source] of [
   ["src-tauri/native/fake.m", "NSURLSession *session = fakeSession;"],
   ["src-tauri/native/fake.mm", 'NSURL *page = [NSURL URLWithString:@"https://example.invalid/fake"];'],
   ["src-tauri/native/fake.c", "int descriptor = socket(AF_INET, SOCK_STREAM, 0);"],
+  ["src-tauri/native/fake.m", "#include<Network/Network.h>"],
+  ["src-tauri/native/fake.m", '#import "CFNetwork/CFNetwork.h"'],
+  ["src-tauri/native/fake.mm", 'NSURL *page = [[NSURL alloc] initWithString:@"https://example.invalid/fake"];'],
+  ["src-tauri/native/fake.cxx", "int descriptor = socket(AF_INET, SOCK_STREAM, 0);"],
+  ["src-tauri/native/fake.hh", "#include <Network/Network.h>"],
+  ["src-tauri/native/fake.hpp", "#include <Network/Network.h>"],
 ]) {
   assert.equal(matches(path, source).length, 1, source);
+}
+for (const source of ["import Foundation", "import CryptoKit", "#include <stdio.h>", 'let file = URL(fileURLWithPath: "/fake")']) {
+  assert.deepEqual(matches("src-tauri/native/fake.swift", source), [], source);
 }
 assert.deepEqual(matches("src-tauri/native/fake.swift", '// fake source\nlet session = Foundation.URLSession.shared'), [
   "src-tauri/native/fake.swift:2: disallowed networking entry point (URLSession)",

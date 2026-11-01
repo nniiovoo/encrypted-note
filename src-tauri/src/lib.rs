@@ -237,11 +237,13 @@ fn dev_allow_capture() -> bool {
     cfg!(debug_assertions) && std::env::var("ENOTE_DEV_ALLOW_CAPTURE").as_deref() == Ok("1")
 }
 
+const RELEASE_VAULT_FOLDER: &str = "Vault.noindex";
+const DEV_VAULT_FOLDER: &str = "Vault.dev.noindex";
 /// A dev run gets its own folder, so forgetting `ENOTE_DEV_DATA_DIR` can't open the real Vault.
 const VAULT_FOLDER: &str = if cfg!(debug_assertions) {
-    "Vault.dev.noindex"
+    DEV_VAULT_FOLDER
 } else {
-    "Vault.noindex"
+    RELEASE_VAULT_FOLDER
 };
 
 /// Mac: `<app data>/` + `VAULT_FOLDER` (the suffix keeps Spotlight out). Windows: LocalAppData, not
@@ -393,7 +395,7 @@ impl Clock for SystemClock {
 
 #[cfg(test)]
 mod tests {
-    use super::{Url, VAULT_FOLDER, is_app_url};
+    use super::{DEV_VAULT_FOLDER, RELEASE_VAULT_FOLDER, Url, VAULT_FOLDER, is_app_url};
 
     fn url(text: &str) -> Url {
         Url::parse(text).expect("a valid test URL")
@@ -401,7 +403,12 @@ mod tests {
 
     #[test]
     fn only_a_release_build_uses_the_real_vault_folder() {
-        assert_eq!(VAULT_FOLDER == "Vault.noindex", !cfg!(debug_assertions));
+        assert_eq!(RELEASE_VAULT_FOLDER, "Vault.noindex");
+        assert_eq!(DEV_VAULT_FOLDER, "Vault.dev.noindex");
+        assert_eq!(
+            VAULT_FOLDER == RELEASE_VAULT_FOLDER,
+            !cfg!(debug_assertions)
+        );
     }
 
     #[test]

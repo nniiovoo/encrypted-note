@@ -40,6 +40,11 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+need() { command -v "$1" >/dev/null 2>&1 || { echo "$1 not found: $2" >&2; exit 1; }; }
+need node "install Node.js 24 or newer"
+need npm "install Node.js 24 or newer"
+need git "run 'xcode-select --install'"
+need xcrun "run 'xcode-select --install'"
 [[ $BUILD_APP == 0 || -d node_modules ]] || { echo "node_modules not found: run 'npm ci --ignore-scripts'" >&2; exit 1; }
 
 LOCK="$ROOT/src-tauri/companion/companion.lock.json"

@@ -103,11 +103,12 @@ const summaries: NoteSummary[] = views.map(({ id, kind, title, favorite, updated
   has_hidden: true,
 }));
 
+const companionState = (query.get("companion") ?? "stopped") as CompanionState;
 const companion: CompanionView = {
-  platform_supported: true,
-  helper_bundled: true,
-  state: (query.get("companion") ?? "stopped") as CompanionState,
-  error: null,
+  platform_supported: companionState !== "unsupported",
+  helper_bundled: companionState !== "unsupported" && companionState !== "unavailable",
+  state: companionState,
+  error: companionState === "error" ? "internal" : null,
   expires_at: now + 3600,
   local: { ready: true, runtime: true, plan: true, credential: true, handoff: true, agent: true, code: true },
   chatgpt: "not_verified",
