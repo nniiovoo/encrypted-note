@@ -653,10 +653,10 @@ export const strings = {
   companionChatgpt:
     "Not checked by this app. It is set up from the agent account and counts as working only after a test call you make yourself. See docs/agent-companion.md in the project folder.",
   companionOperationTitle: "What an approved agent can do",
-  companionOperation: (o: { name: string; model: string; destination: string; max_input_bytes: number; max_output_tokens: number; per_minute: number; per_hour: number; per_run: number; grant_minutes: number }) => [
+  companionOperation: (o: { name: string; model: string; destination: string; max_input_bytes: number; max_output_tokens: number; per_minute: number; per_hour: number; grant_minutes: number }) => [
     `One tool: ${o.name}, with the fixed model ${o.model}. No files, browsing, other tools or other models.`,
     `Sends the text an agent gives it (at most ${o.max_input_bytes.toLocaleString("en-US")} bytes) to ${o.destination}, and returns at most ${o.max_output_tokens} tokens of text.`,
-    `One request at a time; at most ${o.per_minute} a minute, ${o.per_hour} an hour and ${o.per_run} per start. Each start lasts at most ${o.grant_minutes} minutes.`,
+    `One request at a time; at most ${o.per_minute} a minute and ${o.per_hour} an hour. Each start lasts at most ${o.grant_minutes} minutes.`,
   ],
   companionCustody: `The ${HELPER_KEEPS_KEY}`,
   // For an owner with no confirmed key. Never says that no file exists: the check can say no while
@@ -676,13 +676,6 @@ export const strings = {
   ],
   companionStart: "Start for up to one hour",
   companionStop: "Stop",
-  companionConfirmTitle: "Start the Agent Companion?",
-  // `anywhere`: activity anywhere on this computer counts for Auto-lock, as chosen in Settings.
-  companionConfirmText: (minutes: number, anywhere: boolean) => [
-    "For up to one hour, the approved agent can send text to OpenAI through the helper. That can cost money, and what it sends leaves this computer.",
-    `The hour ends sooner if the Vault locks: Auto-lock is set to ${plural(minutes, "minute", "minutes")} without using this ${anywhere ? "computer" : "window"}.`,
-    "Stop ends new requests at once. It can't undo a request already sent or billed, and it doesn't revoke the Agent Key at OpenAI.",
-  ],
   companionErrors: {
     plan_missing: "No plan file is added. Use Set up… to choose it.",
     plan_invalid: "The plan file isn't a correct version-2 plan. Prepare a new one.",

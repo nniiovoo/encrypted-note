@@ -111,7 +111,6 @@ const companion: CompanionView = {
   error: companionState === "error" ? "internal" : null,
   expires_at: now + 3600,
   local: { ready: true, runtime: true, plan: true, credential: true, handoff: true, agent: true, code: true },
-  chatgpt: "not_verified",
   operation: {
     name: "generate_text",
     destination: "api.openai.com",
@@ -121,7 +120,6 @@ const companion: CompanionView = {
     concurrent: 1,
     per_minute: 1,
     per_hour: 1,
-    per_run: 1,
     grant_minutes: 60,
   },
 };

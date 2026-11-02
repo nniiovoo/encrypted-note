@@ -30,7 +30,6 @@ pub const OPERATION: OperationView = OperationView {
     concurrent: 1,
     per_minute: 6,
     per_hour: 60,
-    per_run: 100,
     grant_minutes: 60,
 };
 
@@ -98,7 +97,6 @@ pub struct OperationView {
     pub concurrent: u32,
     pub per_minute: u32,
     pub per_hour: u32,
-    pub per_run: u32,
     pub grant_minutes: u32,
 }
 
@@ -126,7 +124,6 @@ pub struct CompanionView {
     pub expires_at: Option<i64>,
     pub local: Readiness,
     /// The private ChatGPT connection is set up and checked outside this app.
-    pub chatgpt: &'static str,
     pub operation: OperationView,
 }
 
@@ -291,7 +288,6 @@ impl Companion {
             error: None,
             expires_at: None,
             local: Readiness::default(),
-            chatgpt: "not_verified",
             operation: OPERATION,
         };
         let raw = match reply {
@@ -613,7 +609,6 @@ mod tests {
         assert!(!partial.local.ready);
         assert!(partial.local.runtime && partial.local.plan && partial.local.credential);
         assert!(!partial.local.handoff && partial.local.code && !partial.local.agent);
-        assert_eq!(partial.chatgpt, "not_verified");
     }
 
     #[test]
@@ -737,7 +732,6 @@ mod tests {
         assert_eq!(
             keys,
             [
-                "chatgpt",
                 "error",
                 "expires_at",
                 "helper_bundled",

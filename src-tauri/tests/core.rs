@@ -4698,7 +4698,6 @@ fn native_run(
 fn native_new_password(password: &str) -> NativeCredentials {
     NativeCredentials::NewPassword {
         password: pw(password),
-        confirmation: pw(password),
     }
 }
 
@@ -4953,7 +4952,6 @@ fn native_setup_recovery_reset_and_password_change_keep_credentials_in_rust() {
         NativeCredentials::PasswordChange {
             current: pw(NEW_PASSWORD),
             password: pw(PASSWORD),
-            confirmation: pw(PASSWORD),
         },
     )
     .unwrap();
@@ -5613,21 +5611,8 @@ fn restoring_a_pre_rotation_safety_copy_brings_back_its_credentials() {
 }
 
 #[test]
-fn native_setup_rejects_mismatch_and_weak_password_without_a_vault() {
+fn native_setup_rejects_a_weak_password_without_a_vault() {
     let mut app = App::new();
-    assert_eq!(
-        code(native_run(
-            &mut app.core,
-            NativeAction::CreateVault {
-                params: KdfParams::TESTING
-            },
-            NativeCredentials::NewPassword {
-                password: pw(PASSWORD),
-                confirmation: pw(NEW_PASSWORD)
-            }
-        )),
-        "invalid_input"
-    );
     assert_eq!(
         code(native_run(
             &mut app.core,
@@ -5795,7 +5780,6 @@ fn native_password_change_failure_preserves_the_saved_and_live_password() {
             NativeCredentials::PasswordChange {
                 current: pw(PASSWORD),
                 password: pw(NEW_PASSWORD),
-                confirmation: pw(NEW_PASSWORD),
             },
         )
         .unwrap();

@@ -70,15 +70,15 @@ export interface Settings {
   seed_explainer_seen: boolean;
   /** How long a copy stays on the clipboard: 30 (default) or 60 seconds. A copied Wallet Kind
    *  value is cleared after 30 either way. Rust always sends it. */
-  clipboard_clear_seconds?: number;
+  clipboard_clear_seconds: number;
   /** The owner's choice (off by default) to count keyboard and mouse use anywhere on this
    *  computer as activity for Auto-lock. Even then the app locks no later than 60 minutes after
    *  the last activity inside its own window; lock_in_ms is the real countdown. Rust always
    *  sends it. */
-  count_activity_anywhere?: boolean;
+  count_activity_anywhere: boolean;
   /** Whether this computer can do that (the Mac only, for now). Where it is false the setting
    *  stays off whatever is sent. Rust always sends it. */
-  count_activity_anywhere_supported?: boolean;
+  count_activity_anywhere_supported: boolean;
 }
 
 /** What setSettings takes. The lock rule is always sent. Each of the two newer settings may be
@@ -119,9 +119,9 @@ export interface AppStatus {
    *  the time left can't tell (a Wallet Kind copy may have less than the one before it, and a
    *  clear that is being tried again has more). A lock doesn't reset it. Rust always sends
    *  it. */
-  copies?: number;
+  copies: number;
   /** Gone on lock, Sharing Guard or clipboard clear. */
-  clipboard_source?: ClipboardSource | null;
+  clipboard_source: ClipboardSource | null;
   /** The currently shown Hidden Field, if any (screens hide anything else). */
   reveal: {
     note_id: string;
@@ -129,11 +129,11 @@ export interface AppStatus {
     expires_in_ms: number | null;
     /** Whether extendReveal would give this value more time right now. Never for a value
      *  shown while held. Rust always sends it. */
-    can_extend?: boolean;
+    can_extend: boolean;
     /** For a Wallet Kind value shown for 20 s: how many more times it can be given more time
      *  (3 at first). null where there is no such count: an ordinary Kind (no limit) or a held
      *  value (never). Rust always sends it. */
-    extensions_left?: number | null;
+    extensions_left: number | null;
   } | null;
   failed_attempts: number;
   /** Milliseconds before another unlock attempt is allowed, null if allowed now. */
@@ -181,12 +181,12 @@ export interface VaultPreview {
   // Vault. Otherwise all three are null: there is nothing to compare, or the Vault here is
   // Locked. Rust always sends them.
   /** Notes in this computer's Vault that are not in Trash. */
-  current_note_count?: number | null;
+  current_note_count: number | null;
   /** When this computer's Vault was last changed (Unix seconds, like changed_at). */
-  current_changed_at?: number | null;
+  current_changed_at: number | null;
   /** How many Notes here (not in Trash) the copy doesn't hold at all, its Trash included.
    *  A number only: no titles are sent. */
-  only_here?: number | null;
+  only_here: number | null;
 }
 
 export interface SafetyCopy {
@@ -417,7 +417,6 @@ export interface CompanionOperation {
   concurrent: number;
   per_minute: number;
   per_hour: number;
-  per_run: number;
   grant_minutes: number;
 }
 
@@ -431,7 +430,6 @@ export interface CompanionView {
   /** Local readiness on this Mac. */
   local: CompanionReadiness;
   /** The private ChatGPT connection is checked outside this app. */
-  chatgpt: "not_verified";
   operation: CompanionOperation;
 }
 

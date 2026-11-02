@@ -151,7 +151,7 @@ fn guesses_log10(entropy: &zxcvbn::Entropy) -> f64 {
     (orderings + each).min(entropy.guesses_log10())
 }
 
-/// 0-4 for the strength meter, in even steps up to the bar: 4 means the estimate reaches
+/// 0-4, in even steps up to the bar: 4 means the estimate reaches
 /// 10^16. (zxcvbn's own scale gives 4 from 10^10, which would show full marks for passwords
 /// the gate refuses.)
 fn score_for(guesses_log10: f64) -> u8 {

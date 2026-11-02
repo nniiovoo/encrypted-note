@@ -448,7 +448,7 @@ fn disable_persists_before_cleanup_and_surviving_items_are_unusable() {
     app.core.disable_quick_unlock().unwrap();
     assert!(app.settings()["quick_unlock_binding"].is_null());
     assert!(app.core.take_quick_unlock_cleanup());
-    app.core.quick_unlock_cleanup_failed();
+    app.core.quick_unlock_cleanup_finished(false);
     assert!(app.core.app_status().quick_unlock.cleanup_failed);
     assert!(app.core.app_status().quick_unlock.reason.is_none());
     let mut app = app.restart();
@@ -464,7 +464,7 @@ fn cleanup_retry_stays_disabled_until_removal_success_clears_the_warning() {
     let payload = app.enroll();
     app.core.disable_quick_unlock().unwrap();
     assert!(app.core.take_quick_unlock_cleanup());
-    app.core.quick_unlock_cleanup_failed();
+    app.core.quick_unlock_cleanup_finished(false);
     assert!(app.core.app_status().quick_unlock.cleanup_failed);
 
     // Retrying uses the same disable path and remains a cleanup request, never enrollment.
@@ -495,7 +495,7 @@ fn cleanup_retry_preserves_independent_unavailable_hardware_reason() {
     app.core.set_quick_unlock_availability(false, Some(REASON));
     app.core.disable_quick_unlock().unwrap();
     assert!(app.core.take_quick_unlock_cleanup());
-    app.core.quick_unlock_cleanup_failed();
+    app.core.quick_unlock_cleanup_finished(false);
     let failed = app.core.app_status().quick_unlock;
     assert!(failed.cleanup_failed);
     assert_eq!(failed.reason, Some(REASON));
@@ -550,8 +550,7 @@ fn a_failed_password_change_leaves_quick_unlock_off_and_the_vault_unchanged() {
             NativeAction::ChangePassword { rotate: false },
             NativeCredentials::PasswordChange {
                 current: text(WRONG),
-                password: text(NEW_PASSWORD),
-                confirmation: text(NEW_PASSWORD)
+                password: text(NEW_PASSWORD)
             }
         )
         .is_err()

@@ -1,6 +1,6 @@
 # Screen-capture test checklist (ADR-0002)
 
-Re-run after every macOS or meeting-app update. Use a **release build** (`npx tauri build`; release builds have no screenshot override), open it on a **normal desktop, not a full-screen Space**, and keep it on the welcome or lock screen. A test **passes** when the capture shows whatever is *behind* the encrypted-note window, or a blank or black box, and never the app's contents.
+Re-run after every macOS or meeting-app update. Use a **release build** (`npm run tauri -- build -- --locked`; release builds have no screenshot override), open it on a **normal desktop, not a full-screen Space**, and keep it on the welcome or lock screen. A test **passes** when the capture shows whatever is *behind* the encrypted-note window, or a blank or black box, and never the app's contents.
 
 Quick check, run from a terminal that has Screen Recording permission. It passes when macOS refuses the window capture or the captured pixels are uniform. A nonuniform capture requires manual inspection and exits with status 2; file size alone can't tell whether pixels are the app or the desktop behind it. In that case the script keeps the captured image and prints its path, so you can look at it; delete it afterwards (the command is printed too).
 
@@ -36,6 +36,7 @@ macOS 26.4.1 · Zoom 7.0.6 · Discord 0.0.413 · OBS 32.1.2 · Chrome 153 · Qui
 
 | Capture path | How to test | Result |
 |---|---|---|
+| Spotlight clipboard history | turn it on, copy a fake Login password from a fake-data Vault, check the list | ⬜ |
 | Window server flag | automatic (window server reports `kCGWindowSharingState`) | ✅ 0 = excluded (2026-09-24) |
 | ScreenCaptureKit window capture | an automation tool captured the release window | ✅ blank (2026-09-24) |
 | Sharing Guard | open Zoom / Discord / QuickTime while unlocked | ✅ shield named Discord + QuickTime Player (2026-09-23) |
@@ -115,7 +116,7 @@ Use a fake-data Vault and fake values only. The steps come from the Windows chec
 | Recovery Kit retype box during a Retry long enough to say Please wait… | The typed text masks, then unmasks | pending |
 | Show in File Explorer | The Vault folder opens | pending |
 | A fake value containing `&` | It shows as typed in the panel | pending |
-| Panels at 100%, 125%, 150% and 200% scaling | No cut-off text. Record the System font's height at each; a height above 20 px means the panels need scaling work | pending |
+| Panels at 100%, 125%, 150% and 200% scaling | No cut-off text. Record the System font's height at each; a height above 20 px means the panels need scaling work. A long fake readout scrolls to its last character | pending |
 
 ### Mac ↔ Windows Backup round trip
 

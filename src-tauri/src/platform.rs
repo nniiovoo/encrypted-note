@@ -2,8 +2,8 @@
 //!
 //! * [`capture_hiding_active`]: the Capture Hiding self-check (main thread only).
 //! * [`running_apps`]: what the Sharing Guard classifies.
-//! * [`SystemClipboard`]: the clipboard, with our copies marked private (kept out of OS history
-//!   and cloud sync; clipboard managers skip them only by convention). It never reads the
+//! * [`SystemClipboard`]: the clipboard, with our copies marked private (asked to stay out of OS
+//!   history and cloud sync; clipboard tools aren't obliged to honor that). It never reads the
 //!   clipboard's contents.
 //! * [`observe_lock_events`]: OS notifications that must lock the app at once, and app switches.
 //! * [`lock_events_unavailable`]: Windows lock notifications whose registration failed.
@@ -19,8 +19,7 @@
 //! macOS and Windows are implemented here; other platforms get harmless stand-ins (no self-check,
 //! no running apps, no copy).
 //!
-//! This module, `hardening.rs` and `wipe_on_free.rs` are the only places allowed to use
-//! `unsafe`; every block says why it is sound.
+//! Only the modules marked in `lib.rs` may use `unsafe`; every block says why it is sound.
 
 #[cfg(target_os = "macos")]
 pub use mac::*;

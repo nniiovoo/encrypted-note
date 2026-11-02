@@ -95,7 +95,7 @@ Your Notes are still in the Vault file, and the Emergency Reader reads it withou
 
 If the Locked screen keeps saying encrypted-note couldn't read or write a file, or that the file is far larger than any Vault: quit the app and move `vault.enote` out of that folder. Keep it; don't delete it. Reopen the app: it offers your Safety Copies and "I already have a Vault → Open a Backup".
 
-**Read them with the Emergency Reader.** It works on a Vault, a Backup or a Safety Copy. It asks for the Master Password without showing what you type (add `--recovery-key` to use the Recovery Key instead), prints to the terminal and writes nothing to disk.
+**Read them with the Emergency Reader.** It works on a Vault, a Backup or a Safety Copy. It asks for the Master Password without showing what you type (add `--recovery-key` to use the Recovery Key instead), prints to the terminal and writes nothing to disk. Your terminal keeps what it prints and may save it.
 
 ```bash
 cargo run --locked -p enote-reader -- <file>                    # list every Note with a number; Hidden Fields stay as dots
@@ -104,6 +104,8 @@ cargo run --locked -p enote-reader -- <file> --reveal           # every Note, wi
 ```
 
 Give the reader a file, such as `vault.enote`, or a Safety Copy inside the `safety` folder. Don't give it the folder. Run these from a current copy of this project's source, with Rust installed. The first build may need internet, to download the exact versions listed in `Cargo.lock`. Keep the quotes, because the Mac path has a space in it. Don't write `~` inside quotes: the shell won't expand it.
+
+**Do this once, now, while everything works:** run `cargo build --locked --release -p enote-reader`, then copy `target/release/enote-reader` and this guide next to your Backup. Replace it after updating the app. No Rust? [FORMAT.md section 11](FORMAT.md#11-reference-decryptor-python) has a Python decryptor.
 
 Mac, the built app:
 

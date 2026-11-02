@@ -314,7 +314,7 @@ fn build(
             )?);
         } else {
             key_loop.push(button(overlay, RESET_BUTTON, x, y, 200, EXTEND)?);
-            expires = Some(Instant::now() + Duration::from_secs(20));
+            expires = Some(Instant::now() + Duration::from_millis(session::ACCESSIBLE_REVEAL_MS));
         }
         y += 44;
     }
@@ -1166,7 +1166,8 @@ fn extend() {
             }
             if authorization == Authorization::Allowed {
                 panel.extensions += 1;
-                panel.expires = Some(Instant::now() + Duration::from_secs(20));
+                panel.expires =
+                    Some(Instant::now() + Duration::from_millis(session::ACCESSIBLE_REVEAL_MS));
             }
             true
         });

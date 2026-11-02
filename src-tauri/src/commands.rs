@@ -166,9 +166,6 @@ pub async fn quick_unlock(app: AppHandle) -> Result<(), ApiError> {
 
 // ---------- setup, unlock, lock ----------
 
-// These two need no Vault and no state, so they don't wait for the core: scoring a long
-// password can take a while, and nothing that locks may queue behind it.
-
 #[tauri::command]
 pub async fn create_vault(app: AppHandle) -> Result<(), ApiError> {
     match crate::native_coordinator::create(app).await? {
@@ -517,23 +514,34 @@ pub fn dismiss_sharing_guard(app: AppHandle) {
 
 // ---------- dialogs ----------
 
-/// Show a native file dialog off the main thread (rfd hands it to the main thread itself) and
-/// wait for the owner. Cancelling is the `cancelled` error the screens ignore.
+/// Show a native dialog off the main thread (rfd hands it to the main thread itself) and wait for
+/// the owner.
 ///
 /// Focus changes are ignored while it is open, so a shown value is hidden first; switching to
 /// another app meanwhile still arrives as an app-switch notification (`platform`).
+async fn with_native_dialog<T: Send + 'static>(
+    app: &AppHandle,
+    dialog: impl FnOnce() -> T + Send + 'static,
+) -> Option<T> {
+    with_core(app, AppCore::hide_field);
+    DIALOG_OPEN.store(true, Ordering::SeqCst);
+    let answer = tauri::async_runtime::spawn_blocking(dialog).await;
+    DIALOG_OPEN.store(false, Ordering::SeqCst);
+    answer.ok()
+}
+
+/// A native file dialog. Cancelling is the `cancelled` error the screens ignore.
 async fn pick_file(
     app: &AppHandle,
     dialog: impl FnOnce() -> Option<PathBuf> + Send + 'static,
 ) -> Result<PathBuf, ApiError> {
-    with_core(app, AppCore::hide_field);
-    DIALOG_OPEN.store(true, Ordering::SeqCst);
-    let picked = tauri::async_runtime::spawn_blocking(dialog).await;
-    DIALOG_OPEN.store(false, Ordering::SeqCst);
-    picked.ok().flatten().ok_or_else(|| ApiError {
-        code: "cancelled",
-        message: "Nothing was chosen.".to_owned(),
-    })
+    with_native_dialog(app, dialog)
+        .await
+        .flatten()
+        .ok_or_else(|| ApiError {
+            code: "cancelled",
+            message: "Nothing was chosen.".to_owned(),
+        })
 }
 
 /// The owner's real home folder (not the App Sandbox container), as the core was given it.
@@ -587,11 +595,82 @@ pub fn companion_status(app: AppHandle) -> CompanionView {
     app.state::<Companion>().status()
 }
 
-/// The owner's explicit Start: one new grant of at most an hour, only while Unlocked.
-#[tauri::command(async)]
-pub fn companion_start(app: AppHandle) -> Result<CompanionView, ApiError> {
+const COMPANION_START: &str = "Start";
+
+/// What the owner agrees to in the Start dialog.
+fn companion_start_text(idle_minutes: u32, count_activity_anywhere: bool) -> String {
+    let minutes = if idle_minutes == 1 {
+        "1 minute".to_owned()
+    } else {
+        format!("{idle_minutes} minutes")
+    };
+    let place = if count_activity_anywhere {
+        "computer"
+    } else {
+        "window"
+    };
+    format!(
+        "For up to one hour, the approved agent can send text to OpenAI through the helper. That \
+         can cost money, and what it sends leaves this computer.\n\n\
+         The hour ends sooner if the Vault locks: Auto-lock is set to {minutes} without using this \
+         {place}.\n\n\
+         Stop ends new requests at once. It can't undo a request already sent or billed, and it \
+         doesn't revoke the Agent Key at OpenAI."
+    )
+}
+
+/// Only the Start button counts: closing the dialog, or anything unexpected, doesn't start it.
+fn companion_start_confirmed(answer: Option<rfd::MessageDialogResult>) -> bool {
+    matches!(answer, Some(rfd::MessageDialogResult::Custom(button)) if button == COMPANION_START)
+}
+
+/// The owner's explicit Start: one new grant of at most an hour, only while Unlocked. The owner
+/// confirms in an OS dialog outside the WebView, so a script in the page can ask but can't answer.
+#[tauri::command]
+pub async fn companion_start(app: AppHandle) -> Result<CompanionView, ApiError> {
     require_unlocked(&app)?;
-    Ok(app.state::<Companion>().start())
+    if !cfg!(target_os = "macos") {
+        return Ok(app.state::<Companion>().status());
+    }
+    if DIALOG_OPEN.load(Ordering::SeqCst) || crate::native_coordinator::busy(&app) {
+        return Err(crate::core::not_now());
+    }
+    let settings = core(&app).app_status().settings;
+    let description = companion_start_text(settings.idle_minutes, settings.count_activity_anywhere);
+    let window = app.get_webview_window("main");
+    let answer = with_native_dialog(&app, move || {
+        // A sheet on the app's own window, so the alert taking focus doesn't count as leaving the
+        // app. Cancel comes first because Return presses the first button.
+        let window = window?;
+        Some(
+            rfd::MessageDialog::new()
+                .set_level(rfd::MessageLevel::Warning)
+                .set_title("Start the Agent Companion?")
+                .set_description(description)
+                .set_buttons(rfd::MessageButtons::OkCancelCustom(
+                    "Cancel".to_owned(),
+                    COMPANION_START.to_owned(),
+                ))
+                .set_parent(&window)
+                .show(),
+        )
+    })
+    .await
+    .flatten();
+    if !companion_start_confirmed(answer) {
+        return Err(ApiError {
+            code: "cancelled",
+            message: "The Agent Companion wasn't started.".to_owned(),
+        });
+    }
+    // The Vault may have locked while the dialog was open.
+    require_unlocked(&app)?;
+    tauri::async_runtime::spawn_blocking(move || app.state::<Companion>().start())
+        .await
+        .map_err(|_| ApiError {
+            code: "internal",
+            message: "The Agent Companion didn't start. Press Start again.".to_owned(),
+        })
 }
 
 #[tauri::command(async)]
@@ -627,6 +706,8 @@ pub async fn companion_setup(app: AppHandle) -> Result<CompanionView, ApiError> 
             .pick_file()
     })
     .await?;
+    // The Vault may have locked while the panels were open.
+    require_unlocked(&app)?;
     let plan = open_chosen(&plan)?;
     let credential = open_chosen(&credential)?;
     tauri::async_runtime::spawn_blocking(move || {
@@ -656,7 +737,40 @@ fn open_chosen(path: &std::path::Path) -> Result<std::fs::File, ApiError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{SettingsRequest, backup_file_name};
+    use super::{
+        COMPANION_START, SettingsRequest, backup_file_name, companion_start_confirmed,
+        companion_start_text,
+    };
+
+    #[test]
+    fn only_the_start_button_starts_the_companion() {
+        use rfd::MessageDialogResult::{Cancel, Custom, No, Ok, Yes};
+        assert!(companion_start_confirmed(Some(Custom(
+            COMPANION_START.to_owned()
+        ))));
+        for answer in [
+            None,
+            Some(Custom("Cancel".to_owned())),
+            Some(Custom(String::new())),
+            Some(Cancel),
+            Some(Ok),
+            Some(Yes),
+            Some(No),
+        ] {
+            assert!(!companion_start_confirmed(answer));
+        }
+    }
+
+    #[test]
+    fn the_start_dialog_says_what_the_owner_is_agreeing_to() {
+        let window = companion_start_text(5, false);
+        assert!(window.contains("For up to one hour"));
+        assert!(window.contains("can cost money"));
+        assert!(window.contains("Auto-lock is set to 5 minutes without using this window."));
+        assert!(window.contains("doesn't revoke the Agent Key"));
+        let computer = companion_start_text(1, true);
+        assert!(computer.contains("Auto-lock is set to 1 minute without using this computer."));
+    }
 
     #[test]
     fn webview_settings_cannot_supply_a_master_password() {
