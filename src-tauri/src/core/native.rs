@@ -69,12 +69,10 @@ pub enum NativeCredentials {
     RecoveryKey(Zeroizing<String>),
     NewPassword {
         password: Zeroizing<String>,
-        confirmation: Zeroizing<String>,
     },
     PasswordChange {
         current: Zeroizing<String>,
         password: Zeroizing<String>,
-        confirmation: Zeroizing<String>,
     },
     KitConfirmation(Zeroizing<String>),
 }
@@ -858,14 +856,8 @@ impl NativeJob {
         let limits = self.limits;
         let bytes = self.bytes.take();
         match (&self.action, credentials) {
-            (
-                NativeAction::CreateVault { params },
-                NativeCredentials::NewPassword {
-                    password,
-                    confirmation,
-                },
-            ) => {
-                checked_new_password(&password, &confirmation).map_err(job_input)?;
+            (NativeAction::CreateVault { params }, NativeCredentials::NewPassword { password }) => {
+                check_strength(&password).map_err(job_input)?;
                 let doc = Document::new(self.now_unix);
                 let created =
                     vault_format::create(&secret(&password), *params, &limits, &doc.to_json())
@@ -881,14 +873,8 @@ impl NativeJob {
             (NativeAction::ConfirmRecoveryKit, NativeCredentials::KitConfirmation(groups)) => {
                 Ok(Prepared::Kit(groups))
             }
-            (
-                NativeAction::SetNewPassword,
-                NativeCredentials::NewPassword {
-                    password,
-                    confirmation,
-                },
-            ) => {
-                checked_new_password(&password, &confirmation).map_err(job_input)?;
+            (NativeAction::SetNewPassword, NativeCredentials::NewPassword { password }) => {
+                check_strength(&password).map_err(job_input)?;
                 let key = self
                     .recovery_key
                     .take()
@@ -912,13 +898,9 @@ impl NativeJob {
             }
             (
                 NativeAction::ChangePassword { rotate },
-                NativeCredentials::PasswordChange {
-                    current,
-                    password,
-                    confirmation,
-                },
+                NativeCredentials::PasswordChange { current, password },
             ) => {
-                checked_new_password(&password, &confirmation).map_err(job_input)?;
+                check_strength(&password).map_err(job_input)?;
                 let current = secret(&current);
                 let (mut vault, body) = vault_format::open(
                     bytes.as_deref().ok_or_else(|| job_input(not_now()))?,
@@ -1112,16 +1094,6 @@ fn validate_credentials(
         _ => matches!(credentials, NativeCredentials::None),
     };
     if valid { Ok(()) } else { Err(not_now()) }
-}
-
-fn checked_new_password(password: &str, confirmation: &str) -> Result<(), ApiError> {
-    if password != confirmation {
-        return Err(err(
-            "invalid_input",
-            "The passwords don't match. Please try again.",
-        ));
-    }
-    check_strength(password)
 }
 
 fn attempt_allowed(session: &Session, now: u64) -> Result<(), ApiError> {

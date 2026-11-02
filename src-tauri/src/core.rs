@@ -1,8 +1,8 @@
 //! `AppCore`: everything the app bridge does, as plain Rust with no Tauri types, so it can be
 //! tested with a temp folder, a fake clock and a fake clipboard.
 //!
-//! One method per command in `src/api.ts`, with the same name and meaning. Every method checks
-//! the phase first. Errors are [`ApiError`]s whose `message` is calm, owner-facing English.
+//! Most commands in `src/api.ts` have a method here; Agent Companion commands stay outside
+//! (ADR-0009). Every method checks the phase first. Errors are [`ApiError`]s whose `message` is calm, owner-facing English.
 //!
 //! What lives here (and nowhere else): the open Vault (Vault Key + decrypted document), the
 //! session rules, the Sharing Guard state and the non-secret settings. The Wallet Key is never
@@ -220,7 +220,6 @@ pub struct AssessmentView {
 }
 
 /// `create_vault` and `change_password` results. No `Debug`: it holds the Recovery Key.
-#[derive(Serialize)]
 pub struct RecoveryKeyShown {
     /// Shown to the owner once; `None` after a password change without Key Rotation.
     pub recovery_key: Option<Zeroizing<String>>,
@@ -701,10 +700,12 @@ impl AppCore {
 
     // ---------- setup, unlock, lock ----------
 
+    /// Test-only: the app goes through `begin_native`.
     pub fn suggest_passphrase(&self) -> Zeroizing<String> {
         policy::suggest_passphrase()
     }
 
+    /// Test-only: the app goes through `begin_native`.
     pub fn assess_password(&self, password: &str) -> AssessmentView {
         assess_password(password)
     }
@@ -720,6 +721,8 @@ impl AppCore {
     /// Calibrates the KDF and creates the Vault in memory; returns the Recovery Key to show once.
     /// `params`: Argon2id settings for the new Vault (the app calibrates them on this computer
     /// before calling, without holding the core).
+    ///
+    /// Test-only: the app goes through `begin_native`.
     pub fn create_vault(
         &mut self,
         master_password: Zeroizing<String>,
@@ -783,6 +786,7 @@ impl AppCore {
         Ok(())
     }
 
+    /// Test-only: the app goes through `begin_native`.
     pub fn unlock(&mut self, credential: CredentialInput) -> Result<(), ApiError> {
         self.tick();
         if !matches!(self.phase, Phase::Locked) {
@@ -812,6 +816,8 @@ impl AppCore {
     }
 
     /// After a Recovery Key unlock: re-wrap the password slot, save, unlock.
+    ///
+    /// Test-only: the app goes through `begin_native`.
     pub fn set_new_password(&mut self, master_password: Zeroizing<String>) -> Result<(), ApiError> {
         self.tick();
         self.invalidate_quick_unlock_registration()?;
@@ -1205,6 +1211,7 @@ impl AppCore {
 
     // ---------- checks ----------
 
+    /// Test-only: the app goes through `begin_native`.
     pub fn seed_wordlist(&self) -> &'static [&'static str] {
         notes::seed::wordlist()
     }
@@ -1298,6 +1305,7 @@ impl AppCore {
         Ok(picked)
     }
 
+    /// Test-only: the app goes through `begin_native`.
     pub fn inspect_backup(
         &mut self,
         credential: CredentialInput,
@@ -1341,6 +1349,7 @@ impl AppCore {
             .collect())
     }
 
+    /// Test-only: the app goes through `begin_native`.
     pub fn inspect_safety_copy(
         &mut self,
         id: &str,
@@ -1359,6 +1368,8 @@ impl AppCore {
     // ---------- account care & settings ----------
 
     /// `rotate`: Key Rotation, and the new Recovery Key must be confirmed before it is saved.
+    ///
+    /// Test-only: the app goes through `begin_native`.
     pub fn change_password(
         &mut self,
         current_password: Zeroizing<String>,

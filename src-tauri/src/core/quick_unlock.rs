@@ -168,10 +168,6 @@ impl AppCore {
         std::mem::take(&mut self.quick_cleanup_needed)
     }
 
-    pub fn quick_unlock_cleanup_failed(&mut self) {
-        self.quick_unlock_cleanup_finished(false);
-    }
-
     /// Only a completed exact-file removal changes this warning; queuing a retry does not.
     pub fn quick_unlock_cleanup_finished(&mut self, succeeded: bool) {
         self.quick_cleanup_failed = !succeeded;
@@ -365,8 +361,6 @@ impl AppCore {
                 .is_ok_and(|open| Some(open.doc.change_counter()) == snapshot.counter)
         };
         if self.quick_pending.is_none()
-            || snapshot.epoch != self.native_epoch
-            || snapshot.generation != self.session_generation
             || !phase_matches
             || self.clock.now_ms() >= snapshot.deadline
             || self.session.sharing_guard_up()

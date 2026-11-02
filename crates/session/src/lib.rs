@@ -383,7 +383,7 @@ impl Session {
     pub fn failed_attempts(&self) -> u32 {
         self.failures
     }
-    /// True after 3+ consecutive failures ("Forgot it? Use your Recovery Kit").
+    /// True after 3+ consecutive failures ("Forgot it? Use your Recovery Key").
     pub fn show_recovery_hint(&self) -> bool {
         self.failures >= FREE_ATTEMPTS
     }

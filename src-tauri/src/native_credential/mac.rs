@@ -758,7 +758,7 @@ pub(super) fn present(
     root.addSubview(&view);
     let expires =
         matches!(&prompt, Request::Reveal { reveal, .. } if reveal.mode == RevealMode::Timed)
-            .then(|| Instant::now() + Duration::from_secs(20));
+            .then(|| Instant::now() + Duration::from_millis(session::ACCESSIBLE_REVEAL_MS));
     // SAFETY: Notification selectors have the documented one-object signature. The observer
     // is removed before target release, and timer callbacks remain on this AppKit run loop.
     let timer = unsafe {
@@ -1919,7 +1919,8 @@ fn extend() {
             }
             if authorization == Authorization::Allowed {
                 panel.extensions += 1;
-                panel.expires = Some(Instant::now() + Duration::from_secs(20));
+                panel.expires =
+                    Some(Instant::now() + Duration::from_millis(session::ACCESSIBLE_REVEAL_MS));
             }
             true
         });

@@ -213,22 +213,10 @@ function useShown(noteId: string, status: AppStatus) {
  *  line, and each line that holds something has its own Copy button. The lines are numbered as
  *  Rust numbers them: from 0, split at every line feed, empty lines counted too. `lines.name`:
  *  the field's label, for what those buttons are called. */
-function Value({ field, value, lines }: {
-  field: string;
+function Value({ value, lines }: {
   value: string;
   lines?: { name: string; copy: (line: number) => void } | undefined;
 }) {
-  if (field === "words")
-    return (
-      <ol className="words">
-        {value.split(" ").map((word, i) => (
-          <li key={i}>
-            <span>{i + 1}</span>
-            {word}
-          </li>
-        ))}
-      </ol>
-    );
   const split = lines ? value.split("\n") : [];
   if (!lines || split.length < 2) return <div className="value">{value}</div>;
   return (
@@ -489,7 +477,7 @@ export function Detail(
                     </div>
                     {/* A line is copied in Rust, by its number: the shown text is only what the
                         owner picks from. */}
-                    <Value field={f} value={shown!.value} lines={wallet ? undefined : { name, copy: (line) => run(() => copyFieldLine(id, f, line)) }} />
+                    <Value value={shown!.value} lines={wallet ? undefined : { name, copy: (line) => run(() => copyFieldLine(id, f, line)) }} />
                   </div>
                 )}
               </dd>
@@ -1132,7 +1120,7 @@ export function Editor(props: {
             {peeking ? s.hide : s.show}
           </button>
         )}
-        {peeking && <Value field={f} value={value} />}
+        {peeking && <Value value={value} />}
         {had && !adds && (
           <label className="check">
             <input

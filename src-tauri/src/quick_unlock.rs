@@ -129,6 +129,7 @@ impl QuickUnlockGate {
                 .is_some_and(|verified| verified.binding == binding && now < verified.deadline)
     }
 
+    #[cfg(test)]
     pub fn can_unlock(
         &mut self,
         current_binding: QuickUnlockBinding,
@@ -294,6 +295,26 @@ mod tests {
         );
         gate.master_verified(binding, Some(2)).unwrap();
         assert!(gate.can_unlock(binding, Some(3)));
+    }
+
+    #[test]
+    fn the_status_hint_follows_the_master_password_and_the_clock() {
+        let binding = binding();
+        let mut gate = QuickUnlockGate::default();
+        assert!(!gate.available_at(binding, Some(0)), "nothing enrolled");
+        gate.load_registration(binding);
+        assert!(
+            !gate.available_at(binding, Some(1)),
+            "no Master Password yet"
+        );
+        gate.master_verified(binding, Some(2)).unwrap();
+        assert!(gate.available_at(binding, Some(3)));
+        assert!(!gate.available_at(binding, None), "no clock");
+        assert!(!gate.available_at(binding, Some(1)), "clock went back");
+        assert!(
+            !gate.available_at(binding, Some(MASTER_REQUIRED_AFTER_MS + 2)),
+            "the 7 days are up"
+        );
     }
 
     #[test]

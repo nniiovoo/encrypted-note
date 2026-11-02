@@ -1036,7 +1036,7 @@ fn kind_name(kind: Option<Kind>) -> &'static str {
 fn field_name(field: Option<&str>) -> &'static str {
     match field {
         Some("words") => "Seed Phrase",
-        Some("passphrase") => "Wallet passphrase",
+        Some("passphrase") => "Passphrase",
         Some("key") => "Private Key",
         _ => "Hidden Field",
     }
@@ -1200,10 +1200,7 @@ fn credentials(kind: EntryKind, reply: Reply) -> Result<NativeCredentials, ApiEr
         (EntryKind::Password, Reply::Credential(value)) => NativeCredentials::Password(value),
         (EntryKind::Recovery, Reply::Credential(value)) => NativeCredentials::RecoveryKey(value),
         (EntryKind::NewPassword, Reply::NewPassword { current: None, new }) => {
-            NativeCredentials::NewPassword {
-                confirmation: new.clone(),
-                password: new,
-            }
+            NativeCredentials::NewPassword { password: new }
         }
         (
             EntryKind::PasswordChange,
@@ -1213,7 +1210,6 @@ fn credentials(kind: EntryKind, reply: Reply) -> Result<NativeCredentials, ApiEr
             },
         ) => NativeCredentials::PasswordChange {
             current,
-            confirmation: new.clone(),
             password: new,
         },
         _ => return Err(cancelled()),
@@ -1911,7 +1907,7 @@ mod tests {
         );
         assert_eq!(
             title("show_and_copy_wallet_field", seed, Some("passphrase")),
-            "Show and copy Wallet passphrase"
+            "Show and copy Passphrase"
         );
         assert_eq!(
             title("copy_field", Some(Kind::PrivateKey), Some("key")),
