@@ -189,7 +189,7 @@ export function Settings({ status, onOperationOutcome, afterKit, scrollTo, onScr
         ))}
       </details>
 
-      <AgentCompanion companion={companion} idleMinutes={chosen.idle_minutes} countAnywhere={chosen.count_activity_anywhere} />
+      <AgentCompanion companion={companion} />
 
       {flow === "password" && <ChangePassword retryInMs={status.retry_in_ms} afterKit={afterKit} onClose={closeFlow} onOperationOutcome={onOperationOutcome} />}
       {flow === "open" && <ReplaceVault retryInMs={status.retry_in_ms} onClose={closeFlow} onOperationOutcome={onOperationOutcome} />}
@@ -201,8 +201,8 @@ export function Settings({ status, onOperationOutcome, afterKit, scrollTo, onScr
 const lockChoices = (settings: SettingsView) => ({
   idle_minutes: settings.idle_minutes,
   lock_on_app_switch: settings.lock_on_app_switch,
-  clipboard_clear_seconds: settings.clipboard_clear_seconds ?? 30,
-  count_activity_anywhere: settings.count_activity_anywhere ?? false,
+  clipboard_clear_seconds: settings.clipboard_clear_seconds,
+  count_activity_anywhere: settings.count_activity_anywhere,
 });
 
 /** A setting drawn as a row with a switch, and one line under it saying what it does. */
@@ -420,13 +420,8 @@ function useCompanion() {
 
 /** The optional Agent Companion (ADR-0009): readiness, the approved operation, Start/Stop.
  *  Everything shown comes from fixed fields; Rust never sends a key, token, path or helper text. */
-function AgentCompanion({ companion, idleMinutes, countAnywhere }: {
-  companion: ReturnType<typeof useCompanion>;
-  idleMinutes: number;
-  countAnywhere: boolean;
-}) {
+function AgentCompanion({ companion }: { companion: ReturnType<typeof useCompanion> }) {
   const { view, setView, acting } = companion;
-  const [confirming, setConfirming] = useState(false);
   const [setupDone, setSetupDone] = useState(false);
   const [open, setOpen] = useState(false);
   const { busy, error, run } = useAction();
@@ -515,7 +510,7 @@ function AgentCompanion({ companion, idleMinutes, countAnywhere }: {
               {s.companionStop}
             </button>
           ) : (
-            <button className="primary" disabled={busy || !view.local.ready} onClick={() => setConfirming(true)}>
+            <button className="primary" disabled={busy || !view.local.ready} onClick={() => act(companionStart)}>
               {s.companionStart}
             </button>
           )}
@@ -543,27 +538,6 @@ function AgentCompanion({ companion, idleMinutes, countAnywhere }: {
             <ErrorLine error={error} />
           </div>
         </details>
-      )}
-      {confirming && (
-        <Modal title={s.companionConfirmTitle} onClose={() => setConfirming(false)}>
-          {s.companionConfirmText(idleMinutes, countAnywhere).map((line) => (
-            <p key={line}>{line}</p>
-          ))}
-          <p className="hint">{s.companionCustody}</p>
-          <div className="actions">
-            <button onClick={() => setConfirming(false)}>{s.cancel}</button>
-            <button
-              className="primary"
-              disabled={busy}
-              onClick={() => {
-                setConfirming(false);
-                act(companionStart);
-              }}
-            >
-              {s.companionStart}
-            </button>
-          </div>
-        </Modal>
       )}
     </section>
   );
