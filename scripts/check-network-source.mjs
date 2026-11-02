@@ -7,6 +7,10 @@
 // helper's pins, entitlements and fictional verification payloads (ADR-0009), not Vault code.
 // The helper's own Swift (src-tauri/native/companion/) is scanned like all native code: it
 // supervises a process and has no network API of its own.
+// companion/ is outside on purpose (ADR-0010): it is the broker that makes the one approved
+// OpenAI request, and it runs only inside the helper's sandbox. In its place, a second check here
+// fails if any file in src/, src-tauri/src/ or crates/ imports from it, so no Vault code reaches
+// that network code. That check also needs a literal path, so a computed one gets past it.
 // Patterns: browser fetch/sendBeacon calls (also fetch?.()), XMLHttpRequest, WebSocket,
 // EventSource, WebTransport and RTCPeerConnection names; Rust std::net/tokio::net, socket types,
 // libc socket/connect/getaddrinfo and NSURLSession/NSURLConnection names.
@@ -25,7 +29,7 @@
 // sandbox and cannot contain compromised native code. CSP and cargo-deny are separate.
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, posix } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const browserApi = /\b(?:fetch|sendBeacon)(?=\s*(?:\?\.\s*)?\()|\b(?:XMLHttpRequest|WebSocket|EventSource|WebTransport|(?:webkit|moz)?RTCPeerConnection)\b/g;
@@ -35,6 +39,21 @@ const rootPage = /^(?:index|fixture)\.html$/;
 const browserSource = /^(?:src|isolation)\/.*\.(?:[cm]?[jt]s|jsx|tsx|html)$/;
 const rustSource = /^(?:src-tauri\/src|crates\/[^/]+\/src)\/.*\.rs$/;
 const nativeSource = /^src-tauri\/native\/.*\.(?:swift|m|mm|c|cc|cpp|cxx|c\+\+|h|hh|hpp|hxx|inl)$/;
+const vaultSource = /^(?:src\/.*\.(?:[cm]?[jt]s|jsx|tsx|html|css)|(?:src-tauri\/src|crates)\/.*\.rs)$/;
+const importForm = /(?:\bfrom\s*|\bimport\s*\(?\s*|\brequire\s*\(\s*|\bnew\s+URL\s*\(\s*|\binclude(?:_str|_bytes)?!\s*\(\s*|#\[\s*path\s*=\s*)["'`]([^"'`\n]+)["'`]/g;
+const companionPath = /^\/?(?:companion|encrypted-note-agent-companion)(?:\/|$)/;
+
+// Resolved against the importing file, so src-tauri/companion/ (the helper's pins, not the broker)
+// and a WebView file such as src/companion.ts are not confused with the top-level companion/.
+function companionImports(path, source) {
+  if (!vaultSource.test(path)) return [];
+  return [...source.matchAll(importForm)].flatMap((match) => {
+    const target = match[1].startsWith(".") ? posix.join(posix.dirname(path), match[1]) : match[1];
+    if (!companionPath.test(target)) return [];
+    const line = source.slice(0, match.index).split("\n").length;
+    return [`${path}:${line}: Vault code imports the Agent Companion (${match[1]})`];
+  });
+}
 
 function patternFor(path) {
   if (rootPage.test(path) || browserSource.test(path)) return browserApi;
@@ -162,8 +181,38 @@ assert.deepEqual(matches("src/fake.tsx", '// fake source\nfetch("https://example
 for (const path of ["index.html", "fixture.html", "src/fake.cts", "src/fake.mts", "src-tauri/native/fake.m", "src-tauri/native/fake.mm", "src-tauri/native/fake.c", "src/nested/fake.tsx", "isolation/index.html", "src-tauri/src/fake.rs", "crates/notes/src/fake.rs", "src-tauri/native/fake.swift", "src-tauri/native/nested/fake.swift"]) {
   assert.ok(patternFor(path), path);
 }
-for (const path of ["src-tauri/build.rs", "crates/notes/build.rs", "docs/fake.md", "vendor/fake/src/lib.rs", "crates/notes/tests/fake.rs", "src-tauri/gen/fake.rs", "scripts/fake.mjs", "src-tauri/gen/fake.swift", "docs/fake.swift", "src-tauri/native/fake.swift.backup"]) {
+for (const path of ["src-tauri/build.rs", "crates/notes/build.rs", "docs/fake.md", "vendor/fake/src/lib.rs", "crates/notes/tests/fake.rs", "src-tauri/gen/fake.rs", "scripts/fake.mjs", "src-tauri/gen/fake.swift", "docs/fake.swift", "src-tauri/native/fake.swift.backup", "companion/src/fake.mjs", "companion/isolation/fake.mjs", "src-tauri/companion/verification/fake.mjs"]) {
   assert.deepEqual(matches(path, "fetch(); std::net::TcpStream; URLSession.shared; Network.NWConnection();"), []);
+}
+for (const [path, source] of [
+  ["src/fake.ts", 'import { generate } from "../companion/src/generate.mjs";'],
+  ["src/nested/fake.tsx", 'export { generate } from "../../companion/src/generate.mjs";'],
+  ["src/fake.ts", 'const later = await import("../companion/src/generate.mjs");'],
+  ["src/fake.ts", 'import policy from "../companion/policy.json?raw";'],
+  ["src/fake.ts", 'import "../companion/src/generate.mjs";'],
+  ["src/fake.js", 'const later = require("../companion/src/generate.mjs");'],
+  ["src/fake.ts", 'const page = new URL("../companion/policy.json", import.meta.url);'],
+  ["src/fake.ts", 'import { generate } from "companion/src/generate.mjs";'],
+  ["src/fake.ts", 'import { generate } from "/companion/src/generate.mjs";'],
+  ["src/fake.ts", 'import { generate } from "encrypted-note-agent-companion";'],
+  ["src-tauri/src/fake.rs", 'const POLICY: &str = include_str!("../../companion/policy.json");'],
+  ["src-tauri/src/nested/fake.rs", 'const POLICY: &[u8] = include_bytes!("../../../companion/policy.json");'],
+  ["src-tauri/src/fake.rs", 'include!("../../companion/fake.rs");'],
+  ["crates/notes/src/fake.rs", '#[path = "../../../companion/fake.rs"] mod fake;'],
+  ["crates/notes/tests/fake.rs", 'const POLICY: &str = include_str!("../../../companion/policy.json");'],
+]) {
+  assert.equal(companionImports(path, source).length, 1, source);
+}
+for (const [path, source] of [
+  ["src-tauri/src/fake.rs", 'const PINS: &str = include_str!("../companion/companion.lock.json");'],
+  ["src-tauri/src/fake.rs", "use crate::companion::OPERATION;"],
+  ["src/fake.ts", 'import { startCompanion } from "./companion";'],
+  ["src/nested/fake.ts", 'import { startCompanion } from "../companion/start";'],
+  ["src/fake.ts", 'const note = "see companion/README.md";'],
+  ["companion/src/fake.mjs", 'import { generate } from "../../companion/src/generate.mjs";'],
+  ["scripts/fake.mjs", 'import { generate } from "../companion/src/generate.mjs";'],
+]) {
+  assert.deepEqual(companionImports(path, source), [], source);
 }
 
 const root = fileURLToPath(new URL("../", import.meta.url));
@@ -174,11 +223,26 @@ for (const directory of ["src", "isolation", "src-tauri/src", "src-tauri/native"
     if (patternFor(path)) paths.push(path);
   }
 }
+const vaultPaths = [];
+for (const directory of ["src", "src-tauri/src", "crates"]) {
+  for (const relative of readdirSync(join(root, directory), { recursive: true })) {
+    const path = `${directory}/${relative.replaceAll("\\", "/")}`;
+    if (vaultSource.test(path)) vaultPaths.push(path);
+  }
+}
 const violations = paths.sort().flatMap((path) => matches(path, readFileSync(join(root, path), "utf8")));
+const imports = vaultPaths.sort().flatMap((path) => companionImports(path, readFileSync(join(root, path), "utf8")));
 if (violations.length) {
   console.error(violations.join("\n"));
   console.error("Remove the entry point (ADR-0001). For a harmless match, narrow the rule with a fake regression case; do not exempt a file or line.");
   process.exitCode = 1;
 } else {
   console.log(`Networking source hygiene passed (${paths.length} files; fake pass/fail self-check passed).`);
+}
+if (imports.length) {
+  console.error(imports.join("\n"));
+  console.error("Vault code must not import companion/ (ADR-0010). Do not exempt a file or line.");
+  process.exitCode = 1;
+} else {
+  console.log(`No Vault source imports companion/ (${vaultPaths.length} files; fake pass/fail self-check passed).`);
 }

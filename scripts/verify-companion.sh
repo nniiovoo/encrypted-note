@@ -5,7 +5,7 @@
 #
 # Builds a stand-in for the Vault app (the real src-tauri/Entitlements.plist, the same companion
 # client code, the helper's test identifier) and drives the real signed helper through:
-#   * the real pinned broker: refusal paths inside the actual sandbox;
+#   * the real broker: refusal paths inside the actual sandbox;
 #   * an isolation probe: the helper cannot read or list the stand-in's container or a FAKE
 #     Vault canary in it, and can listen on loopback;
 #   * fictional supervision payloads: stop, stop with the helper moved out of the app, crash,

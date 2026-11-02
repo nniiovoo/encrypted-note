@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # One command that must pass before any slice is done:
-#   Source hygiene + helper typecheck (Mac) + Rust formatting/tests/clippy + cargo-deny +
-#   production WebView build.
+#   Source hygiene + helper typecheck and companion tests (Mac) + Rust formatting/tests/clippy +
+#   cargo-deny + production WebView build.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -14,6 +14,7 @@ need cargo-deny "run 'cargo install --locked cargo-deny --version 0.20.2'"
 [[ -d node_modules ]] || { echo "node_modules not found: run 'npm ci --ignore-scripts'" >&2; exit 1; }
 if [[ $(uname -s) == Darwin ]]; then
   xcrun --find swiftc >/dev/null 2>&1 || { echo "swiftc not found: run 'xcode-select --install'" >&2; exit 1; }
+  [[ -d companion/node_modules ]] || { echo "companion/node_modules not found: run 'npm --prefix companion ci --ignore-scripts'" >&2; exit 1; }
 fi
 
 echo "==> networking source hygiene"
@@ -24,6 +25,12 @@ if [[ $(uname -s) == Darwin ]]; then
   echo "==> companion helper typecheck"
   xcrun swiftc -parse-as-library -typecheck -target "$(uname -m)-apple-macos13.0" \
     src-tauri/native/companion/protocol.swift src-tauri/native/companion/service.swift
+
+  # The helper exists only on Mac, and these tests rely on its accounts and file permissions. The
+  # script runs one test file at a time: they share port 8789, so don't run them alongside
+  # scripts/verify-companion.sh either.
+  echo "==> companion tests"
+  npm --prefix companion run --silent check
 fi
 
 echo "==> cargo fmt"
