@@ -103,6 +103,7 @@ pub fn run() {
             commands::set_settings,
             commands::mark_seed_explainer_seen,
             commands::vault_location,
+            commands::reveal_vault_folder,
             commands::dismiss_sharing_guard,
             commands::companion_status,
             commands::companion_start,
@@ -193,7 +194,9 @@ fn setup(app: &AppHandle) {
                 Some("Touch ID is available only on supported Macs.")
             }
             biometry::Availability::BiometryUnavailable => {
-                Some("Touch ID is not available on this Mac.")
+                Some(
+                    "Touch ID isn't ready. If this Mac has it, check that a fingerprint is set up and the lid is open, then restart the app.",
+                )
             }
         },
     );
@@ -276,6 +279,9 @@ fn on_window_event(window: &Window, event: &WindowEvent) {
     let event = match event {
         // Our own Backup file dialog taking focus isn't switching apps.
         WindowEvent::Focused(false) if DIALOG_OPEN.load(Ordering::SeqCst) => return,
+        // On Windows this reports WebView2 focus, which also moves when our own panel takes it.
+        #[cfg(windows)]
+        WindowEvent::Focused(false) if platform::app_in_front() => return,
         WindowEvent::Focused(false) => OsEvent::FocusLost,
         WindowEvent::Focused(true) => OsEvent::FocusGained,
         _ => return,

@@ -95,6 +95,28 @@ Use a fake-data Vault for these checks. Copy a fake Hidden Field through the app
 
 Capture Hiding and Sharing Guard are separate observations. A captured shield is not proof of Capture Hiding. Browser meetings are not detected by the Sharing Guard (ADR-0002). File each failure as a separate issue and link it in its row.
 
+### Native panels and focus
+
+Use a fake-data Vault and fake values only. The steps come from the Windows checks in [native-credential-design.md](native-credential-design.md).
+
+| Check | Expected observation | Result / sanitized evidence / issue |
+|---|---|---|
+| Create and Unlock panels | Each panel opens and stays open | pending |
+| Alt-Tab with a panel open | The panel closes, with no value left on screen | pending |
+| Alt-Tab with a Hidden Field shown | The value hides and the reveal ends | pending |
+| Alt-Tab with lock on app switch turned on | The Vault locks | pending |
+| Enter on a focused Cancel | The panel cancels, except on the Recovery Kit step, where the first press only asks | pending |
+| Click Cancel once on the Recovery Kit step, then type | The keys go into the box | pending |
+| Click Suggest a password, then press Enter | It asks if you wrote it down, and the words don't change | pending |
+| A refusal after clicking Continue | The next keys go into a box | pending |
+| Type right after a panel opens, and after dragging the window by its title bar | One mask dot per key; otherwise file a separate security issue (ADR-0003) | pending |
+| Each key with the core lock held on purpose (needs a temporary debug build) | One more mask dot in a Master Password, Recovery Key, New or Confirm box | pending |
+| Recovery Kit retype box with Pinyin or another input method | The input method stays off | pending |
+| Recovery Kit retype box during a Retry long enough to say Please wait… | The typed text masks, then unmasks | pending |
+| Show in File Explorer | The Vault folder opens | pending |
+| A fake value containing `&` | It shows as typed in the panel | pending |
+| Panels at 100%, 125%, 150% and 200% scaling | No cut-off text. Record the System font's height at each; a height above 20 px means the panels need scaling work | pending |
+
 ### Mac ↔ Windows Backup round trip
 
 Use current builds on both computers, one exFAT USB stick prepared by the owner, and only fake Vaults. No formatting, deletion, or replacement of real data is part of this test. Include at least one fake Note with an optional schema-2 field (for example the purpose of a Login), so portability covers the current file format. Opening a Backup replaces this computer's Vault; confirm the destination is the disposable fake Vault before accepting.

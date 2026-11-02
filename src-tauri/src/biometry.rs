@@ -25,6 +25,8 @@ pub enum Availability {
 pub enum Error {
     Unavailable(Availability),
     Cancelled,
+    /// A missed finger, a lockout, a closed lid or a disconnected keyboard: Touch ID stays on.
+    TryAgain,
     Missing,
     AlreadyExists,
     InvalidPayload,
@@ -194,6 +196,7 @@ mod mac {
             1 => Err(Error::Cancelled),
             2 => Err(Error::Unavailable(Availability::BiometryUnavailable)),
             3 => Err(Error::InvalidPayload),
+            5 => Err(Error::TryAgain),
             _ => Err(Error::Failed),
         }
     }
@@ -476,6 +479,15 @@ mod mac {
                 .expect("physical temporary path");
             let path = canonical.join("fake-quick-unlock.bin");
             (directory, path)
+        }
+
+        #[test]
+        fn native_status_tells_a_missed_touch_from_a_key_failure() {
+            assert_eq!(native_status(0), Ok(()));
+            assert_eq!(native_status(1), Err(Error::Cancelled));
+            assert_eq!(native_status(4), Err(Error::Failed));
+            assert_eq!(native_status(5), Err(Error::TryAgain));
+            assert_eq!(native_status(6), Err(Error::Failed));
         }
 
         #[test]

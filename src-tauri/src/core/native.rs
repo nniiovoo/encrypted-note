@@ -4,6 +4,14 @@
 use super::*;
 
 const OPERATION_MS: u64 = 2 * 60_000;
+/// The owner copies 28 characters onto paper in this step, and running out of time wastes the
+/// key they just wrote. Auto-lock, app switches and every other invalidation still end it.
+const RECOVERY_KIT_MS: u64 = 10 * 60_000;
+/// Choosing a password takes thought, and writing a suggested one down takes time.
+const NEW_PASSWORD_MS: u64 = 10 * 60_000;
+/// 28 characters copied from paper.
+const RECOVERY_ENTRY_MS: u64 = 5 * 60_000;
+const MSG_COPY_UNREADABLE: &str = "That file isn't a complete, readable Vault, so it can't be opened. This computer's Vault wasn't touched. Try another Backup or Safety Copy.";
 type ActionDescription = (&'static str, Option<String>, Option<Kind>, bool);
 
 pub enum NativeAction {
@@ -78,6 +86,8 @@ pub struct NativeOperation {
     pub kind: Option<Kind>,
     pub field: Option<String>,
     pub requires_credentials: bool,
+    /// How long this step may stay open; the coordinator's clock reads the same number.
+    pub limit_ms: u64,
 }
 
 /// The coordinator must handle RecoveryKit natively and return only the action's public result.
@@ -183,9 +193,15 @@ impl AppCore {
             return Err(not_now());
         }
         self.guard_check()?;
-        let effects = self.session.end_reveal();
-        self.apply(effects);
-        let (label, target, kind, requires_credentials) = self.native_description(&action)?;
+        let described = self.native_description(&action);
+        // Copying an ordinary Hidden Field opens no panel, so the value being read stays shown.
+        let keeps_reveal = matches!(action, NativeAction::CopyField { .. })
+            && matches!(described, Ok((_, _, _, false)));
+        if !keeps_reveal {
+            let effects = self.session.end_reveal();
+            self.apply(effects);
+        }
+        let (label, target, kind, requires_credentials) = described?;
         if matches!(
             action,
             NativeAction::ChangePassword { .. }
@@ -210,6 +226,10 @@ impl AppCore {
         ) {
             self.inspected = None;
         }
+        // After the two steps above, so a wait still turns Touch ID off and revokes the preview.
+        if native_authenticates(&action, requires_credentials) {
+            attempt_allowed(&self.session, self.clock.now_ms())?;
+        }
         let inspection = match &action {
             NativeAction::InspectBackup { .. } => {
                 let path = self
@@ -225,6 +245,11 @@ impl AppCore {
             )),
             _ => None,
         };
+        // A file that can't be a Vault is refused here, before anyone types a credential for it.
+        if let Some((_, bytes)) = &inspection {
+            vault_format::inspect(bytes, &self.limits)
+                .map_err(|e| copy_error(e, CredKind::Password))?;
+        }
         let disk = self.native_disk()?;
         self.native_sequence = self.native_sequence.checked_add(1).ok_or_else(not_now)?;
         let id = self.native_sequence;
@@ -234,6 +259,7 @@ impl AppCore {
             | NativeAction::CopyField { field, .. } => Some(field.clone()),
             _ => None,
         };
+        let limit_ms = native_limit_ms(&action);
         self.native_pending = Some(Pending {
             id,
             snapshot: Snapshot {
@@ -243,7 +269,7 @@ impl AppCore {
                 counter: self.native_counter(),
                 disk,
                 inspection,
-                deadline: self.clock.now_ms().saturating_add(OPERATION_MS),
+                deadline: self.clock.now_ms().saturating_add(limit_ms),
             },
             action: Some(action),
             requires_credentials,
@@ -255,6 +281,7 @@ impl AppCore {
             kind,
             field,
             requires_credentials,
+            limit_ms,
         })
     }
 
@@ -302,11 +329,18 @@ impl AppCore {
                 None
             };
         let now_unix = self.clock.unix_secs();
-        let action = self
-            .native_pending
-            .as_mut()
-            .and_then(|p| p.action.take())
-            .ok_or_else(not_now)?;
+        let now = self.clock.now_ms();
+        let pending = self.native_pending.as_mut().ok_or_else(not_now)?;
+        let action = pending.action.take().ok_or_else(not_now)?;
+        // A long entry can be sent at its last moment: derivation and the commit get their own time.
+        if native_limit_ms(&action) > OPERATION_MS
+            && !matches!(action, NativeAction::ConfirmRecoveryKit)
+        {
+            pending.snapshot.deadline = pending
+                .snapshot
+                .deadline
+                .max(now.saturating_add(OPERATION_MS));
+        }
         Ok(NativeJob {
             id,
             action,
@@ -338,6 +372,11 @@ impl AppCore {
 
     pub fn native_pending_id(&self) -> Option<u64> {
         self.native_pending.as_ref().map(|p| p.id)
+    }
+
+    /// True while a known sharing app runs, even after its Shield was dismissed.
+    pub fn sharing_app_detected(&self) -> bool {
+        !self.detected.is_empty()
     }
 
     pub(super) fn invalidate_native(&mut self) {
@@ -957,7 +996,19 @@ impl NativeJob {
             cred.credential(),
             &self.limits,
         )
-        .map_err(|e| job_format(e, kind))?;
+        .map_err(|e| {
+            if matches!(
+                action,
+                NativeAction::InspectBackup { .. } | NativeAction::InspectSafetyCopy { .. }
+            ) {
+                JobError {
+                    wrong_credential: e == vault_format::Error::WrongCredential,
+                    error: copy_error(e, kind),
+                }
+            } else {
+                job_format(e, kind)
+            }
+        })?;
         if matches!(action, NativeAction::EnrollQuickUnlock) {
             let key = vault_format::enroll_quick_unlock(
                 &vault,
@@ -1006,6 +1057,20 @@ impl NativeJob {
             key,
             vault_id: vault.vault_id(),
         }))
+    }
+}
+
+/// The one limit table. The coordinator reads it through `NativeOperation::limit_ms`.
+fn native_limit_ms(action: &NativeAction) -> u64 {
+    match action {
+        NativeAction::ConfirmRecoveryKit => RECOVERY_KIT_MS,
+        NativeAction::CreateVault { .. }
+        | NativeAction::SetNewPassword
+        | NativeAction::ChangePassword { .. } => NEW_PASSWORD_MS,
+        NativeAction::Unlock { recovery: true }
+        | NativeAction::InspectBackup { recovery: true }
+        | NativeAction::InspectSafetyCopy { recovery: true, .. } => RECOVERY_ENTRY_MS,
+        _ => OPERATION_MS,
     }
 }
 
@@ -1068,6 +1133,16 @@ fn attempt_allowed(session: &Session, now: u64) -> Result<(), ApiError> {
             &format!("Please wait {seconds} {unit}, then try again."),
         )
     })
+}
+
+/// A chosen copy being unreadable says nothing about this computer's Vault.
+fn copy_error(error: vault_format::Error, kind: CredKind) -> ApiError {
+    match error {
+        vault_format::Error::Malformed(_) | vault_format::Error::Damaged => {
+            err("damaged", MSG_COPY_UNREADABLE)
+        }
+        other => format_error(other, kind),
+    }
 }
 
 fn job_input(error: ApiError) -> JobError {

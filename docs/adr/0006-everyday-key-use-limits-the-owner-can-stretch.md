@@ -43,6 +43,14 @@ The clipboard choice remains 30 or 60 seconds under its existing policy, and a *
 
 Loosening Auto-lock now collects the Master Password in Rust-owned native controls. Rust freezes the complete effective candidate and checks the current native operation/session before applying it; no password or reusable approval is returned to the WebView. This source implementation of [issue #13](https://github.com/nniiovoo/encrypted-note/issues/13) still needs physical native accessibility/capture acceptance. New Hidden Field input and ordinary Show remain in the renderer under ADR-0003's stated limits.
 
+## Show in the Editor: owner decision, 30 October 2026
+
+The owner approved a Show button in the Editor, so a typed **Login** password, or an **API Key**'s key or secret, can be checked before saving. A mistake there otherwise stays hidden until after the save.
+
+It is off by default, for those fields only: never a **Wallet Kind**, a **Passphrase**, an empty box or a box marked for removal. The box stays a password input. The value is drawn on a separate read-only line under it that can't be selected and isn't announced. It hides on window blur and 30 seconds after the press, and typing doesn't extend that. It reads only the typed text already in the Editor, never asks the core to show a stored value, and isn't kept in the unsaved draft.
+
+This adds time on screen, not a new path for the value: typed values are already in WebView memory under ADR-0003. It is best-effort like any text on screen, and this describes the source until it is tested by hand.
+
 ## Considered Options
 
 - **Keep one Note's decrypted Wallet Kind fields for a short "visit" so several actions need one Master Password**: rejected. It is the state ADR-0004 exists to prevent; show-and-copy and the bounded extension cover most of the need.

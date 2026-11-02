@@ -384,6 +384,43 @@ fn wrong_item_invalidates_registration_without_resetting_password_failures() {
 }
 
 #[test]
+fn a_failed_touch_id_unlock_that_turned_it_off_says_so() {
+    let mut app = App::new();
+    let _ = app.enroll();
+    let mut other = App::new();
+    let wrong_item = other.enroll();
+    app.core.lock();
+    let error = app.unlock_with(&wrong_item).unwrap_err();
+    assert_eq!(error.code, "invalid_input");
+    assert!(
+        error.message.contains("so it was turned off"),
+        "{}",
+        error.message
+    );
+    assert!(!app.core.app_status().quick_unlock.enabled);
+}
+
+#[test]
+fn a_failed_touch_id_unlock_never_says_turned_off_when_the_settings_write_failed() {
+    let mut app = App::new();
+    let _ = app.enroll();
+    let mut other = App::new();
+    let wrong_item = other.enroll();
+    app.core.lock();
+    let completion = app
+        .core
+        .prepare_quick_unlock()
+        .unwrap()
+        .open(item(&wrong_item));
+    let settings = app.temp.path().join("Vault.noindex/settings.json");
+    std::fs::remove_file(&settings).unwrap();
+    std::fs::create_dir(&settings).unwrap();
+    let error = app.core.finish_quick_unlock(completion).unwrap_err();
+    assert_eq!(error.code, "io");
+    assert!(!error.message.contains("turned off"), "{}", error.message);
+}
+
+#[test]
 fn biometric_session_preserves_the_password_attempt_count_and_delay() {
     let mut app = App::new();
     let payload = app.enroll();

@@ -32,6 +32,7 @@ use zeroize::Zeroizing;
 
 pub mod native;
 mod quick_unlock;
+pub(crate) use quick_unlock::MSG_TOUCH_ID_TURNED_OFF;
 pub use quick_unlock::{
     QuickUnlockCompletion, QuickUnlockEnrollment, QuickUnlockEnrollmentCompletion, QuickUnlockJob,
     QuickUnlockStatus,
@@ -1484,6 +1485,27 @@ impl AppCore {
         self.dir.root().display().to_string()
     }
 
+    /// What Show in Finder or File Explorer points at. The screens can't choose it, and it is
+    /// refused while anything else is under way: the file manager takes the owner to another app.
+    pub fn vault_reveal_target(&mut self) -> Result<PathBuf, ApiError> {
+        self.tick();
+        self.open()?;
+        self.guard_check()?;
+        if self.native_pending.is_some() || self.session.current_reveal().is_some() {
+            return Err(not_now());
+        }
+        let root = self.dir.root();
+        // Finder selects the file inside its folder. A link is not followed anywhere else.
+        #[cfg(target_os = "macos")]
+        {
+            let vault = root.join(store::VAULT_FILE);
+            if std::fs::symlink_metadata(&vault).is_ok_and(|found| found.is_file()) {
+                return Ok(vault);
+            }
+        }
+        Ok(root.to_path_buf())
+    }
+
     /// Rust-only custody location; canonicalization errors must never select a fallback path.
     pub(crate) fn quick_unlock_path(&self) -> Result<PathBuf, ApiError> {
         self.dir
@@ -1492,7 +1514,7 @@ impl AppCore {
             .map(|root| root.join("quick-unlock.sealed"))
             .map_err(|_| ApiError {
                 code: "internal",
-                message: "The local Touch ID storage folder could not be opened.".to_owned(),
+                message: "encrypted-note can't open its data folder on this computer, so it has to close. Try opening the app again.".to_owned(),
             })
     }
 
@@ -2099,18 +2121,17 @@ enum CredKind {
 const MSG_WRONG_PASSWORD: &str =
     "That password didn't unlock this Vault. Check Caps Lock and try again.";
 const MSG_WRONG_KEY: &str =
-    "That Recovery Key didn't unlock this Vault. Check each group against your Recovery Kit.";
+    "That Recovery Key didn't unlock this Vault. Check each group of 4 against your paper.";
 const MSG_KEY_LENGTH: &str =
-    "A Recovery Key has 28 characters in 7 groups of 4. Check it against your Recovery Kit.";
-const MSG_KEY_TYPO: &str =
-    "One of the groups doesn't look right. Check it against your Recovery Kit.";
+    "A Recovery Key has 28 characters in 7 groups of 4. Check it against your paper.";
+const MSG_KEY_TYPO: &str = "One of the groups doesn't look right. Check it against your paper.";
 const MSG_DAMAGED: &str = "This Vault file is damaged. Restore a Safety Copy or Backup.";
-const MSG_REFUSED_SETTINGS: &str = "This Vault file has security settings this app won't accept, so it may have been tampered with. Restore a Safety Copy or Backup.";
+const MSG_REFUSED_SETTINGS: &str = "This Vault file has security settings this app won't accept, so it may be damaged, or someone may have changed it. Restore a Safety Copy or Backup.";
 const MSG_UNSUPPORTED: &str =
     "This Vault was made by a newer version of encrypted-note. Update the app, then try again.";
 const MSG_WEAK: &str = "This password is too easy to guess.";
 const MSG_LOCKED: &str = "encrypted-note is locked. Unlock it, then try again.";
-const MSG_NOT_NOW: &str = "That isn't available right now.";
+const MSG_NOT_NOW: &str = "That can't be done right now. If a window from this app is still open, finish it first. Then try again.";
 const MSG_GUARD_UP: &str =
     "A screen-sharing or recording app is running, so nothing can be shown or copied right now.";
 const MSG_NOTE_NOT_FOUND: &str = "That Note couldn't be found. It may have been deleted.";
@@ -2156,10 +2177,9 @@ const MSG_ALREADY_OPEN: &str =
     "encrypted-note is already open. Use the window that's already open.";
 const MSG_NO_VAULT: &str = "There's no Vault on this computer yet.";
 const MSG_SAFETY_COPY_GONE: &str = "That Safety Copy isn't there any more.";
-const MSG_VERIFY_FAILED: &str =
-    "The file was written but didn't read back correctly, so it wasn't used. Nothing was changed.";
-const MSG_BACKUP_OVERWRITE_NOT_ATOMIC: &str = "This Backup already exists, and encrypted-note can't safely replace it with the access the file picker granted. Choose a new file name. Nothing was changed.";
-const MSG_INTERNAL: &str = "Something went wrong inside encrypted-note. Nothing was changed.";
+const MSG_VERIFY_FAILED: &str = "The file failed a check after it was saved, so it wasn't used. Nothing was changed. Please try again. If this is a Backup, choose another place, such as another USB stick.";
+const MSG_BACKUP_OVERWRITE_NOT_ATOMIC: &str = "A file with this name is already there, and the app can't safely replace it. Choose a new file name. Nothing was changed.";
+const MSG_INTERNAL: &str = "Something went wrong inside encrypted-note. Nothing was changed. Please try again. If it keeps happening, restart the app.";
 const MSG_NO_MEMORY: &str = "There isn't enough free memory to check that right now. Close other apps and try again. Nothing was changed.";
 const MSG_TOO_LARGE: &str =
     "That file is far larger than any Vault, so encrypted-note left it alone. Nothing was changed.";
@@ -2175,7 +2195,7 @@ fn locked() -> ApiError {
     err("locked", MSG_LOCKED)
 }
 
-fn not_now() -> ApiError {
+pub(crate) fn not_now() -> ApiError {
     err("invalid_input", MSG_NOT_NOW)
 }
 
@@ -2272,7 +2292,7 @@ fn store_error(e: StoreError) -> ApiError {
         StoreError::Io(e) => ApiError {
             code: "io",
             message: format!(
-                "encrypted-note couldn't read or write a file ({e}). Nothing was changed."
+                "encrypted-note couldn't read or write a file. Check that the disk isn't full and any USB stick is still plugged in, then try again. Nothing was changed. ({e})"
             ),
         },
     }

@@ -142,7 +142,7 @@ button {
   align-items: center;
   justify-content: center;
   gap: 5px;
-  min-height: 26px;
+  min-height: 30px;
   padding: 3px 13px;
   font: inherit;
   color: var(--text);
@@ -181,8 +181,8 @@ button.small .icon {
   height: 14px;
 }
 button.link {
-  min-height: 0;
-  padding: 2px 0;
+  min-height: 26px;
+  padding: 4px 0;
   background: none;
   box-shadow: none;
   color: var(--accent);
@@ -207,19 +207,20 @@ button.plain:hover:not(:disabled) {
 input:not([type="checkbox"], [type="radio"]),
 textarea {
   font: inherit;
+  font-size: 14px;
   color: var(--text);
   background: var(--field);
   border: 1px solid var(--input-border);
   border-radius: 6px;
-  padding: 4px 8px;
-  min-height: 28px;
+  padding: 6px 10px;
+  min-height: 32px;
   width: 100%;
   -webkit-user-select: text;
   user-select: text;
 }
 input::placeholder,
 textarea::placeholder {
-  color: var(--tertiary);
+  color: var(--muted);
 }
 textarea {
   resize: vertical;
@@ -250,6 +251,10 @@ textarea:focus-visible {
 }
 .label {
   font-weight: 500;
+}
+/* A button under a box (Move it to the Key box, Show): its own width, not the box's. */
+.field > button {
+  align-self: flex-start;
 }
 .check {
   display: flex;
@@ -287,9 +292,13 @@ textarea:focus-visible {
   flex-direction: column;
   gap: 4px;
 }
-/* A folder's path as text: it breaks wherever the line ends, never wider than its box. */
+/* A folder's path as text: it breaks wherever the line ends, never wider than its box. One click
+   selects all of it, the only text outside a box that can be selected. */
 .path {
   overflow-wrap: anywhere;
+  -webkit-user-select: all;
+  user-select: all;
+  cursor: text;
 }
 
 /* Choice: a segmented control. */
@@ -322,7 +331,7 @@ textarea:focus-visible {
 }
 .segmented label {
   position: relative;
-  padding: 3px 12px;
+  padding: 5px 14px;
   border-radius: 5px;
   white-space: nowrap;
 }
@@ -356,7 +365,7 @@ textarea:focus-visible {
 
 .hint {
   color: var(--muted);
-  font-size: 12px;
+  font-size: 13px;
 }
 .warn {
   color: var(--warn);
@@ -419,6 +428,44 @@ details.card ul {
 }
 details.card ul {
   padding-left: 1.2rem;
+}
+/* Optional details folded under one line. */
+.more-details summary,
+details.card.more-details summary {
+  font-weight: 500;
+}
+.more-details > .stack {
+  margin-top: 12px;
+}
+details.card.more-details[open] summary {
+  margin-bottom: 0;
+}
+details.card.more-details p,
+details.card.more-details ul {
+  margin: 0;
+}
+details.card.more-details ul {
+  padding-left: 0;
+}
+details ol {
+  margin: 0;
+  padding-left: 1.5rem;
+}
+/* Where your keys are stored: each row says its state in a word, never by color alone. */
+.storage-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 0;
+}
+.storage-rows dt {
+  font-weight: 500;
+}
+.storage-rows dd {
+  margin: 0;
+}
+.status-word {
+  font-weight: 600;
 }
 
 /* Rows inside a grouped box, split by inset lines. */
@@ -564,6 +611,22 @@ details.card ul {
   height: 100%;
   overflow: auto;
 }
+/* Warnings above every screen. Their padding keeps Dismiss clear of the Mac title bar strip. */
+.app-notices {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: calc(var(--titlebar) + 8px) 16px 8px;
+  background: var(--notice);
+}
+.app-notices p {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
 .center {
   display: flex;
   flex-direction: column;
@@ -637,6 +700,9 @@ details.card ul {
 }
 .center > .link.centered {
   align-self: center;
+}
+.welcome-next {
+  text-align: center;
 }
 
 .shield-icon {
@@ -819,7 +885,7 @@ button.primary kbd {
   font-weight: 400;
 }
 .list-pane > .choice label {
-  padding: 1px 10px;
+  padding: 4px 10px;
 }
 /* A failed Copy from a row stays in view however far the list is scrolled. */
 .list-pane > .error {
@@ -892,7 +958,8 @@ button.primary kbd {
 .row.on .hint {
   color: rgb(255 255 255 / 0.78);
 }
-/* Copy straight from a row. A button beside the row button, seen on hover and keyboard focus. */
+/* Copy straight from a row. A button beside the row button, clearer on hover and keyboard focus.
+   Not fainter than this at rest: it would look like a disabled button, and this one still copies. */
 .has-copy > .row {
   padding-right: 40px;
 }
@@ -901,7 +968,7 @@ button.primary kbd {
   top: 50%;
   right: 6px;
   transform: translateY(-50%);
-  opacity: 0;
+  opacity: 0.7;
 }
 li:hover > .row-copy,
 li:has(:focus-visible) > .row-copy {
@@ -971,13 +1038,33 @@ li:has(:focus-visible) > .row-copy {
 .page {
   gap: 22px;
 }
+/* Save and the lines about it stay in view over a long form. The padding keeps a box reached with
+   Tab from stopping underneath them. */
+.detail-pane {
+  scroll-padding-bottom: 96px;
+}
+.editor-footer {
+  position: sticky;
+  bottom: 0;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px 0;
+  background: var(--page);
+}
 .empty-state {
   display: flex;
   align-items: center;
   justify-content: center;
   height: 100%;
-  color: var(--tertiary);
+  color: var(--muted);
   font-size: 15px;
+}
+/* An empty list that says what to do next, with a button for it. */
+.empty-state.column {
+  flex-direction: column;
+  gap: 10px;
 }
 .tiles {
   display: grid;
@@ -1255,6 +1342,9 @@ li:has(:focus-visible) > .row-copy {
   color: var(--muted);
   font-size: 11px;
 }
+.words input[aria-invalid="true"] {
+  border-color: var(--warn);
+}
 .sr-only {
   /* fixed, not absolute: an absolutely placed element at the page end made the app scrollable */
   position: fixed;
@@ -1277,11 +1367,12 @@ li:has(:focus-visible) > .row-copy {
   background: var(--window);
   border-top: 1px solid var(--separator);
   color: var(--muted);
-  font-size: 11px;
+  font-size: 12px;
 }
 /* "Newer changes not backed up" goes to Settings; it sits in the line of text. */
 .status-line .link {
   display: inline;
+  min-height: 0;
   padding: 0;
 }
 .badge.warn {

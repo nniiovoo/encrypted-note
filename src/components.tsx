@@ -137,9 +137,9 @@ export function Field({ label, hint, check, children }: {
   );
 }
 
-export const SecretInput = ({ show, ...props }: ComponentProps<"input"> & { show?: boolean }) => (
-  <input {...props} {...noAssist} type={show ? "text" : "password"} />
-);
+/** Always a password-type box, which keeps OS secure input, the copy block and the Caps Lock
+ *  warning. */
+export const SecretInput = (props: ComponentProps<"input">) => <input {...props} {...noAssist} type="password" />;
 
 /** A radio group drawn as a segmented control (native radios are in-page, unlike <select>).
  *  Not a fieldset: WebKit laid out a fieldset with a legend taller than it drew it. */
@@ -168,8 +168,9 @@ export function Choice<T extends string | number>(props: {
   );
 }
 
-/** A sheet; `alert` draws a short question centered under the app icon, like a Mac alert. */
-export function Modal(props: { title: string; onClose: () => void; alert?: boolean; children: ReactNode }) {
+/** A sheet; `alert` draws a short question centered under the app icon, like a Mac alert.
+ *  `describedBy`: the id of the text a screen reader should read with the title. */
+export function Modal(props: { title: string; onClose: () => void; alert?: boolean; describedBy?: string; children: ReactNode }) {
   const { title, onClose, children } = props;
   const dialog = useRef<HTMLDivElement>(null);
   // Read during the first render, before any autoFocus inside the dialog moves focus.
@@ -198,7 +199,7 @@ export function Modal(props: { title: string; onClose: () => void; alert?: boole
   return (
     <div className="overlay">
       <TitlebarDrag />
-      <div ref={dialog} tabIndex={-1} className={props.alert ? "modal alert" : "modal"} role="dialog" aria-modal="true" aria-label={title}>
+      <div ref={dialog} tabIndex={-1} className={props.alert ? "modal alert" : "modal"} role="dialog" aria-modal="true" aria-label={title} aria-describedby={props.describedBy}>
         {props.alert && <AppIcon />}
         <h2>{title}</h2>
         {children}
@@ -209,36 +210,71 @@ export function Modal(props: { title: string; onClose: () => void; alert?: boole
 
 const topDialog = () => document.querySelectorAll<HTMLDivElement>("[role=dialog]").item(document.querySelectorAll("[role=dialog]").length - 1);
 
-export const Confirm = (props: { title: string; text: string; confirmLabel: string; onConfirm: () => void; onClose: () => void }) => (
-  <Modal title={props.title} onClose={props.onClose} alert>
-    <p>{props.text}</p>
-    <div className="actions">
-      {/* Cancel has the keyboard: a stray Enter or Space changes nothing. A key still held down
-          from opening the dialog doesn't press it either. */}
-      <button autoFocus onKeyDown={(e) => e.repeat && e.preventDefault()} onClick={props.onClose}>
-        {s.cancel}
-      </button>
-      <button className="primary" onClick={props.onConfirm}>
-        {props.confirmLabel}
-      </button>
-    </div>
-  </Modal>
-);
+export function Confirm(props: { title: string; text: string; confirmLabel: string; onConfirm: () => void; onClose: () => void }) {
+  const text = useId();
+  return (
+    <Modal title={props.title} onClose={props.onClose} alert describedBy={text}>
+      <p id={text}>{props.text}</p>
+      <div className="actions">
+        {/* Cancel has the keyboard: a stray Enter or Space changes nothing. A key still held down
+            from opening the dialog doesn't press it either. */}
+        <button autoFocus onKeyDown={(e) => e.repeat && e.preventDefault()} onClick={props.onClose}>
+          {s.cancel}
+        </button>
+        <button className="primary" onClick={props.onConfirm}>
+          {props.confirmLabel}
+        </button>
+      </div>
+    </Modal>
+  );
+}
 
-/** The credentials for this exact action are collected by native controls. */
+/** The credentials for this exact action are collected by native controls, whose panel already
+ *  names the action, so it opens at once unless a retry wait is running. The sheet stays under it:
+ *  it keeps the keyboard and blocks clicks during key derivation, and it shows an error or the
+ *  wait. It never starts again by itself. */
 export function NativeActionModal(props: {
   title: string;
   text: string;
-  submitLabel: string;
   onSubmit: () => Promise<unknown>;
   onClose: () => void;
   retryInMs?: number | null | undefined;
 }) {
-  const { busy, error, run } = useAction();
+  const [busy, setBusy] = useState(!props.retryInMs);
+  const [error, setError] = useState<string | null>(null);
   const pending = useRef(false);
+  // A cancelled action can answer seconds later, when this sheet is gone and another may be open.
+  const open = useRef(true);
   const wait = props.retryInMs ? seconds(props.retryInMs) : 0;
-  useEffect(() => () => {
-    if (pending.current) void cancelNativeOperation().catch(() => {});
+  async function start() {
+    if (pending.current) return;
+    pending.current = true;
+    setBusy(true);
+    setError(null);
+    try {
+      await props.onSubmit();
+      pending.current = false;
+      if (open.current) props.onClose();
+    } catch (e) {
+      pending.current = false;
+      if (!open.current) return;
+      if (isApiError(e) && e.code === "cancelled") {
+        props.onClose();
+        return;
+      }
+      setError(isApiError(e) ? e.message : s.somethingWentWrong);
+      setBusy(false);
+    }
+  }
+  // The timer lets StrictMode's fake unmount pass without starting anything, so it cancels nothing.
+  useEffect(() => {
+    open.current = true;
+    const timer = props.retryInMs ? undefined : setTimeout(start, 0);
+    return () => {
+      open.current = false;
+      clearTimeout(timer);
+      if (pending.current) void cancelNativeOperation().catch(() => {});
+    };
   }, []);
   const close = () => {
     if (pending.current) void cancelNativeOperation().catch(() => {});
@@ -246,21 +282,20 @@ export function NativeActionModal(props: {
   };
   return (
     <Modal title={props.title} onClose={close}>
-      <p>{props.text}</p>
-      <p className="hint">{s.nativeCredentialHint}</p>
-      <ErrorLine error={error} />
-      {wait > 0 && <p className="hint">{s.tryAgainIn(wait)}</p>}
-      <div className="actions">
-        <button onClick={close}>{s.cancel}</button>
-        <button className="primary" disabled={busy || wait > 0} onClick={() => {
-          if (pending.current) return;
-          pending.current = true;
-          run(props.onSubmit).then((ok) => {
-            pending.current = false;
-            if (ok) props.onClose();
-          });
-        }}>{busy ? s.checking : props.submitLabel}</button>
-      </div>
+      {busy ? (
+        <p className="hint">{s.checking}</p>
+      ) : (
+        <>
+          <p>{props.text}</p>
+          <p className="hint">{s.nativeCredentialHint}</p>
+          <ErrorLine error={error} />
+          {wait > 0 && <p className="hint">{s.tryAgainIn(wait)}</p>}
+          <div className="actions">
+            <button onClick={close}>{s.cancel}</button>
+            <button className="primary" disabled={wait > 0} onClick={start}>{s.tryAgain}</button>
+          </div>
+        </>
+      )}
     </Modal>
   );
 }

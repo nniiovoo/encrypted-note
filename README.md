@@ -18,14 +18,15 @@ An offline, encrypted Vault for Seed Phrases, Private Keys, Logins and API Keys,
 
 ## Features
 
-- **Offline Vault.** The Vault has no network code, accounts, sync, updater or telemetry; it's one encrypted file on your computer. An optional [Agent Companion](docs/agent-companion.md), off unless you start it, runs in its own sandbox, can't open the Vault, and sends text an approved agent supplies to OpenAI.
-- **Hidden by default.** Secrets stay as dots until you choose Show. Seed Phrases and Private Keys also need your Master Password.
-- **Careful on screen shares.** Asks the OS to keep the window out of captures (best effort) and covers it when a screen-sharing app is running.
+- **Offline Vault.** The Vault has no network code, accounts, sync, updater or telemetry. Your Notes are saved encrypted in one private folder on your computer, next to their encrypted Safety Copies and a small file of non-secret settings ([where your keys are stored](docs/guide.md#where-your-keys-are-stored)). An optional [Agent Companion](docs/agent-companion.md), off unless you start it, runs in its own sandbox, can't open the Vault, and sends text an approved agent supplies to OpenAI. It keeps its Agent Key in its own plain-text file, not in the Vault.
+- **Hidden by default.** Hidden Fields stay as dots until you choose Show. Seed Phrases and Private Keys also need your Master Password.
+- **Careful on screen shares.** Asks the OS to keep the window out of captures (best effort) and covers it when a known screen-sharing or recording app is running; meetings inside a web browser aren't detected.
 - **Recoverable.** A Recovery Key you write down at setup, and an [Emergency Reader](docs/guide.md#if-the-app-wont-open) that opens your Vault without the app.
-- **Portable.** Copy the Vault file to a USB stick to open it on another computer.
+- **Portable.** Use Back up now to save an encrypted copy, for example on a USB stick, then [open it on another computer](docs/guide.md#moving-to-another-computer).
 
 > [!WARNING]
-> v1 personal project, not independently audited. Keep a paper or metal backup of any seed phrase that holds real funds.
+> v1 personal project, not independently audited. The Windows build has not been run on a real Windows PC yet ([#11](https://github.com/nniiovoo/encrypted-note/issues/11)), so it may not work. Don't keep real secrets in it until that's done. Keep a paper or metal backup of any seed phrase that holds real funds.
+<!-- Take out the Windows sentences when the #11 results are recorded in docs/security-model.md. -->
 
 ## Build
 
@@ -62,10 +63,10 @@ Agents should test with fictional data in a separate development Vault using `EN
 ## Docs
 
 - [Security model](docs/security-model.md): what it protects against, how it works, what has been tested
-- [User guide](docs/guide.md): keyboard shortcuts, and reading your Vault if the app won't open
+- [User guide](docs/guide.md): where your keys are stored, keyboard shortcuts, and reading your Vault if the app won't open
 - [Agent Companion](docs/agent-companion.md): the optional helper for one approved agent, setup and limits
 - [File format](docs/FORMAT.md) · [Design decisions](docs/adr/) · [Glossary](CONTEXT.md)
 
 ## License
 
-[MIT](LICENSE). The passphrase generator uses the [EFF Long Wordlist](https://www.eff.org/dice) ([CC BY 3.0 US](https://creativecommons.org/licenses/by/3.0/us/)). Seed Phrase checks use the BIP39 English word list via the [`bip39`](https://crates.io/crates/bip39) crate.
+[MIT](LICENSE). The suggested Master Password uses the [EFF Long Wordlist](https://www.eff.org/dice) ([CC BY 3.0 US](https://creativecommons.org/licenses/by/3.0/us/)). Seed Phrase checks use the BIP39 English word list via the [`bip39`](https://crates.io/crates/bip39) crate.

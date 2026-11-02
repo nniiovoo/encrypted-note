@@ -10,6 +10,7 @@
 //! * [`default_backup_folder`]: where the Backup save panel starts.
 //! * [`clear_leftover_copy`]: at startup, clear a copy the last run didn't live to clear.
 //! * [`real_home_dir`]: the owner's home folder, even inside the Mac App Sandbox.
+//! * [`reveal_in_file_manager`]: show the Vault in Finder or File Explorer (main thread only).
 //! * [`continuous_ms`]: a monotonic clock that keeps counting while the computer sleeps.
 //! * [`ms_since_last_input`]: how long ago the keyboard, mouse or trackpad was last used in
 //!   any app, for the opt-in "count activity anywhere" Auto-lock setting (macOS only). A key
@@ -317,6 +318,18 @@ mod mac {
     /// Desktop or Documents (they may sync to iCloud).
     pub fn default_backup_folder(home: &Path) -> PathBuf {
         external_volume(Path::new("/Volumes")).unwrap_or_else(|| home.to_path_buf())
+    }
+
+    /// Select `target` in a Finder window. An empty root means Finder's main viewer. False if
+    /// Finder refused it.
+    pub fn reveal_in_file_manager(target: &Path) -> bool {
+        let Some(path) = target.to_str() else {
+            return false;
+        };
+        NSWorkspace::sharedWorkspace().selectFile_inFileViewerRootedAtPath(
+            Some(&NSString::from_str(path)),
+            &NSString::from_str(""),
+        )
     }
 
     /// The first real mount point under `/Volumes`: a directory (not the symlink to the startup
@@ -629,14 +642,16 @@ mod win {
     use windows::Win32::System::SystemServices::{
         GUID_CONSOLE_DISPLAY_STATE, GUID_LIDSWITCH_STATE_CHANGE,
     };
-    use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
+    use windows::Win32::UI::Shell::{
+        DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass, ShellExecuteW,
+    };
     use windows::Win32::UI::WindowsAndMessaging::{
         DEVICE_NOTIFY_WINDOW_HANDLE, GWL_EXSTYLE, GetForegroundWindow, GetWindowDisplayAffinity,
         GetWindowLongW, GetWindowThreadProcessId, KillTimer, LWA_ALPHA, PBT_APMSUSPEND,
         PBT_POWERSETTINGCHANGE, SIZE_MAXIMIZED, SIZE_MINIMIZED, SIZE_RESTORED, STYLESTRUCT,
-        SWP_SHOWWINDOW, SetLayeredWindowAttributes, SetTimer, SetWindowDisplayAffinity,
-        SetWindowLongW, WDA_EXCLUDEFROMCAPTURE, WINDOWPOS, WM_DESTROY, WM_NCDESTROY,
-        WM_POWERBROADCAST, WM_SIZE, WM_STYLECHANGING, WM_TIMER, WM_WINDOWPOSCHANGED,
+        SW_SHOWNORMAL, SWP_SHOWWINDOW, SetLayeredWindowAttributes, SetTimer,
+        SetWindowDisplayAffinity, SetWindowLongW, WDA_EXCLUDEFROMCAPTURE, WINDOWPOS, WM_DESTROY,
+        WM_NCDESTROY, WM_POWERBROADCAST, WM_SIZE, WM_STYLECHANGING, WM_TIMER, WM_WINDOWPOSCHANGED,
         WM_WTSSESSION_CHANGE, WS_EX_LAYERED, WTS_CONSOLE_DISCONNECT, WTS_REMOTE_DISCONNECT,
         WTS_SESSION_LOCK, WTS_SESSION_LOGOFF,
     };
@@ -1026,6 +1041,11 @@ mod win {
         }
     }
 
+    /// Whether the foreground window is one of this app's own, including a native panel.
+    pub fn app_in_front() -> bool {
+        foreground_process_is(std::process::id())
+    }
+
     /// Exclude the window from capture and make it a (fully opaque) layered window.
     ///
     /// tao sets the affinity at creation; setting it again here is only a guard in case something
@@ -1165,6 +1185,26 @@ mod win {
     pub fn default_backup_folder(home: &Path) -> PathBuf {
         home.to_path_buf()
     }
+
+    /// Open File Explorer on `folder`. Only the `explore` verb, never `open` or the default
+    /// verb, and no fallback, so this can't run a file. The shell reports success above 32.
+    pub fn reveal_in_file_manager(folder: &Path) -> bool {
+        use std::os::windows::ffi::OsStrExt;
+        let wide: Vec<u16> = folder.as_os_str().encode_wide().chain(Some(0)).collect();
+        // SAFETY: `wide` is NUL-terminated and outlives the call; the other strings are a
+        // constant or null, which this call allows.
+        let result = unsafe {
+            ShellExecuteW(
+                None,
+                w!("explore"),
+                PCWSTR(wide.as_ptr()),
+                PCWSTR::null(),
+                PCWSTR::null(),
+                SW_SHOWNORMAL,
+            )
+        };
+        result.0 as isize > 32
+    }
 }
 
 #[cfg(not(any(target_os = "macos", windows)))]
@@ -1221,5 +1261,9 @@ mod other {
 
     pub fn default_backup_folder(home: &Path) -> PathBuf {
         home.to_path_buf()
+    }
+
+    pub fn reveal_in_file_manager(_target: &Path) -> bool {
+        false
     }
 }

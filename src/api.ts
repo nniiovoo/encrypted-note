@@ -212,6 +212,7 @@ export interface ApiError {
     | "invalid_input"
     | "already_open"
     | "cancelled"
+    | "interrupted" // a native panel closed by itself: an app switch, a lock, the Sharing Guard, its time limit
     | "io"
     | "internal";
   message: string;
@@ -351,6 +352,8 @@ export const markSeedExplainerSeen = () => invoke<void>("mark_seed_explainer_see
 /** The folder this computer's Vault file and Safety Copies are in, as text to show (built like
  *  PickedFile.display_path). Not a secret; works in every phase. */
 export const vaultLocation = () => invoke<string>("vault_location");
+/** Shows the Vault folder in Finder or File Explorer. Takes no path: Rust opens only that folder. */
+export const revealVaultFolder = () => invoke<void>("reveal_vault_folder");
 /** "I'm not sharing right now". */
 export const dismissSharingGuard = () => invoke<void>("dismiss_sharing_guard");
 

@@ -15,7 +15,7 @@ private let domain = Data("com.encryptednote.app.quick-unlock.p256.v1".utf8)
 private let reason = "unlock your encrypted-note Vault"
 private let authenticationTimeout: DispatchTimeInterval = .seconds(120)
 
-private enum BiometryFailure: Error { case cancelled, unavailable, malformed, failed }
+private enum BiometryFailure: Error { case cancelled, unavailable, malformed, failed, tryAgain }
 
 private func freshContext() -> LAContext {
     let context = LAContext()
@@ -142,6 +142,7 @@ private func status(_ error: Error) -> Int32 {
         case .unavailable: return 2
         case .malformed: return 3
         case .failed: return 4
+        case .tryAgain: return 5
         }
     }
     if let error = error as? LAError,
@@ -164,7 +165,17 @@ private func authenticate(_ context: LAContext, _ access: SecAccessControl) thro
         context.invalidate()
         throw BiometryFailure.cancelled
     }
-    if let error = outcome.error { throw error }
+    if let error = outcome.error {
+        // A missed finger, a lockout, a closed lid or a disconnected Touch ID keyboard leaves
+        // Touch ID on. Only this check says so: an error from the key itself (such as changed
+        // fingers) still turns it off.
+        if let error = error as? LAError,
+           [.authenticationFailed, .biometryLockout, .biometryNotAvailable,
+            .biometryDisconnected, .biometryNotPaired].contains(error.code) {
+            throw BiometryFailure.tryAgain
+        }
+        throw error
+    }
 }
 
 private func randomBytes(_ count: Int) throws -> Data {

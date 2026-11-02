@@ -10,12 +10,16 @@ A personal desktop app (Mac and Windows) for keeping secrets encrypted and store
 The single encrypted file that holds all of the owner's **Notes**; the same file opens on Mac and Windows.
 _Avoid_: database, store, safe, wallet
 
+**Vault folder**:
+The folder in the owner's user account on this computer that holds the **Vault** file, **Safety Copies**, settings and the **Quick Unlock** file.
+_Avoid_: data folder, container
+
 **Backup**:
 A complete copy of the **Vault** file the owner saved outside the app (e.g. on a USB stick) with "Back up now"; it is itself a **Vault** and opens with the same **Master Password** or **Recovery Key**.
 _Avoid_: export, snapshot, sync
 
 **Safety Copy**:
-An earlier version of this computer's **Vault** that the app keeps automatically (the 10 most recent saves, the first save of each day for 30 days, and whenever opening a **Backup** replaced it), so a damaged or mistakenly replaced **Vault** can be restored.
+An earlier version of this computer's **Vault** that the app keeps automatically (the 10 most recent saves, the first save of each day for 30 days, and for at least 30 days whenever opening a **Backup** replaced it), so a damaged or mistakenly replaced **Vault** can be restored.
 _Avoid_: old vault, previous version, auto-backup, snapshot
 
 **Emergency Reader**:
@@ -33,7 +37,7 @@ A long random code generated once at setup that can also open the **Vault** and 
 _Avoid_: backup code, secret key, reset code
 
 **Key Rotation**:
-Replacing the **Vault**'s internal keys and its **Recovery Key** (so the owner writes a new **Recovery Kit**), used when the old **Master Password** or **Recovery Kit** may be known to someone else.
+Replacing the **Vault**'s internal keys and its **Recovery Key** (so the owner writes a new **Recovery Kit**), used when the old **Master Password** or **Recovery Kit** may be known to someone else, or the owner lost the paper with the **Recovery Key**.
 _Avoid_: reset, re-key, re-encrypt
 
 **Locked** / **Unlocked**:
@@ -49,7 +53,7 @@ Opening a **Locked** app with Touch ID on a supported Mac after explicit enrollm
 _Avoid_: biometric login, fingerprint login
 
 **Recovery Kit**:
-The sheet (printed or handwritten) the owner keeps somewhere physical, carrying the **Recovery Key**.
+The sheet (printed or handwritten) the owner keeps somewhere physical, carrying the **Recovery Key**. On screen: your paper with your Recovery Key.
 _Avoid_: emergency kit, backup sheet
 
 ### Working with AI agents
@@ -147,6 +151,7 @@ _Avoid_: pinned, bookmarked, starred item
 - A **Note** in **Trash** is still inside the **Vault** (still encrypted); "Delete forever" removes it from this copy only; older copies still contain it.
 - Removing a **Wallet Kind** needs the **Master Password**, like every other change to one: moving it to **Trash**, "Delete forever", and emptying a **Trash** that holds one.
 - Changing the **Master Password** changes it only in the copy of the **Vault** where it was changed; older copies still open with the old **Master Password** and old **Recovery Key**.
+- Restoring an older copy makes its old **Master Password** and **Recovery Key** current again.
 - Changing the **Master Password** keeps the same **Recovery Key**; only **Key Rotation** replaces it.
 
 ## Example dialogue

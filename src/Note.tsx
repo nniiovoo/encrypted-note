@@ -1,6 +1,6 @@
 // One Note: the detail view (Show / Copy of Hidden Fields) and the editor for every Kind.
 
-import { Fragment, useEffect, useId, useRef, useState, type ClipboardEvent as PasteEvent, type FormEvent } from "react";
+import { Fragment, useEffect, useId, useRef, useState, type ClipboardEvent as PasteEvent, type FormEvent, type KeyboardEvent as KeyEvent } from "react";
 import {
   appendText,
   cancelNativeOperation,
@@ -37,12 +37,21 @@ import { strings as s } from "./strings";
 const FORM: Record<Kind, string[]> = {
   seed_phrase: ["word_count", "words", "wallet_name", "address", "derivation_path", "passphrase"],
   private_key: ["chain", "address", "key"],
-  login: ["website", "username", "purpose", "password"],
-  api_key: ["service", "key_id", "purpose", "url", "expires", "env_var", "key", "secret"],
+  login: ["website", "username", "password", "purpose"],
+  api_key: ["service", "key", "secret", "key_id", "purpose", "url", "expires", "env_var"],
   text: ["body"],
 };
 const HIDDEN = ["words", "passphrase", "key", "secret", "password", "body"];
 const OPTIONAL = ["wallet_name", "passphrase", "address", "derivation_path", "username", "purpose", "key_id", "url", "expires", "env_var", "secret"];
+// The fields the Editor folds under one line, in FORM's order. FORM still lists them.
+const MORE: Partial<Record<Kind, string[]>> = {
+  seed_phrase: ["address", "derivation_path", "passphrase"],
+  api_key: ["secret", "key_id", "purpose", "url", "expires", "env_var"],
+};
+// The Hidden Fields whose typed text the Editor can show (ADR-0006). Never a Wallet Kind.
+const SHOWN_WHILE_TYPING: Partial<Record<Kind, string[]>> = { login: ["password"], api_key: ["key", "secret"] };
+// From the press. Typing doesn't extend it.
+const SHOWN_WHILE_TYPING_MS = 30_000;
 // The Hidden Field a Note of the Kind is for. (A Seed Phrase can't be saved without its words.)
 const MAIN: Partial<Record<Kind, string>> = { private_key: "key", login: "password", api_key: "key", text: "body" };
 // The field a new Note's title is taken from when the title was left blank.
@@ -85,6 +94,33 @@ const seedLike = (text: string, list: string[]) => {
   const words = text.trim().toLowerCase().split(/\s+/);
   return (words.length === 12 || words.length === 24) && words.every((w) => list.includes(w));
 };
+/** A date with single digits or slashes, written the way the core stores it: 2027/1/5 becomes
+ *  2027-01-05. Anything else stays as typed. So do spaces alone: the core trims them, and a stored
+ *  value sent back as it is means "keep". */
+const fixExpiry = (value: string) => {
+  const m = /^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$/.exec(value.trim());
+  const fixed = m && `${m[1]}-${m[2]!.padStart(2, "0")}-${m[3]!.padStart(2, "0")}`;
+  return fixed && fixed !== value.trim() ? fixed : value;
+};
+/** The same rule as is_calendar_date in crates/notes/src/rules.rs. */
+const isCalendarDate = (value: string) => {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if (!m) return false;
+  const year = Number(m[1]);
+  const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const days = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][Number(m[2]) - 1];
+  return days !== undefined && Number(m[3]) >= 1 && Number(m[3]) <= days;
+};
+/** What crates/notes/src/rules.rs would refuse in a visible field, said before Save. Fixed text,
+ *  never the value. It never stops a save: the core stays the authority. */
+const visibleProblem = (f: string, value: string) => {
+  const v = value.trim();
+  if (!v) return null;
+  if (f === "expires") return isCalendarDate(fixExpiry(v)) ? null : s.expiryProblem;
+  if (f === "env_var") return /^[A-Za-z_][A-Za-z0-9_]*$/.test(v) && v.length <= 128 ? null : s.envVarProblem;
+  if (f === "purpose") return [...v].length > 200 ? s.purposeProblem : null;
+  return null;
+};
 
 /** What a duplicate's Editor starts from: a title and visible fields, never a Hidden Field. */
 export interface Prefill {
@@ -121,6 +157,11 @@ function useShown(noteId: string, status: AppStatus) {
   const generation = useRef(0);
   // Whether the last status named a reveal of this Note.
   const revealed = useRef(false);
+  // Whether a value came to this page. Set in keep(), not after a render, so a blur right after a
+  // Show still ends it. It stays false for a Wallet Kind, whose values never enter the page: a
+  // blur there is its own panel opening, and hideField would cancel that panel. Real focus loss
+  // cancels native work in Rust.
+  const held = useRef(false);
   useEffect(() => {
     const r = status.reveal;
     const mine = r?.note_id === noteId;
@@ -135,7 +176,10 @@ function useShown(noteId: string, status: AppStatus) {
     const drop = () => {
       generation.current++;
       setShown(null);
-      hideField().catch(() => {});
+      if (held.current) {
+        held.current = false;
+        hideField().catch(() => {});
+      }
     };
     window.addEventListener("blur", drop);
     return () => {
@@ -149,6 +193,7 @@ function useShown(noteId: string, status: AppStatus) {
     version: () => ++generation.current,
     keep: (field: string, value: string, version = generation.current) => {
       if (version === generation.current && document.hasFocus()) {
+        held.current = true;
         setShown({ field, value });
         return true;
       }
@@ -156,6 +201,7 @@ function useShown(noteId: string, status: AppStatus) {
       return false;
     },
     hide: () => {
+      held.current = false;
       generation.current++;
       setShown(null);
       hideField().catch(() => {});
@@ -219,7 +265,8 @@ export function Detail(
         /** A new Note of the same Kind, started from this one's title and visible fields. */
         onDuplicate: (kind: Kind, seed: Prefill) => void;
         onChanged: () => void;
-        onTrashed: () => void;
+        /** `id`: the Note that went to Trash, so the result can offer to bring it back. */
+        onTrashed: (id: string) => void;
       }
     /** A Note in Trash: Show and Copy under the usual rules, nothing that changes it. */
     | { readOnly: true }
@@ -460,7 +507,7 @@ export function Detail(
           <button
             className="danger"
             // A Wallet Kind leaves only with the Master Password, like every other change to one.
-            onClick={() => (wallet ? setModal({ field: "", step: "trash" }) : run(async () => { await trashNote(id); live.onTrashed(); }))}
+            onClick={() => (wallet ? setModal({ field: "", step: "trash" }) : run(async () => { await trashNote(id); live.onTrashed(id); }))}
           >
             <Icon name="trash" />
             {s.moveToTrash}
@@ -483,7 +530,6 @@ export function Detail(
         <NativeActionModal
           title={s.noteAction(s.copyTitle(label(note.kind, modal.field)), note.title)}
           text={s.copyText(WALLET_COPY_SECONDS)}
-          submitLabel={s.copy}
           onSubmit={() => copyField(id, modal.field)}
           onClose={() => setModal(null)}
           retryInMs={status.retry_in_ms}
@@ -493,10 +539,9 @@ export function Detail(
         <NativeActionModal
           title={s.noteAction(s.moveToTrash, note.title)}
           text={s.walletTrashText}
-          submitLabel={s.moveToTrash}
           onSubmit={async () => {
             await trashNote(id);
-            live.onTrashed();
+            live.onTrashed(id);
           }}
           onClose={() => setModal(null)}
           retryInMs={status.retry_in_ms}
@@ -537,7 +582,7 @@ function WalletShow(props: { id: string; title: string; field: string; name: str
         <div className="actions">
           <button className="primary" disabled={busy || wait > 0} onClick={() => show("held")}>{s.holdToShow}</button>
           <button disabled={busy || wait > 0} onClick={() => show("accessible")}>{s.showFor20}</button>
-          <button disabled={busy || wait > 0} onClick={() => props.field === "words" ? setConfirmCopy(true) : show("copy")}>{s.showFor20AndCopy}</button>
+          <button disabled={busy || wait > 0} onClick={() => props.field === "words" ? setConfirmCopy(true) : show("copy")}>{s.continueShowFor20AndCopy}</button>
           <button onClick={close}>{s.close}</button>
         </div>
       </Modal>
@@ -593,12 +638,21 @@ export function Editor(props: {
   const [warning, setWarning] = useState<string | null>(null);
   const [addressIsKey, setAddressIsKey] = useState(false);
   const [pasteOverflow, setPasteOverflow] = useState(false);
+  const [moreOpen, setMoreOpen] = useState(false);
+  // Visible boxes that have had their say: the keyboard left them, or a save was tried.
+  const [checked, setChecked] = useState<string[]>([]);
+  // What a Move button last did: the box it emptied and where the value went.
+  const [moved, setMoved] = useState<{ from: string; to: string } | null>(null);
+  // The Hidden Field whose typed text is shown under its box. Not in Draft, on purpose.
+  const [peek, setPeek] = useState<string | null>(null);
   const [step, setStep] = useState<"explainer" | "password" | null>(null);
   // Save and add another: what the save under way does once it has worked.
   const another = useRef(false);
   // The chip that stands in for the key box while it holds a pasted multi-line key. After Clear
   // the box comes back with the keyboard in it.
   const chips = useRef<Record<string, HTMLDivElement | null>>({});
+  // The Title and visible boxes: a Move button puts the keyboard back in the box it emptied.
+  const visibleBoxes = useRef<Record<string, HTMLInputElement | null>>({});
   const pastedField = useRef<string | null>(null);
   const [clearedField, setClearedField] = useState<string | null>(null);
   // "Saved" is filled in after the first render: a status line is read out when its text changes,
@@ -625,13 +679,35 @@ export function Editor(props: {
   // Only the listed chains have a key format an address can be compared with.
   const address = kind === "private_key" && chain !== "other" ? (visible.address ?? "").trim() : "";
   const wordsOk = kind !== "seed_phrase" || phrase !== "" || (!!note && words.every((w) => !w.trim()));
-  const missing = !title.trim() ? s.addTitle : wordsOk ? null : s.fillWords(words.length, !!note);
+  // Whether a Service or Website can name a new Note. Not a value shaped like a key or a Seed
+  // Phrase, and not before the word list that tells has arrived.
+  const canTitle = (v: string) => !note && !!v && list.length > 0 && !keyLike(v) && !seedLike(v, list);
+  const titleSource = () => {
+    const f = TITLE_FROM[kind];
+    const v = f ? (visible[f] ?? "").trim() : "";
+    return canTitle(v) ? v : "";
+  };
+  // The title a save sends: a blank Title takes its name from the Service or Website.
+  const finalTitle = title.trim() || titleSource();
+  const titleField = note ? undefined : TITLE_FROM[kind];
+  const missing = !finalTitle
+    ? titleField && !(visible[titleField] ?? "").trim()
+      ? s.addTitleOr(label(kind, titleField))
+      : s.addTitle
+    : wordsOk
+      ? null
+      : s.fillWords(words.length, !!note);
   const canSave = !busy && !missing && !pasteOverflow;
   const main = note ? undefined : MAIN[kind];
   // Whether a Hidden Field holds something typed.
   const typed = (f: string) => (f === "words" ? words.some(Boolean) : !!hidden[f]);
   // Hidden Fields of a Wallet Kind that the draft came back without and that are still blank.
   const again = (draft?.again ?? []).filter((f) => !typed(f) && !clear[f]);
+  const more = MORE[kind] ?? [];
+  // The fold can't close over something Save will write or remove, or the box that has the keyboard.
+  const mustOpen = more.some((f) => visible[f]?.trim() || typed(f) || filled(f) || clear[f] || again.includes(f) || f === props.focusField || f === clearedField);
+  // Only text typed here, on one line, in a box not ticked for removal. Never a stored value.
+  const peekable =(f: string) => !!SHOWN_WHILE_TYPING[kind]?.includes(f) && !!hidden[f] && !clear[f] && lineCount(hidden[f]) < 2;
 
   useEffect(() => {
     // A duplicate, or a draft that came back, holds something unsaved from the start, so leaving
@@ -665,6 +741,29 @@ export function Editor(props: {
     if (field) chips.current[field]?.focus();
     pastedField.current = null;
   }, [hidden.key, hidden.secret]);
+
+  // Once open it stays open, so deleting the last character can't close it under the keyboard.
+  useEffect(() => {
+    if (mustOpen) setMoreOpen(true);
+  }, [mustOpen]);
+
+  // Typed text under its box goes on window blur and 30 seconds after the press. Its button then
+  // gives up the keyboard: left there, a stray Space later would show the text again.
+  useEffect(() => {
+    if (!peek) return;
+    const end = () => setPeek(null);
+    const timer = setTimeout(end, SHOWN_WHILE_TYPING_MS);
+    window.addEventListener("blur", end);
+    return () => {
+      clearTimeout(timer);
+      window.removeEventListener("blur", end);
+      const at = document.activeElement;
+      if (at instanceof HTMLElement && at.dataset.peek === peek) at.blur();
+    };
+  }, [peek]);
+  useEffect(() => {
+    if (peek && !peekable(peek)) setPeek(null);
+  }, [peek, hidden, clear]);
 
   // The address is always visible. No hint from the key check means it is shaped like a key.
   useEffect(() => {
@@ -707,11 +806,11 @@ export function Editor(props: {
     if (note && add) {
       // Only what was typed is sent. The title goes first: saved a second time after a failure
       // it changes nothing, where text added a second time would be there twice.
-      if (title !== note.title) await updateNote(note.id, { title, visible: {}, hidden: {} });
+      if (finalTitle !== note.title) await updateNote(note.id, { title: finalTitle, visible: {}, hidden: {} });
       if (hidden.body) await appendText(note.id, hidden.body);
       return props.onSaved(note.id);
     }
-    const input = { title, visible: {} as Record<string, string>, hidden: {} as Record<string, string> };
+    const input = { title: finalTitle, visible: {} as Record<string, string>, hidden: {} as Record<string, string> };
     for (const f of FORM[kind]) {
       if (f === "words") {
         if (phrase) input.hidden.words = phrase;
@@ -720,6 +819,8 @@ export function Editor(props: {
         if (clear[f]) input.hidden[f] = "";
         else if (hidden[f]) input.hidden[f] = hidden[f];
       } else if (f === "chain") input.visible.chain = chain === "other" ? chainName.trim() || "other" : chain;
+      // Here as well as on blur: Cmd/Ctrl+S and Enter never leave the box.
+      else if (f === "expires") input.visible[f] = fixExpiry(visible[f] ?? "");
       else if (f !== "word_count") input.visible[f] = visible[f] ?? "";
     }
     if (note) await updateNote(note.id, input);
@@ -732,6 +833,7 @@ export function Editor(props: {
 
   // Wallet Kinds ask for the Master Password on every save, "Save and add another" (`again`) too.
   function begin(again: boolean) {
+    setChecked((c) => c.concat(FORM[kind].filter((f) => visibleProblem(f, visible[f] ?? ""))));
     another.current = again;
     if (kind === "seed_phrase" && !props.status.settings.seed_explainer_seen) setStep("explainer");
     else if (isWalletKind(kind)) setStep("password");
@@ -741,17 +843,39 @@ export function Editor(props: {
     e.preventDefault();
     begin(false);
   }
+  // In a new Note whose main Hidden Field is still blank, Enter in a box goes on to the next box
+  // instead of saving too early; after that it saves as usual. It never goes from a password box
+  // to one that shows what is typed, so a key can't be carried into plain sight.
+  const enterGoesOn = (e: KeyEvent<HTMLFormElement>) => {
+    if (e.key !== "Enter" || e.metaKey || e.ctrlKey || e.defaultPrevented || e.nativeEvent.isComposing || e.keyCode === 229) return;
+    const at = e.target;
+    if (!(at instanceof HTMLInputElement) || !main || hidden[main]) return;
+    e.preventDefault();
+    if (e.repeat) return;
+    const all = [...e.currentTarget.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>("input, textarea")];
+    const next = all.slice(all.indexOf(at) + 1).find((b) => !b.disabled && b.offsetParent !== null && b.type !== "radio" && b.type !== "checkbox");
+    if (next && (at.type !== "password" || next.type === "password")) next.focus();
+  };
   // Cmd/Ctrl+S and Cmd/Ctrl+Enter save, as the Save button does (in a Text body Enter is a new
   // line). The keys do nothing else here, also while Save is off: never the browser's own Save.
   // Heard on the window for as long as the Editor is there, not on the form: the keyboard is not
   // always inside it (after a click on blank space, or on a checkbox or radio in WebKit). The
-  // handler is set up once and reads what the Editor holds now through the ref.
+  // handler is set up once and reads what the Editor holds now through the refs.
   const saveNow = useRef(() => {});
   saveNow.current = () => {
     if (canSave) begin(false);
   };
+  const cancelNow = useRef(() => {});
+  cancelNow.current = props.onCancel;
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      // Escape leaves the Editor: not a held key, an input method's, or one meant for a dialog or
+      // the search box.
+      if (e.key === "Escape") {
+        if (e.repeat || e.isComposing || e.keyCode === 229) return;
+        if (document.querySelector("[role=dialog]") || document.activeElement?.matches("[data-search]")) return;
+        return cancelNow.current();
+      }
       if (!cmdKey(e) || e.shiftKey || (e.key.toLowerCase() !== "s" && e.key !== "Enter")) return;
       if (document.querySelector("[role=dialog]")) return;
       e.preventDefault();
@@ -774,26 +898,262 @@ export function Editor(props: {
   // title box, where it can still be changed. Not a value that looks like a key or a Seed Phrase.
   const titleFrom = (value: string) => {
     const v = value.trim();
-    if (!note && !title.trim() && v && !keyLike(v) && !seedLike(v, list)) setTitle(v);
+    if (!title.trim() && canTitle(v)) setTitle(v);
   };
   // A paste-first slip puts a key or a Seed Phrase into a field that is always visible and
-  // searchable. The line names the field, never what is in it.
-  const slip = (f: string, value: string) => {
+  // searchable. The line names the field, never what is in it. `to`: the Hidden Field a button can
+  // move it to, where that is its obvious place and nothing there would be overwritten.
+  const slip = (f: string, value: string): { text: string; to: string | null } | null => {
     const name = f === "title" ? s.title : label(kind, f);
-    const text =
-      (f === "title" || f === "wallet_name") && seedLike(value, list)
-        ? s.looksLikeSeed(name)
-        : (f === "title" || f === "service" || f === "username") && keyLike(value)
-          ? s.looksLikeKey(name)
-          : f === "address" && address && addressIsKey
-            ? s.looksLikePrivateKey(name)
-            : null;
-    return text && <span className="warn">{text}</span>;
+    if (seedLike(value, list)) {
+      // Never into a field that isn't a Wallet Kind's.
+      if (kind !== "seed_phrase") return { text: s.looksLikeSeedManual(name), to: null };
+      const free = (f === "title" || f === "wallet_name") && !filled("words") && words.every((w) => !w.trim());
+      return { text: s.looksLikeSeed(name), to: free ? "words" : null };
+    }
+    if (!(f === "address" ? address && addressIsKey : keyLike(value))) return null;
+    const target = MAIN[kind];
+    if (!target) return { text: s.looksLikeKey(name), to: null };
+    const free = ["title", "service", "username", "address"].includes(f) && !hidden[target] && !filled(target) && !clear[target];
+    if (!free) return { text: s.looksLikeKeyManual(name, label(kind, target)), to: null };
+    return { text: f === "address" ? s.looksLikePrivateKey(name) : s.looksLikeKey(name), to: target };
+  };
+  const move = (f: string, value: string, to: string) => {
+    if (to === "words") {
+      // Not through the grid's own paste: this sets the word count too, and is never too long.
+      setWords(value.trim().toLowerCase().split(/\s+/));
+      setPasteOverflow(false);
+    } else setHidden({ ...hidden, [to]: value.trim() });
+    if (f === "title") setTitle("");
+    else setVisible({ ...visible, [f]: "" });
+    setMoved({ from: f, to });
+    props.onDirty();
+    visibleBoxes.current[f]?.focus();
+  };
+  // Under a visible box, never inside its Field, which is a label: the Move button and what it did.
+  // The status line is there before its text, so that the text is read out when it comes.
+  const moveLine = (f: string, value: string, found: { to: string | null } | null) => {
+    const to = found?.to;
+    return (
+      <>
+        {to && (
+          <button type="button" className="small" onClick={() => move(f, value, to)}>
+            {to === "words" ? s.moveToWords : s.moveToBox(label(kind, to))}
+          </button>
+        )}
+        {(to || moved?.from === f) && (
+          <p className="ok" role="status">
+            {moved?.from === f && (moved.to === "words" ? s.movedToWords(!finalTitle) : s.movedToBox(label(kind, moved.to), !finalTitle))}
+          </p>
+        )}
+      </>
+    );
+  };
+  const titleSlip = slip("title", title);
+
+  const fieldBox = (f: string) => {
+    const name = OPTIONAL.includes(f) ? `${label(kind, f)} ${s.optional}` : label(kind, f);
+    if (f === "word_count")
+      return (
+        <div key={f} className="choice-row">
+          <Choice
+            label={name}
+            options={[[12, s.words(12)], [24, s.words(24)]]}
+            value={words.length}
+            onChange={(n) => setWords((ws) => Array.from({ length: n }, (_, i) => ws[i] ?? ""))}
+          />
+          <button
+            type="button"
+            onClick={() => {
+              setWords((ws) => ws.map(() => ""));
+              setPasteOverflow(false);
+              props.onDirty();
+            }}
+          >
+            {s.clearAllWords}
+          </button>
+        </div>
+      );
+    if (f === "words") return <SeedGrid key={f} list={list} words={words} setWords={setWords} editing={!!note} autoFocus={props.focusField === f} onDirty={props.onDirty} onOverflow={() => setPasteOverflow(true)} onAccepted={() => setPasteOverflow(false)} />;
+    if (f === "chain")
+      return (
+        <Fragment key={f}>
+          <Choice label={name} options={CHAINS} value={chain} onChange={(c) => setVisible({ ...visible, chain: c })} />
+          {chain === "other" && (
+            <Field label={s.chainName} hint={s.chainNameHint}>
+              <input
+                value={chainName}
+                maxLength={30}
+                onChange={(e) => setChainName(e.target.value)}
+                // An obvious name for a listed chain chooses that chain.
+                onBlur={() => {
+                  const listed = CHAIN_NAMES.get(chainName.trim().toLowerCase());
+                  if (!listed) return;
+                  setVisible({ ...visible, chain: listed });
+                  setChainName("");
+                }}
+                {...noAssist}
+              />
+            </Field>
+          )}
+        </Fragment>
+      );
+    if (!HIDDEN.includes(f)) {
+      const shownValue = visible[f] ?? "";
+      const found = slip(f, shownValue);
+      const problem = checked.includes(f) ? visibleProblem(f, shownValue) : null;
+      return (
+        // A plain box, not only the Field: moveLine goes beside the label, and the box stays the
+        // same one when a button comes, so the input keeps the keyboard.
+        <div key={f} className="field">
+          <Field
+            label={name}
+            check={
+              <>
+                {found && <span className="warn">{found.text}</span>}
+                {problem && <span className="warn">{problem}</span>}
+              </>
+            }
+            hint={s.hints[kind][f]}
+          >
+            <input
+              ref={(el) => {
+                visibleBoxes.current[f] = el;
+              }}
+              value={shownValue}
+              placeholder={f === "expires" ? s.expiryPlaceholder : undefined}
+              onChange={(e) => {
+                setVisible({ ...visible, [f]: e.target.value });
+                if (moved?.from === f) setMoved(null);
+              }}
+              onBlur={() => {
+                if (f === TITLE_FROM[kind]) titleFrom(shownValue);
+                if (f === "expires" && fixExpiry(shownValue) !== shownValue) setVisible({ ...visible, [f]: fixExpiry(shownValue) });
+                setChecked((c) => (c.includes(f) ? c : [...c, f]));
+              }}
+              {...noAssist}
+            />
+          </Field>
+          {moveLine(f, shownValue, found)}
+        </div>
+      );
+    }
+    const value = hidden[f] ?? "";
+    const had = filled(f);
+    // The text of a Text, in Add mode: what is typed joins what is there, so there is
+    // nothing to keep by leaving the box blank and nothing to remove.
+    const adds = f === "body" && add;
+    const edgeSpace = /^\s|\s$/.test(value);
+    const inputProps = {
+      value,
+      // Only a field that has a value has one to keep.
+      placeholder: adds ? s.typeToAdd : had && !clear[f] ? s.leaveBlankToKeep : "",
+      disabled: !!clear[f] && !adds,
+      onChange: (e: { target: { value: string } }) => setHidden({ ...hidden, [f]: e.target.value }),
+      autoFocus: f === props.focusField || f === clearedField,
+    };
+    const peeking = peek === f && peekable(f);
+    return (
+      // Field is a label, and so is the checkbox: they sit one under the other in a plain box.
+      <div key={f} className="field">
+        {f === "body" && canAdd && (
+          <Choice
+            label={s.textMode}
+            options={TEXT_MODES}
+            value={add ? "add" : "replace"}
+            onChange={(mode) => {
+              setAdding(mode === "add");
+              if (mode === "add") setClear({ ...clear, body: false });
+            }}
+          />
+        )}
+        {(f === "key" || f === "secret") && lineCount(value) > 1 ? (
+          // A group, not a Field: a click on a label's text would press the button in it.
+          <div className="field" role="group" aria-labelledby={`${keyLabel}-${f}`}>
+            <span className="label" id={`${keyLabel}-${f}`}>
+              {name}
+            </span>
+            <div className="chip" ref={(el) => { chips.current[f] = el; }} tabIndex={-1}>
+              <span>{s.multilineKey(lineCount(value), [...value].length)}</span>
+              <button
+                type="button"
+                className="small"
+                aria-label={s.fieldAction(s.clear, name)}
+                onClick={() => {
+                  setHidden({ ...hidden, [f]: "" });
+                  setClearedField(f);
+                  props.onDirty();
+                }}
+              >
+                {s.clear}
+              </button>
+            </div>
+          </div>
+        ) : (
+          <Field
+            label={name}
+            hint={s.hints[kind][f]}
+            // The length and the ends are all that is said about what was typed.
+            check={
+              (value || (adds && had)) && (
+                <>
+                  {/* The core trims a one-line key or secret, and keeps every other value as typed. */}
+                  {value && (
+                    <span className={edgeSpace ? "hint warn" : "hint"}>
+                      {edgeSpace && (f === "key" || f === "secret") ? s.editorEdgeSpace([...value].length) : s.typedCount([...value].length, edgeSpace, f === "body")}
+                    </span>
+                  )}
+                  {adds && had && <span className="hint">{s.addsText}</span>}
+                  {value && f === "body" && had && !adds && <span className="warn">{s.replacesText}</span>}
+                </>
+              )
+            }
+          >
+            {f === "body" ? (
+              <textarea {...inputProps} {...noAssist} rows={10} />
+            ) : (
+              <SecretInput {...inputProps} onPaste={f === "key" || f === "secret" ? (e) => pasteKey(f, e) : undefined} />
+            )}
+          </Field>
+        )}
+        {/* The box stays a password box. What was typed is drawn apart from it, outside the label
+            (its text would become the box's name), on a line that can't be selected and isn't
+            read out by itself. A key held down is ignored. */}
+        {peekable(f) && (
+          <button
+            type="button"
+            className="small"
+            data-peek={f}
+            aria-label={s.fieldAction(peeking ? s.hide : s.show, label(kind, f))}
+            onKeyDown={(e) => e.repeat && e.preventDefault()}
+            onClick={() => setPeek(!peeking && document.hasFocus() ? f : null)}
+          >
+            <Icon name={peeking ? "eyeSlash" : "eye"} />
+            {peeking ? s.hide : s.show}
+          </button>
+        )}
+        {peeking && <Value field={f} value={value} />}
+        {had && !adds && (
+          <label className="check">
+            <input
+              type="checkbox"
+              checked={!!clear[f]}
+              onChange={(e) => {
+                setClear({ ...clear, [f]: e.target.checked });
+                // The box is off while this is ticked, so what was typed in it goes too.
+                if (e.target.checked) setHidden({ ...hidden, [f]: "" });
+              }}
+            />
+            {s.clearField(label(kind, f))}
+          </label>
+        )}
+      </div>
+    );
   };
 
   return (
     <>
-      <form onSubmit={submit} onChange={props.onDirty} className="stack">
+      <form onSubmit={submit} onChange={props.onDirty} onKeyDown={enterGoesOn} className="stack">
         <header className="detail-head">
           <KindBadge kind={kind} size="large" />
           <div>
@@ -806,7 +1166,7 @@ export function Editor(props: {
           </div>
         </header>
         <p className="hint">
-          {s.draftLossHint}
+          {s.draftLossHint(props.status.settings.idle_minutes, !!props.status.settings.count_activity_anywhere, props.status.settings.lock_on_app_switch, !wallet)}
           {wallet && ` ${s.draftLossWallet(FORM[kind].filter((f) => HIDDEN.includes(f)).map((f) => label(kind, f)))}`}
         </p>
         {/* Filled in after the first render, like "Saved" above, so that it is read out. */}
@@ -816,198 +1176,83 @@ export function Editor(props: {
           </p>
         )}
         <div className="card stack">
-          <Field label={s.title} check={slip("title", title)}>
-            {/* Not when a draft comes back from under the Sharing Guard shield: the owner may have
-                been typing in a Hidden Field, and would carry on in this box, in plain sight. */}
-            <input value={title} onChange={(e) => setTitle(e.target.value)} autoFocus={!props.focusField && !draft} {...noAssist} />
-          </Field>
-          {FORM[kind].map((f) => {
-            const name = OPTIONAL.includes(f) ? `${label(kind, f)} ${s.optional}` : label(kind, f);
-            if (f === "word_count")
-              return (
-                <div key={f} className="choice-row">
-                  <Choice
-                    label={name}
-                    options={[[12, s.words(12)], [24, s.words(24)]]}
-                    value={words.length}
-                    onChange={(n) => setWords((ws) => Array.from({ length: n }, (_, i) => ws[i] ?? ""))}
-                  />
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setWords((ws) => ws.map(() => ""));
-                      setPasteOverflow(false);
-                      props.onDirty();
-                    }}
-                  >
-                    {s.clearAllWords}
-                  </button>
-                </div>
-              );
-            if (f === "words") return <SeedGrid key={f} list={list} words={words} setWords={setWords} editing={!!note} autoFocus={props.focusField === f} onDirty={props.onDirty} onOverflow={() => setPasteOverflow(true)} onAccepted={() => setPasteOverflow(false)} />;
-            if (f === "chain")
-              return (
-                <Fragment key={f}>
-                  <Choice label={name} options={CHAINS} value={chain} onChange={(c) => setVisible({ ...visible, chain: c })} />
-                  {chain === "other" && (
-                    <Field label={s.chainName} hint={s.chainNameHint}>
-                      <input
-                        value={chainName}
-                        maxLength={30}
-                        onChange={(e) => setChainName(e.target.value)}
-                        // An obvious name for a listed chain chooses that chain.
-                        onBlur={() => {
-                          const listed = CHAIN_NAMES.get(chainName.trim().toLowerCase());
-                          if (!listed) return;
-                          setVisible({ ...visible, chain: listed });
-                          setChainName("");
-                        }}
-                        {...noAssist}
-                      />
-                    </Field>
-                  )}
-                </Fragment>
-              );
-            if (!HIDDEN.includes(f))
-              return (
-                <Field key={f} label={name} check={slip(f, visible[f] ?? "")} hint={s.hints[kind][f]}>
-                  <input
-                    value={visible[f] ?? ""}
-                    placeholder={f === "expires" ? s.expiryPlaceholder : undefined}
-                    onChange={(e) => setVisible({ ...visible, [f]: e.target.value })}
-                    onBlur={f === TITLE_FROM[kind] ? () => titleFrom(visible[f] ?? "") : undefined}
-                    {...noAssist}
-                  />
-                </Field>
-              );
-            const value = hidden[f] ?? "";
-            const had = filled(f);
-            // The text of a Text, in Add mode: what is typed joins what is there, so there is
-            // nothing to keep by leaving the box blank and nothing to remove.
-            const adds = f === "body" && add;
-            const edgeSpace = /^\s|\s$/.test(value);
-            const inputProps = {
-              value,
-              // Only a field that has a value has one to keep.
-              placeholder: adds ? s.typeToAdd : had && !clear[f] ? s.leaveBlankToKeep : "",
-              disabled: !!clear[f] && !adds,
-              onChange: (e: { target: { value: string } }) => setHidden({ ...hidden, [f]: e.target.value }),
-              autoFocus: f === props.focusField || f === clearedField,
-            };
-            return (
-              // Field is a label, and so is the checkbox: they sit one under the other in a plain box.
-              <div key={f} className="field">
-                {f === "body" && canAdd && (
-                  <Choice
-                    label={s.textMode}
-                    options={TEXT_MODES}
-                    value={add ? "add" : "replace"}
-                    onChange={(mode) => {
-                      setAdding(mode === "add");
-                      if (mode === "add") setClear({ ...clear, body: false });
-                    }}
-                  />
-                )}
-                {(f === "key" || f === "secret") && lineCount(value) > 1 ? (
-                  // A group, not a Field: a click on a label's text would press the button in it.
-                  <div className="field" role="group" aria-labelledby={`${keyLabel}-${f}`}>
-                    <span className="label" id={`${keyLabel}-${f}`}>
-                      {name}
-                    </span>
-                    <div className="chip" ref={(el) => { chips.current[f] = el; }} tabIndex={-1}>
-                      <span>{s.multilineKey(lineCount(value), [...value].length)}</span>
-                      <button
-                        type="button"
-                        className="small"
-                        aria-label={s.fieldAction(s.clear, name)}
-                        onClick={() => {
-                          setHidden({ ...hidden, [f]: "" });
-                          setClearedField(f);
-                          props.onDirty();
-                        }}
-                      >
-                        {s.clear}
-                      </button>
-                    </div>
-                  </div>
-                ) : (
-                  <Field
-                    label={name}
-                    hint={s.hints[kind][f]}
-                    // The length and the ends are all that is said about what was typed.
-                    check={
-                      value && (
-                        <>
-                          <span className={edgeSpace ? "hint warn" : "hint"}>{s.typedCount([...value].length, edgeSpace, f === "body")}</span>
-                          {f === "body" && had && (adds ? <span className="hint">{s.addsText}</span> : <span className="warn">{s.replacesText}</span>)}
-                        </>
-                      )
-                    }
-                  >
-                    {f === "body" ? (
-                      <textarea {...inputProps} {...noAssist} rows={10} />
-                    ) : (
-                      <SecretInput {...inputProps} onPaste={f === "key" || f === "secret" ? (e) => pasteKey(f, e) : undefined} />
-                    )}
-                  </Field>
-                )}
-                {had && !adds && (
-                  <label className="check">
-                    <input
-                      type="checkbox"
-                      checked={!!clear[f]}
-                      onChange={(e) => {
-                        setClear({ ...clear, [f]: e.target.checked });
-                        // The box is off while this is ticked, so what was typed in it goes too.
-                        if (e.target.checked) setHidden({ ...hidden, [f]: "" });
-                      }}
-                    />
-                    {s.clearField(label(kind, f))}
-                  </label>
-                )}
-              </div>
-            );
-          })}
-          {/* What is in plain sight, and what an older app can't open: said once, by label. */}
-          <p className="hint">{s.notHidden(FORM[kind].filter((f) => HIDDEN.includes(f)).map((f) => label(kind, f)))}</p>
-          {newer && <p className="hint">{s.needsCurrentApp(newer.map((f) => label(kind, f)))}</p>}
-        </div>
-        {warning && <p className="warn">{warning}</p>}
-        {pasteOverflow && <p className="warn">{s.seedPasteTooMany}</p>}
-        <ErrorLine error={error} />
-        {missing && <p className="hint">{missing}</p>}
-        {!missing && main && !hidden[main] && <p className="warn">{s.mainBlank(label(kind, main))}</p>}
-        <div className="actions end">
-          <button type="button" onClick={props.onCancel}>
-            {s.cancel}
-          </button>
-          {!note && props.onSavedAndNew && (
-            <button type="button" disabled={!canSave} onClick={() => begin(true)}>
-              {s.saveAndAddAnother}
-            </button>
+          <div className="field">
+            <Field label={s.title} hint={note ? undefined : s.titleHint[kind]} check={titleSlip && <span className="warn">{titleSlip.text}</span>}>
+              {/* Not when a draft comes back from under the Sharing Guard shield: the owner may have
+                  been typing in a Hidden Field, and would carry on in this box, in plain sight. */}
+              <input
+                ref={(el) => {
+                  visibleBoxes.current.title = el;
+                }}
+                value={title}
+                onChange={(e) => {
+                  setTitle(e.target.value);
+                  if (moved?.from === "title") setMoved(null);
+                }}
+                autoFocus={!props.focusField && !draft}
+                {...noAssist}
+              />
+            </Field>
+            {moveLine("title", title, titleSlip)}
+          </div>
+          {FORM[kind].filter((f) => !more.includes(f)).map(fieldBox)}
+          {more.length > 0 && (
+            <details className="more-details" open={mustOpen || moreOpen}>
+              {/* The state decides, not the browser, so the fold can't close over what mustOpen names. */}
+              <summary
+                onClick={(e) => {
+                  e.preventDefault();
+                  if (!mustOpen) setMoreOpen(!moreOpen);
+                }}
+              >
+                {s.moreDetails(more.map((f) => label(kind, f)).join(", "))}
+              </summary>
+              <div className="stack">{more.map(fieldBox)}</div>
+            </details>
           )}
-          <button className="primary" disabled={!canSave} aria-keyshortcuts={mac ? "Meta+S" : "Control+S"}>
-            {busy ? s.saving : s.save}
-            <kbd aria-hidden="true">{s.shortcut(mac, "S")}</kbd>
-          </button>
+          {/* What an older app can't open, once something is in it, and what is in plain sight:
+              said once, by label. */}
+          {newer?.some((f) => visible[f]?.trim() || hidden[f] || (filled(f) && !clear[f])) && <p className="hint">{s.needsCurrentApp(newer.map((f) => label(kind, f)))}</p>}
+          <p className="hint">{s.notHidden(FORM[kind].filter((f) => HIDDEN.includes(f)).map((f) => label(kind, f)))}</p>
+        </div>
+        {/* Warnings and errors stay beside Save, whatever box the form is scrolled to. */}
+        <div className="editor-footer">
+          {warning && <p className="warn">{warning}</p>}
+          {pasteOverflow && <p className="warn">{s.seedPasteTooMany}</p>}
+          <ErrorLine error={error} />
+          {missing && <p className="hint">{missing}</p>}
+          {!missing && main && !hidden[main] && <p className="hint">{s.mainBlank(label(kind, main))}</p>}
+          <div className="actions end">
+            <button type="button" onClick={props.onCancel}>
+              {s.cancel}
+            </button>
+            {!note && props.onSavedAndNew && (
+              <button type="button" disabled={!canSave} onClick={() => begin(true)}>
+                {s.saveAndAddAnother}
+              </button>
+            )}
+            <button className="primary" disabled={!canSave} aria-keyshortcuts={mac ? "Meta+S" : "Control+S"}>
+              {busy ? s.saving : s.save}
+              <kbd aria-hidden="true">{s.shortcut(mac, "S")}</kbd>
+            </button>
+          </div>
         </div>
       </form>
       {step === "explainer" && (
         <Modal title={s.explainerTitle} onClose={() => setStep(null)}>
           <p>{s.explainerText}</p>
           <div className="actions">
-            <button onClick={() => setStep("password")}>{s.saveAnyway}</button>
+            <button onClick={() => setStep(null)}>{s.goBack}</button>
             <button className="primary" onClick={() => setStep("password")}>
-              {s.haveCopy}
+              {s.continue}
             </button>
           </div>
         </Modal>
       )}
       {step === "password" && (
         <NativeActionModal
-          title={s.noteAction(note ? s.edit : s.add, note?.title ?? title.trim())}
+          title={s.noteAction(note ? s.edit : s.add, note?.title ?? finalTitle)}
           text={s.savePasswordText}
-          submitLabel={s.save}
           onSubmit={save}
           onClose={() => setStep(null)}
           retryInMs={props.status.retry_in_ms}
@@ -1020,7 +1265,8 @@ export function Editor(props: {
 /** One password-type box per word (OS secure input). Nothing that is typed is echoed anywhere:
  *  there is no list of matching words (it would put the word on screen, and in front of anything
  *  that reads the page for accessibility). Enter still finishes a word once its start fits only
- *  one, silently. */
+ *  one; when more fit it says so, never how many or which. A word that isn't in the list is named
+ *  by its number alone, once the keyboard has left its box. */
 function SeedGrid(props: {
   /** The Seed Phrase word list (empty until it has loaded). */
   list: string[];
@@ -1035,15 +1281,21 @@ function SeedGrid(props: {
 }) {
   const { list } = props;
   const [focus, setFocus] = useState<number | null>(null);
+  // Enter was pressed and more than one word still fits.
+  const [moreFits, setMoreFits] = useState(false);
   const boxes = useRef<(HTMLInputElement | null)[]>([]);
   const listId = useId();
 
   // The words the typed start could still become. Used for Enter only, never drawn.
   const prefix = focus === null ? "" : (props.words[focus] ?? "").trim().toLowerCase();
   const matches = prefix && !list.includes(prefix) ? list.filter((w) => w.startsWith(prefix)) : [];
+  // The positions of words not in the list. Worked out on each render, so pasted words count, and
+  // a box still being typed in never does.
+  const bad = list.length ? props.words.flatMap((w, i) => (i !== focus && w.trim() && !list.includes(w.trim().toLowerCase()) ? [i + 1] : [])) : [];
   // Typing or pasting several words fills the following boxes and moves on; so does a trailing
   // space. A pasted 24-word phrase switches a 12-word grid to 24.
   const set = (i: number, value: string): void => {
+    setMoreFits(false);
     let parts = value.trim().split(/\s+/);
     // A phrase pasted as a list ("1. word 2. word", "word, word"): the numbering and the mark
     // after a word go. One word being typed is never rewritten, and a word that merely isn't in
@@ -1087,6 +1339,7 @@ function SeedGrid(props: {
               }}
               autoFocus={props.autoFocus && i === 0}
               aria-label={s.wordN(i + 1)}
+              aria-invalid={bad.includes(i + 1) || undefined}
               value={word}
               onChange={(e) => set(i, e.target.value)}
               // Password inputs remove pasted line breaks before onChange. Read the original
@@ -1099,20 +1352,32 @@ function SeedGrid(props: {
                 set(i, text);
               }}
               onFocus={() => setFocus(i)}
-              onBlur={() => setFocus(null)}
+              onBlur={() => {
+                setFocus(null);
+                setMoreFits(false);
+              }}
               onKeyDown={(e) => {
                 if (e.key !== "Enter" || cmdKey(e)) return; // (with Cmd/Ctrl it saves: see the Editor)
                 e.preventDefault();
                 // One possible word: finish it. A whole word, or one that isn't in the list: go on
-                // to the next box. Several still possible: stay, and keep typing.
+                // to the next box. Several still possible: stay, say so, and keep typing.
                 if (matches.length === 1) pick(matches[0]!);
                 else if (!matches.length) boxes.current[i + 1]?.focus();
+                else setMoreFits(true);
               }}
             />
           </li>
         ))}
       </ol>
-      {/* Always the same words, whatever has been typed. */}
+      {/* The same words as the check of the whole phrase, which takes over beside Save once every
+          box is filled. "You can still save" stays true: the list is English, and unusual phrases
+          are allowed. */}
+      {moreFits ? (
+        <p className="warn">{s.moreWordsFit}</p>
+      ) : (
+        bad.length > 0 && props.words.some((w) => !w.trim()) && <p className="warn">{s.unknownWords(bad)}</p>
+      )}
+      {/* This one is always the same words, whatever has been typed. */}
       <p className="hint">{s.enterToFinish}</p>
     </div>
   );
