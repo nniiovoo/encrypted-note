@@ -24,9 +24,11 @@ Emergency Reader: prints the Notes in a Vault or Backup, for when the encrypted-
 no longer works. It asks for the Master Password without showing what you type, and it
 writes nothing to disk.
 
-On its own it lists every Note with a number, and shows Hidden Fields as dots. To read one
-Note's Hidden Fields, find its number in that list, then run again with --note <number>
---reveal: nothing of the other Notes is printed.
+On its own it lists every Note with a number: titles, usernames, websites, wallet addresses
+and the other visible fields, with Hidden Fields as dots. To read one Note's Hidden Fields,
+find its number in that list, then run again with --note <number> --reveal: nothing of the
+other Notes is printed. It prints Notes only to a terminal: if the output is redirected to a
+file or piped into another program, it stops without printing anything.
 
 Options:
   --recovery-key        Ask for the Recovery Key (from your paper) instead.
@@ -35,11 +37,10 @@ Options:
                         the same.
   --reveal              Also print Hidden Fields: passwords, keys, Seed Phrase words and
                         Passphrases, and the text of Text Notes. With --note, only that
-                        Note's; without it, every Note's. Only prints to a terminal: if the
-                        output is redirected to a file or piped into another program, it
-                        stops without printing anything.
-  --allow-non-terminal  With --reveal, print even when the output is redirected or piped.
-                        Whatever receives it then holds your secrets as plain text.
+                        Note's; without it, every Note's.
+  --allow-non-terminal  Print even when the output is redirected or piped. Whatever
+                        receives it then holds your Notes as plain text. Never use it to
+                        hand the output to an AI tool.
   --credential-stdin    Read the Master Password or Recovery Key from the first line of
                         a pipe or file on stdin instead of asking (for scripts).
   -h, --help            Show this help.
@@ -53,12 +54,22 @@ const DAMAGED: &str = "This Vault file is damaged. Restore a Safety Copy or Back
 /// Same input limit as store::MAX_FILE_BYTES, without depending on the app's storage crate.
 const MAX_FILE_BYTES: u64 = 64 * 1024 * 1024;
 
-const REVEAL_NEEDS_TERMINAL: &str = "\
-Nothing was printed. --reveal prints passwords, keys and Seed Phrases as plain text, and the \
-output of this command is not going to a terminal: it is redirected to a file or piped into \
-another program, which would then hold them.
-Run it again in a terminal without redirecting, and read the Notes on screen. If you do mean \
-to send revealed Notes somewhere else, add --allow-non-terminal.";
+const NEEDS_TERMINAL: &str = "\
+Nothing was printed. This prints your Notes as plain text: titles, usernames, websites and \
+wallet addresses, and with --reveal passwords, keys and Seed Phrases too. The output of this \
+command is not going to a terminal: it is redirected to a file or piped into another program, \
+which would then hold them.
+Run it again in a terminal window without redirecting, and read the Notes on screen.";
+
+/// Environment variables some AI coding tools set in the shells they run, so the Reader can
+/// warn the owner. Only a warning: recovery must never depend on what a variable says.
+const AI_TOOL_VARIABLES: &[&str] = &["AI_AGENT", "CLAUDECODE"];
+
+const AI_TOOL_WARNING: &str = "\
+Warning: this looks like a terminal run by an AI tool. Whatever this prints can reach that \
+tool and its provider. Quit it, and run this in a plain terminal window (on a Mac, the \
+Terminal app), not one inside an AI app or editor. Never give an AI tool your Master \
+Password, your Recovery Key or anything printed here.";
 
 /// Why the reader stopped (exit code 1, 2, 3 or 4), with a message for stderr that never
 /// includes credentials or Note contents.
@@ -98,8 +109,11 @@ fn run() -> Result<(), Failure> {
         return print(USAGE);
     };
     // Checked first: before the file is read and before the owner types a credential.
-    if reveal_refused(&options, io::stdout().is_terminal()) {
-        return Err(Failure::UsageOrIo(REVEAL_NEEDS_TERMINAL.to_string()));
+    if output_refused(&options, io::stdout().is_terminal()) {
+        return Err(Failure::UsageOrIo(NEEDS_TERMINAL.to_string()));
+    }
+    if run_by_ai_tool(|name| std::env::var_os(name)) {
+        let _ = writeln!(io::stderr(), "{AI_TOOL_WARNING}");
     }
     let _ = writeln!(
         io::stderr(),
@@ -267,12 +281,20 @@ fn set_note(note: &mut Option<usize>, given: Option<&str>) -> Result<(), Failure
     Ok(())
 }
 
-/// `--reveal` puts Hidden Fields in the output (one Note's with `--note`, otherwise every
-/// Note's), so it is refused when the output is not a terminal (a file or another program
-/// would keep a plain-text copy), unless the owner asked for exactly that with
-/// `--allow-non-terminal`.
-fn reveal_refused(options: &Options, stdout_is_terminal: bool) -> bool {
-    options.reveal && !options.allow_non_terminal && !stdout_is_terminal
+/// Every run that opens a Vault prints Notes: visible fields always (titles, usernames,
+/// websites, wallet addresses), and Hidden Fields with `--reveal`. So it is refused when the
+/// output is not a terminal (a file or another program would keep a plain-text copy), unless
+/// the owner asked for exactly that with `--allow-non-terminal`. This stops a pipe, not a
+/// program that gives the Reader a terminal of its own.
+fn output_refused(options: &Options, stdout_is_terminal: bool) -> bool {
+    !options.allow_non_terminal && !stdout_is_terminal
+}
+
+/// Whether one of [`AI_TOOL_VARIABLES`] is set (to anything but an empty value).
+fn run_by_ai_tool(var: impl Fn(&str) -> Option<OsString>) -> bool {
+    AI_TOOL_VARIABLES
+        .iter()
+        .any(|name| var(name).is_some_and(|value| !value.is_empty()))
 }
 
 /// Runs `derive`, which derives the Wallet Key, only when this run is about to reveal a Wallet
@@ -482,11 +504,12 @@ mod tests {
     /// tests/reader.rs runs the piped cases for real. A test can't hand the reader a terminal,
     /// so the terminal cases are checked here.
     #[test]
-    fn reveal_is_refused_only_off_a_terminal_and_without_the_override() {
+    fn printing_is_refused_only_off_a_terminal_and_without_the_override() {
         let (terminal, not_terminal) = (true, false);
-        let cases: [(&[&str], bool, bool); 7] = [
+        let cases: [(&[&str], bool, bool); 8] = [
             (&["f"], terminal, false),
-            (&["f"], not_terminal, false),
+            // The list prints titles and addresses, so it needs a terminal too.
+            (&["f"], not_terminal, true),
             (&["f", "--reveal"], terminal, false),
             (&["f", "--reveal"], not_terminal, true),
             (&["f", "--reveal", "--allow-non-terminal"], terminal, false),
@@ -496,10 +519,11 @@ mod tests {
                 false,
             ),
             (&["f", "--allow-non-terminal"], not_terminal, false),
+            (&["f", "--recovery-key"], not_terminal, true),
         ];
         for (args, stdout_is_terminal, refused) in cases {
             assert_eq!(
-                reveal_refused(&options(args), stdout_is_terminal),
+                output_refused(&options(args), stdout_is_terminal),
                 refused,
                 "{args:?}, terminal: {stdout_is_terminal}"
             );
@@ -507,11 +531,25 @@ mod tests {
     }
 
     #[test]
-    fn revealing_one_note_is_refused_off_a_terminal_like_revealing_them_all() {
-        let one_note: &[&str] = &["f", "--note", "2", "--reveal"];
-        assert!(reveal_refused(&options(one_note), false));
-        assert!(!reveal_refused(&options(one_note), true));
-        assert!(!reveal_refused(&options(&["f", "--note", "2"]), false));
+    fn one_note_is_refused_off_a_terminal_like_them_all() {
+        for one_note in [&["f", "--note", "2", "--reveal"][..], &["f", "--note", "2"]] {
+            assert!(output_refused(&options(one_note), false), "{one_note:?}");
+            assert!(!output_refused(&options(one_note), true), "{one_note:?}");
+        }
+    }
+
+    #[test]
+    fn an_ai_tool_variable_gives_a_warning_and_nothing_else_does() {
+        let set = |names: &'static [&'static str]| {
+            move |name: &str| names.contains(&name).then(|| OsString::from("1"))
+        };
+        assert!(run_by_ai_tool(set(&["CLAUDECODE"])));
+        assert!(run_by_ai_tool(set(&["AI_AGENT"])));
+        assert!(!run_by_ai_tool(set(&[])));
+        assert!(!run_by_ai_tool(set(&["TERM", "HOME"])));
+        assert!(!run_by_ai_tool(|_: &str| Some(OsString::new())));
+        // It only warns: the refusal doesn't look at it.
+        assert!(!output_refused(&options(&["f"]), true));
     }
 
     #[test]

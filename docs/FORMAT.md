@@ -111,10 +111,11 @@ these limits (`Limits::PRODUCTION`). The memory ceiling is the most the app ever
 calibrates (below), so a file can't demand more work than the app could have written itself.
 (Until October 2026 the ceiling was 2 GiB; no Vault written by the app is above 512 MiB.)
 
-When the app creates a Vault it starts from m = 524,288 KiB (512 MiB), t = 3, p = 4 and
-calibrates on that computer: while one derivation takes more than 1 s and memory is above the
-floor, it halves the memory (never below the floor); then, while a derivation takes less than
-0.5 s and t < 20, it adds one pass (and steps back one if that made it take more than 1 s).
+When the app creates a Vault it calibrates on that computer, cheapest first. It starts at the
+memory floor with t = 3, p = 4. While one derivation takes less than 0.5 s, it doubles the
+memory, up to m = 524,288 KiB (512 MiB); a doubling that takes more than 1 s is not kept.
+Then, while a derivation takes less than 0.5 s and t < 20, it adds one pass (and steps back
+one if that made it take more than 1 s).
 The header holds one set of parameters, used by both slots. Changing the Master Password and
 Key Rotation keep them.
 
@@ -714,9 +715,13 @@ enote-reader <vault-or-backup-file> [--recovery-key] [--note <number>] [--reveal
   way to read one password or key without putting every other one on the screen; the Wallet
   Key is derived (from the same credential) only if that Note is a Seed Phrase or Private Key
   with a value to open. Without `--note` it opens every Note's.
-* `--reveal` only prints to a terminal. If the output is redirected to a file or piped into
-  another program, it prints nothing and exits with 3, before reading the file or asking for
-  the credential. Adding `--allow-non-terminal` prints anyway.
+* It prints Notes only to a terminal, the list as well as `--reveal`: the list holds titles,
+  usernames, websites and wallet addresses. If the output is redirected to a file or piped
+  into another program, it prints nothing and exits with 3, before reading the file or asking
+  for the credential. Adding `--allow-non-terminal` prints anyway; the refusal doesn't name
+  that flag. This stops a pipe, not a program that gives the Reader a terminal of its own.
+* If `AI_AGENT` or `CLAUDECODE` is set and not empty (some AI coding tools set them in the
+  shells they run), it warns on stderr that the output can reach that tool. It still runs.
 * Control characters (apart from tabs, and the line breaks of a value of several lines) and
   invisible Unicode format characters are printed as `�`, so nothing stored in a Note can
   drive the terminal or reorder the text.
@@ -731,3 +736,29 @@ enote-reader <vault-or-backup-file> [--recovery-key] [--note <number>] [--reveal
   3 usage or I/O error, 4 no Note has the number given with `--note` (it says which numbers
   exist and prints no Note). If one Wallet Kind field fails to decrypt, it prints everything
   else it was asked for, marks that field as damaged, and exits with 2.
+
+## 14. The settings file (not part of the Vault)
+
+`settings.json`, next to `vault.enote`, is plain JSON and is not encrypted. It holds no Notes,
+titles, keys or passwords, and the app never needs it to open a Vault: a missing file means
+defaults, and one that can't be read means the strictest lock rules. Other programs that can
+reach the folder can read and change it, so nothing in it is a protection on its own. The
+fields are in `StoredSettings` in `src-tauri/src/core.rs`.
+
+One field is about the Vault itself:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `newest_seen` | `null` or `{ "vault_id": [16 numbers], "change_counter": integer }` | The vault id (the same bytes as the header's `vault_id`, section 3) and the document's `change_counter` (section 8) of the newest version this app saved or opened here. It goes up with every save. |
+
+After an unlock, if the Vault has the same vault id and a lower `change_counter`, the app says
+an older copy is open: a restore from a full-computer backup, or a file put back by hand. It
+only warns, because such a restore can be wanted. Installing a Backup or Safety Copy through
+the app, or any save, makes that version the newest seen. A Vault with another vault id
+simply replaces the record.
+
+On Welcome, if there is no Vault file but this file has `newest_seen`, a Backup date, a
+change not yet backed up or a Trash date, the app says the Vault's files are missing. Both
+checks catch mistakes, not someone who changes both files. A file without the field (from an
+older app) has nothing to compare at its first unlock, which records the Vault that opens as
+the newest seen.

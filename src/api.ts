@@ -144,7 +144,23 @@ export interface AppStatus {
   save_durability_uncertain: boolean;
   /** The settings file couldn't be read, so the strictest lock rules are in force. */
   settings_unreadable: boolean;
-  quick_unlock: { available: boolean; enabled: boolean; can_unlock: boolean; cleanup_failed: boolean; reason?: string | null };
+  /** No Vault file, but the settings file says a Vault was here: its files are missing. A hint
+   *  only, since the settings file can be deleted too. Rust always sends it. */
+  vault_missing: boolean;
+  /** The Vault open now is an older copy of the newest one this app saved or opened here (a
+   *  restore from Time Machine, or a file put back by hand). It opened anyway; true until the
+   *  next lock. Rust always sends it. */
+  older_copy_opened: boolean;
+  quick_unlock: {
+    available: boolean;
+    enabled: boolean;
+    can_unlock: boolean;
+    cleanup_failed: boolean;
+    /** Touch ID was turned off at this start because the Vault file isn't the one it was set up
+     *  for. Until it is turned on again. Rust always sends it. */
+    file_changed: boolean;
+    reason?: string | null;
+  };
   settings: Settings;
 }
 
@@ -427,6 +443,9 @@ export interface CompanionView {
   error: CompanionError | null;
   /** Unix seconds, only while on or just after the grant ended. */
   expires_at: number | null;
+  /** Off because the Vault locked (or the computer slept) while it was on. Known from the stop
+   *  the app sent, not from the helper. Until the owner next starts, stops or sets it up. */
+  ended_by_lock: boolean;
   /** Local readiness on this Mac. */
   local: CompanionReadiness;
   /** The private ChatGPT connection is checked outside this app. */

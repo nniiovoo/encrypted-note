@@ -1,7 +1,7 @@
 {
   "comment": "The pins for the optional Agent Companion helper (ADR-0009, ADR-0010). scripts/package-companion.sh verifies every value; nothing here is a secret.",
   "companion": {
-    "policySha256": "04bd48f02a0f2cf5052ee296a97f21c469a493039054621d84f23bdb7784ec52"
+    "policySha256": "130f3e048705a6f7ea995856c4a8159d2c0e6cfc7e8b7c72f13f9ae28fa8691e"
   },
   "node": {
     "version": "v24.22.1",

@@ -16,7 +16,8 @@ export function validatePlan(plan) {
       Object.keys(plan).some(key => !keys.includes(key)) || !Object.hasOwn(plan, 'grantExpiresAt') ||
       (plan.grantExpiresAt !== null && !isCanonicalUtc(plan.grantExpiresAt)) ||
       plan.version !== 2 || !Number.isSafeInteger(plan.ownerUid) || plan.ownerUid < 501 ||
-      !Number.isSafeInteger(plan.agentUid) || plan.agentUid < 501 ||
+      // From 2^31 up are system accounts such as nobody (4294967294), never a login account.
+      !Number.isSafeInteger(plan.agentUid) || plan.agentUid < 501 || plan.agentUid >= 2147483648 ||
       plan.ownerUid === plan.agentUid ||
       !/^[a-z][a-z0-9_-]{0,30}$/.test(plan.agentShortName ?? '') ||
       plan.credentialExpirySeconds !== 3600 || plan.projectHardSpendLimitCents !== 100 ||

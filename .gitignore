@@ -8,6 +8,12 @@ node_modules/
 # local vault data must never be committed
 /src-tauri/target
 
+# key files, at any depth (an example file stays tracked)
+.env
+.env.*
+*.env
+!.env.example
+
 # local AI-tooling databases (Ruflo), not project files
 ruvector.db
 ruvector.db.*

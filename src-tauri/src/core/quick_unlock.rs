@@ -15,6 +15,9 @@ pub struct QuickUnlockStatus {
     pub enabled: bool,
     pub can_unlock: bool,
     pub cleanup_failed: bool,
+    /// Touch ID was turned off at this start because the Vault file isn't the one it was set up
+    /// for (it was replaced while the app was closed). Until Touch ID is turned on again.
+    pub file_changed: bool,
     pub reason: Option<&'static str>,
 }
 
@@ -118,6 +121,8 @@ impl AppCore {
             self.quick_unlock
                 .load_registration(QuickUnlockBinding::from_bytes(saved));
         } else {
+            // A missing file is told on Welcome instead (`vault_missing`).
+            self.quick_unlock_file_changed = binding.is_some();
             self.settings.quick_unlock_binding = None;
             if self.write_settings().is_ok() {
                 self.quick_cleanup_needed = true;
@@ -154,6 +159,7 @@ impl AppCore {
             enabled,
             can_unlock,
             cleanup_failed: self.quick_cleanup_failed,
+            file_changed: self.quick_unlock_file_changed && !enabled,
             reason,
         }
     }
@@ -268,6 +274,7 @@ impl AppCore {
             self.quick_cleanup_needed = true;
             return Err(error);
         }
+        self.quick_unlock_file_changed = false;
         Ok(())
     }
 
@@ -326,6 +333,7 @@ impl AppCore {
         self.session.quick_unlocked(self.clock.now_ms());
         self.reset_guard();
         self.set_phase(Phase::Unlocked(open));
+        self.check_newest_seen();
         self.purge_trash();
         Ok(())
     }

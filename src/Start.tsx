@@ -34,7 +34,9 @@ function VaultFolder() {
   );
 }
 
-export function NoVault({ onOperationOutcome, afterKit, initialStep, onStep }: {
+export function NoVault({ vaultMissing, onOperationOutcome, afterKit, initialStep, onStep }: {
+  /** The settings file says a Vault was here, and its file is gone. */
+  vaultMissing: boolean;
   onOperationOutcome: (message: string) => void;
   afterKit: (notSaved: string, e?: unknown) => void;
   /** Read when this screen appears. */
@@ -72,6 +74,7 @@ export function NoVault({ onOperationOutcome, afterKit, initialStep, onStep }: {
       <div className="center narrow">
         <h1>{s.createTitle}</h1>
         {copies.length > 0 && <p className="warn">{s.vaultWasHereText}</p>}
+        {vaultMissing && copies.length === 0 && <p className="warn">{s.vaultMissingText}</p>}
         {safety.error && copies.length === 0 && (
           <>
             <p className="warn">{s.safetyCopiesUncheckedText}</p>
@@ -112,6 +115,17 @@ export function NoVault({ onOperationOutcome, afterKit, initialStep, onStep }: {
           </ul>
         </section>
       )}
+      {/* Before Create, so the owner looks for a Backup first. Safety Copies say it already. */}
+      {vaultMissing && copies.length === 0 && !looking && (
+        <section className="card stack">
+          <h2>{s.vaultMissingTitle}</h2>
+          <p>{s.vaultMissingText}</p>
+          <VaultFolder />
+          <button className="primary" disabled={busy} onClick={() => setStep("open")}>
+            {s.openBackup}
+          </button>
+        </section>
+      )}
       {safety.error && copies.length === 0 && (
         <section className="card stack">
           <h2>{s.safetyCopiesUncheckedTitle}</h2>
@@ -122,7 +136,7 @@ export function NoVault({ onOperationOutcome, afterKit, initialStep, onStep }: {
       )}
       <ErrorLine error={error} />
       {/* Off while looking, so a Safety Copy is never skipped. */}
-      <button className="primary big" disabled={busy || looking} onClick={() => (noCopies ? begin() : go("create"))}>
+      <button className={vaultMissing ? "big" : "primary big"} disabled={busy || looking} onClick={() => (noCopies && !vaultMissing ? begin() : go("create"))}>
         {busy ? s.settingUp : s.createMyVault}
       </button>
       <p className="hint welcome-next">{s.welcomeNext}</p>
@@ -228,6 +242,7 @@ export function Locked({ status, onOperationOutcome }: { status: AppStatus; onOp
         {touchFirst && <button disabled={busy || wait > 0} onClick={withPassword}>{s.unlockWithPassword}</button>}
         {status.quick_unlock.enabled && !touchFirst && <button disabled>{s.unlockWithTouchId}</button>}
         {status.quick_unlock.enabled && !status.quick_unlock.can_unlock && status.quick_unlock.reason && <p className="hint">{status.quick_unlock.reason}</p>}
+        {status.quick_unlock.file_changed && <p className="warn">{s.quickUnlockFileChanged}</p>}
       </div>
       <button
         ref={recovery}

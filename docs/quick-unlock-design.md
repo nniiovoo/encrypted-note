@@ -41,7 +41,7 @@ This file uses filesystem access controls, not Keychain application access-group
 
 Disabling removes the current registration file. It does not promise secure erasure from APFS snapshots, system backups, other copies or storage remnants, and does not cryptographically revoke an older copied representation on the same device. The app refuses stale bindings, while an old Vault copy remains protected according to its own older credentials and any surviving device-bound copy. Treat the registration file as sensitive local backup material.
 
-Rust wipes its payload/key buffers. Swift resets the plaintext Data it owns where the API permits; CryptoKit, LocalAuthentication, AppKit, OS copies and the stack remain best effort. Quick Unlock does not protect a compromised native process, administrator or operating system and never grants an agent access to the owner Vault.
+Rust wipes its payload/key buffers. Swift resets the plaintext Data it owns where the API permits; CryptoKit, LocalAuthentication, AppKit, OS copies and the stack remain best effort. Quick Unlock does not protect a compromised native process, administrator or operating system. The app gives agents no route to it, but an agent running in the owner's account is a process with the same user's file access, as above.
 
 Fake-data tests cover custody, ordinary-save versus slot binding, startup, seven-day boundaries, missing/backward clocks, stale callbacks, cancellation, wrong items, credential/rotation/copy transitions, persistence failures and cleanup ordering. Private-file tests cover publication, permissions, bounds and malformed input without creating an enclave key. These tests and compilation do not establish physical biometric behavior.
 

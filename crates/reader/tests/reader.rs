@@ -29,9 +29,12 @@ const FLOOR: KdfParams = KdfParams {
 };
 const NOW: i64 = 1_790_000_000;
 const MASK: &str = "••••••";
-/// These tests read the reader's output through a pipe, and `--reveal` refuses to print into
-/// anything but a terminal unless it is told to.
-const REVEAL: [&str; 2] = ["--reveal", "--allow-non-terminal"];
+/// These tests read the reader's output through a pipe, and the reader refuses to print Notes
+/// into anything but a terminal unless it is told to. [`run`] always tells it.
+const PIPED: &str = "--allow-non-terminal";
+const REVEAL: [&str; 2] = ["--reveal", PIPED];
+/// The start of the refusal to print into a pipe or file.
+const NOTHING_PRINTED: &str = "Nothing was printed.";
 const CLOSE_WINDOW: &str = "Close this terminal window";
 
 // The Text + Login Vault.
@@ -291,7 +294,10 @@ fn reader(dir: &Path) -> Command {
         .env("HOME", dir)
         .env("TMPDIR", dir)
         .env("TMP", dir)
-        .env("TEMP", dir);
+        .env("TEMP", dir)
+        // These tests may themselves run under an AI tool; the warning is tested on its own.
+        .env_remove("AI_AGENT")
+        .env_remove("CLAUDECODE");
     command
 }
 
@@ -334,9 +340,10 @@ fn run_with_stdin(test: &str, file_bytes: Option<&[u8]>, args: &[&str], stdin: &
     }
 }
 
-/// Run the reader on `bytes` with `extra` flags and `credential` on stdin.
+/// Run the reader on `bytes` with `extra` flags and `credential` on stdin, allowed to print
+/// into the pipe the test reads.
 fn run(test: &str, bytes: &[u8], extra: &[&str], credential: &str) -> Run {
-    let mut args = vec!["test.vault", "--credential-stdin"];
+    let mut args = vec!["test.vault", "--credential-stdin", PIPED];
     args.extend_from_slice(extra);
     run_with_stdin(
         test,
@@ -411,12 +418,32 @@ fn reveal_tells_the_owner_to_close_the_window() {
     );
     assert!(!revealed.stdout.contains(CLOSE_WINDOW));
 
-    for (test, extra, credential, code) in [
-        ("masked-close", &[][..], PASSWORD, 0),
-        ("reveal-refused-close", &["--reveal"][..], PASSWORD, 3),
-        ("reveal-wrong-close", &REVEAL[..], WRONG_PASSWORD, 1),
+    for (test, args, credential, code) in [
+        (
+            "masked-close",
+            &["test.vault", "--credential-stdin", PIPED][..],
+            PASSWORD,
+            0,
+        ),
+        (
+            "reveal-refused-close",
+            &["test.vault", "--credential-stdin", "--reveal"][..],
+            PASSWORD,
+            3,
+        ),
+        (
+            "reveal-wrong-close",
+            &["test.vault", "--credential-stdin", "--reveal", PIPED][..],
+            WRONG_PASSWORD,
+            1,
+        ),
     ] {
-        let quiet = run(test, &vault.bytes, extra, credential);
+        let quiet = run_with_stdin(
+            test,
+            Some(&vault.bytes),
+            args,
+            format!("{credential}\n").as_bytes(),
+        );
         assert_exit(&quiet, code);
         assert!(
             !quiet.stderr.contains(CLOSE_WINDOW),
@@ -444,41 +471,90 @@ fn flags_may_come_before_the_file() {
     assert!(run.stdout.contains(LOGIN_PASSWORD));
 }
 
-// --- Revealing when the output is not a terminal ---
+// --- Printing when the output is not a terminal ---
 
 /// The same answer for a good Vault with the right password, with a wrong one, and with no
-/// file at all: the reader stops before it looks at either.
+/// file at all: the reader stops before it looks at either. The list is refused like
+/// `--reveal`: it prints titles, usernames, websites and wallet addresses.
 #[test]
-fn reveal_into_a_pipe_is_refused_before_the_file_or_credential_is_read() {
+fn printing_into_a_pipe_is_refused_before_the_file_or_credential_is_read() {
     let vault = text_and_login();
-    for (test, bytes, credential) in [
-        ("reveal-piped", Some(&vault.bytes[..]), PASSWORD),
-        ("reveal-piped-wrong", Some(&vault.bytes[..]), WRONG_PASSWORD),
-        ("reveal-piped-no-file", None, PASSWORD),
-    ] {
-        let run = run_with_stdin(
-            test,
-            bytes,
-            &["test.vault", "--credential-stdin", "--reveal"],
-            format!("{credential}\n").as_bytes(),
-        );
-        assert_exit(&run, 3);
-        assert!(run.stdout.is_empty(), "{test}");
-        assert!(
-            run.stderr.contains("not going to a terminal"),
-            "{test}: {}",
-            run.stderr
-        );
-        // It says how to do it anyway.
-        assert!(
-            run.stderr.contains("--allow-non-terminal"),
-            "{test}: {}",
-            run.stderr
-        );
+    for flags in [&[][..], &["--reveal"], &["--note", "1"]] {
+        for (test, bytes, credential) in [
+            ("piped", Some(&vault.bytes[..]), PASSWORD),
+            ("piped-wrong", Some(&vault.bytes[..]), WRONG_PASSWORD),
+            ("piped-no-file", None, PASSWORD),
+        ] {
+            let mut args = vec!["test.vault", "--credential-stdin"];
+            args.extend_from_slice(flags);
+            let run = run_with_stdin(
+                &format!("{test}-{}", flags.len()),
+                bytes,
+                &args,
+                format!("{credential}\n").as_bytes(),
+            );
+            assert_exit(&run, 3);
+            assert!(run.stdout.is_empty(), "{test} {flags:?}");
+            assert!(
+                run.stderr.contains(NOTHING_PRINTED)
+                    && run.stderr.contains("not going to a terminal"),
+                "{test} {flags:?}: {}",
+                run.stderr
+            );
+            // Nothing about the Notes, and it doesn't name the way to print anyway.
+            assert!(!run.stderr.contains(LOGIN_TITLE), "{test} {flags:?}");
+            assert!(
+                !run.stderr.contains(PIPED),
+                "{test} {flags:?}: {}",
+                run.stderr
+            );
+        }
     }
 }
 
-/// `enote-reader vault --reveal > notes.txt` must not leave the secrets in `notes.txt`.
+/// Some AI coding tools set one of these in the shells they run. The reader warns on stderr
+/// and still works: recovery must never depend on a variable.
+#[test]
+fn an_ai_tool_in_the_environment_gets_a_warning_and_nothing_is_refused() {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join("enote-reader-tests")
+        .join(format!("ai-tool-warning-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("test.vault"), &text_and_login().bytes).unwrap();
+    for (variable, warned) in [
+        ("CLAUDECODE", true),
+        ("AI_AGENT", true),
+        ("FAKE_UNRELATED", false),
+    ] {
+        let mut child = reader(&dir)
+            .args(["test.vault", "--credential-stdin", PIPED])
+            .env(variable, "1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut child_stdin = child.stdin.take().unwrap();
+        child_stdin
+            .write_all(format!("{PASSWORD}\n").as_bytes())
+            .unwrap();
+        drop(child_stdin);
+        let output = child.wait_with_output().unwrap();
+        let (stdout, stderr) = (
+            String::from_utf8(output.stdout).unwrap(),
+            String::from_utf8(output.stderr).unwrap(),
+        );
+        assert_eq!(output.status.code(), Some(0), "{variable}: {stderr}");
+        assert!(stdout.contains(LOGIN_TITLE), "{variable}");
+        assert_eq!(stderr.contains("AI tool"), warned, "{variable}: {stderr}");
+        assert!(!stdout.contains("AI tool"), "{variable}");
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// `enote-reader vault --reveal > notes.txt` must not leave the secrets in `notes.txt`, nor a
+/// plain list the titles.
 #[test]
 fn reveal_redirected_to_a_file_leaves_it_empty_unless_allowed() {
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
@@ -491,7 +567,7 @@ fn reveal_redirected_to_a_file_leaves_it_empty_unless_allowed() {
     let redirect = |extra: &[&str]| {
         let out = dir.join("notes.txt");
         let mut child = reader(&dir)
-            .args(["test.vault", "--credential-stdin", "--reveal"])
+            .args(["test.vault", "--credential-stdin"])
             .args(extra)
             .stdin(Stdio::piped())
             .stdout(std::fs::File::create(&out).unwrap())
@@ -507,11 +583,16 @@ fn reveal_redirected_to_a_file_leaves_it_empty_unless_allowed() {
         (output.status.code(), written)
     };
 
+    let (code, written) = redirect(&["--reveal"]);
+    assert_eq!(code, Some(3));
+    assert!(written.is_empty(), "nothing may reach the file");
+
+    // The list too: titles and usernames are not for a file either.
     let (code, written) = redirect(&[]);
     assert_eq!(code, Some(3));
     assert!(written.is_empty(), "nothing may reach the file");
 
-    let (code, written) = redirect(&["--allow-non-terminal"]);
+    let (code, written) = redirect(&["--reveal", PIPED]);
     assert_eq!(code, Some(0));
     assert!(written.contains(LOGIN_PASSWORD));
 
@@ -580,7 +661,7 @@ fn credential_on_stdin_may_end_without_a_newline_or_with_crlf() {
         let run = run_with_stdin(
             test,
             Some(&text_and_login().bytes),
-            &["test.vault", "--credential-stdin"],
+            &["test.vault", "--credential-stdin", PIPED],
             stdin.as_bytes(),
         );
         assert_exit(&run, 0);
@@ -810,15 +891,21 @@ fn note_with_reveal_reveals_only_that_note() {
     assert!(!seed.stdout.contains(PRIVATE_KEY));
 
     // Revealing one Note into a pipe is refused like revealing them all.
-    let piped = run(
+    let piped = run_with_stdin(
         "note-reveal-piped",
-        &vault.bytes,
-        &["--note", &number, "--reveal"],
-        PASSWORD,
+        Some(&vault.bytes),
+        &[
+            "test.vault",
+            "--credential-stdin",
+            "--note",
+            &number,
+            "--reveal",
+        ],
+        format!("{PASSWORD}\n").as_bytes(),
     );
     assert_exit(&piped, 3);
     assert!(piped.stdout.is_empty());
-    assert!(piped.stderr.contains("--allow-non-terminal"));
+    assert!(piped.stderr.contains(NOTHING_PRINTED));
 }
 
 /// The other Notes are not opened: a Wallet Kind field that can't be decrypted spoils a reveal
@@ -1126,7 +1213,7 @@ fn empty_stdin_is_a_usage_error() {
     let run = run_with_stdin(
         "empty-stdin",
         Some(&text_and_login().bytes),
-        &["test.vault", "--credential-stdin"],
+        &["test.vault", "--credential-stdin", PIPED],
         b"",
     );
     assert_exit(&run, 3);
@@ -1141,7 +1228,7 @@ fn stdin_credentials_are_bounded_and_never_printed() {
             let run = run_with_stdin(
                 &format!("credential-bound-{length}-{suffix}"),
                 Some(&text_and_login().bytes),
-                &["test.vault", "--credential-stdin"],
+                &["test.vault", "--credential-stdin", PIPED],
                 format!("{fake}{ending}").as_bytes(),
             );
             assert_exit(&run, code);
@@ -1256,7 +1343,7 @@ fn sparse_files_at_the_size_boundary_are_checked_before_credentials() {
     ] {
         file.set_len(length).unwrap();
         let output = reader(&dir)
-            .args(["fake-sparse.vault", "--credential-stdin"])
+            .args(["fake-sparse.vault", "--credential-stdin", PIPED])
             .stdin(Stdio::null())
             .output()
             .unwrap();
@@ -1272,7 +1359,12 @@ fn sparse_files_at_the_size_boundary_are_checked_before_credentials() {
 
 #[test]
 fn a_directory_is_rejected_before_credentials() {
-    let run = run_with_stdin("directory-input", None, &[".", "--credential-stdin"], b"");
+    let run = run_with_stdin(
+        "directory-input",
+        None,
+        &[".", "--credential-stdin", PIPED],
+        b"",
+    );
     assert_exit(&run, 3);
     assert!(run.stdout.is_empty());
     assert!(run.stderr.contains("not an ordinary file"));
@@ -1284,7 +1376,7 @@ fn a_special_file_is_rejected_before_credentials() {
     let run = run_with_stdin(
         "device-input",
         None,
-        &["/dev/null", "--credential-stdin"],
+        &["/dev/null", "--credential-stdin", PIPED],
         b"",
     );
     assert_exit(&run, 3);
@@ -1297,7 +1389,7 @@ fn a_missing_file_exits_3() {
     let run = run_with_stdin(
         "missing-file",
         None,
-        &["test.vault", "--credential-stdin"],
+        &["test.vault", "--credential-stdin", PIPED],
         format!("{PASSWORD}\n").as_bytes(),
     );
     assert_exit(&run, 3);

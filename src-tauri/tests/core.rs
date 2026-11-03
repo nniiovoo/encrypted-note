@@ -1705,6 +1705,8 @@ fn status_has_the_shape_api_ts_expects() {
         "purge_trash_failed",
         "save_durability_uncertain",
         "settings_unreadable",
+        "vault_missing",
+        "older_copy_opened",
         "settings",
         "quick_unlock",
     ];
@@ -1733,6 +1735,8 @@ fn status_has_the_shape_api_ts_expects() {
     assert_eq!(status["clipboard_source"], Value::Null);
     assert_eq!(status["purge_trash_failed"], false);
     assert_eq!(status["settings_unreadable"], false);
+    assert_eq!(status["vault_missing"], false);
+    assert_eq!(status["older_copy_opened"], false);
     let quick = status["quick_unlock"].as_object().unwrap();
     let mut keys: Vec<&str> = quick.keys().map(String::as_str).collect();
     keys.sort_unstable();
@@ -1743,6 +1747,7 @@ fn status_has_the_shape_api_ts_expects() {
             "can_unlock",
             "cleanup_failed",
             "enabled",
+            "file_changed",
             "reason"
         ]
     );
@@ -1750,6 +1755,7 @@ fn status_has_the_shape_api_ts_expects() {
     assert_eq!(quick["enabled"], false);
     assert_eq!(quick["can_unlock"], false);
     assert_eq!(quick["cleanup_failed"], false);
+    assert_eq!(quick["file_changed"], false);
     assert!(quick["reason"].is_null() || quick["reason"].is_string());
     // The exact public shape excludes keys, header bindings, credentials and native requests.
     assert!(!status["quick_unlock"].to_string().contains(PASSWORD));
@@ -5905,4 +5911,320 @@ fn document_mutations_invalidate_native_readouts_without_restarting_the_session(
     app.core.append_text(&id, pw("fake appended text")).unwrap();
     assert!(app.core.native_operation_epoch() > before_append);
     assert_eq!(app.core.app_status().session_generation, generation);
+}
+
+// ---------- the window in front ----------
+
+#[test]
+fn show_and_copy_need_the_window_in_front() {
+    let mut app = App::new();
+    unlocked(&mut app);
+    let login = app
+        .core
+        .create_note(
+            input(
+                "login",
+                "Fake in front",
+                json!({"username": "fake-user"}),
+                json!({"password": "fake-front-pass"}),
+            ),
+            None,
+        )
+        .unwrap();
+    let api = app
+        .core
+        .create_note(
+            input(
+                "api_key",
+                "Fake env",
+                json!({"env_var": "FAKE_TOKEN"}),
+                json!({"key": "sk-FAKE-front"}),
+            ),
+            None,
+        )
+        .unwrap();
+    let pk = app
+        .core
+        .create_note(
+            input(
+                "private_key",
+                "Fake wallet in front",
+                json!({}),
+                json!({"key": "fake-front-key"}),
+            ),
+            Some(pw(PASSWORD)),
+        )
+        .unwrap();
+
+    app.core.os_event(OsEvent::FocusLost);
+    assert_eq!(app.phase(), "unlocked");
+    assert_eq!(
+        code(app.core.copy_field(&login, "password", None)),
+        "invalid_input"
+    );
+    assert_eq!(
+        code(app.core.copy_field_line(&login, "password", 0)),
+        "invalid_input"
+    );
+    assert_eq!(code(app.core.copy_field_env(&api)), "invalid_input");
+    assert_eq!(
+        code(app.core.copy_visible_field(&login, "username")),
+        "invalid_input"
+    );
+    assert_eq!(
+        code(app.core.show_field(&login, "password")),
+        "invalid_input"
+    );
+    // A Wallet Kind too, with the right Master Password, and no panel opens for one.
+    assert_eq!(
+        code(
+            app.core
+                .show_wallet_field(&pk, "key", pw(PASSWORD), ShowMode::Held)
+        ),
+        "invalid_input"
+    );
+    assert_eq!(
+        code(
+            app.core
+                .show_and_copy_wallet_field(&pk, "key", pw(PASSWORD))
+        ),
+        "invalid_input"
+    );
+    for action in [
+        NativeAction::ShowWalletField {
+            id: pk.clone(),
+            field: "key".into(),
+            mode: ShowMode::Held,
+        },
+        NativeAction::ShowAndCopyWalletField {
+            id: pk.clone(),
+            field: "key".into(),
+        },
+        NativeAction::CopyField {
+            id: pk.clone(),
+            field: "key".into(),
+        },
+        NativeAction::CopyField {
+            id: login.clone(),
+            field: "password".into(),
+        },
+    ] {
+        assert_eq!(code(app.core.begin_native(action)), "invalid_input");
+        assert_eq!(app.core.native_pending_id(), None);
+    }
+    assert!(nothing_copied(&app));
+    assert_eq!(app.core.app_status().copies, 0);
+    assert_eq!(app.core.app_status().reveal, None);
+
+    app.core.os_event(OsEvent::FocusGained);
+    app.core.copy_field(&login, "password", None).unwrap();
+    assert_eq!(app.clipboard().as_deref(), Some("fake-front-pass"));
+    app.core.copy_field_env(&api).unwrap();
+    assert_eq!(app.clipboard().as_deref(), Some("FAKE_TOKEN=sk-FAKE-front"));
+    app.core.show_field(&login, "password").unwrap();
+    app.core
+        .show_and_copy_wallet_field(&pk, "key", pw(PASSWORD))
+        .unwrap();
+    assert_eq!(app.clipboard().as_deref(), Some("fake-front-key"));
+
+    // Unlocking is done in the app's own window, so it counts as being in front.
+    app.core.os_event(OsEvent::FocusLost);
+    app.core.lock();
+    app.core.unlock(password(PASSWORD)).unwrap();
+    app.core.copy_field(&login, "password", None).unwrap();
+
+    // Focus events can reach the core out of order; the shell then gives it the latest focus.
+    app.core.os_event(OsEvent::FocusGained);
+    app.core.os_event(OsEvent::FocusLost);
+    app.core.set_window_in_front(true);
+    app.core.copy_field(&login, "password", None).unwrap();
+}
+
+#[test]
+fn a_copy_restored_from_the_background_does_not_count_as_being_in_front() {
+    let mut app = App::new();
+    unlocked(&mut app);
+    let login = app
+        .core
+        .create_note(
+            input(
+                "login",
+                "Fake restored",
+                json!({"username": "fake-user"}),
+                json!({"password": "fake-restored-pass"}),
+            ),
+            None,
+        )
+        .unwrap();
+    app.core
+        .create_note(input("text", "Fake later", json!({}), json!({})), None)
+        .unwrap();
+    let copies = app.core.list_safety_copies().unwrap();
+    app.core
+        .inspect_safety_copy(&copies[0].id, password(PASSWORD))
+        .unwrap();
+
+    // The owner switches away; a program presses Restore in the window behind.
+    app.core.os_event(OsEvent::FocusLost);
+    app.core.restore_safety_copy().unwrap();
+    assert_eq!(app.phase(), "unlocked");
+    let e = app.core.copy_field(&login, "password", None).unwrap_err();
+    assert_eq!(
+        (e.code, e.message.as_str()),
+        (
+            "invalid_input",
+            "Show and Copy work only while this window is in front. Click in the window, then try again."
+        )
+    );
+    assert!(nothing_copied(&app));
+
+    app.core.os_event(OsEvent::FocusGained);
+    app.core.copy_field(&login, "password", None).unwrap();
+    assert_eq!(app.clipboard().as_deref(), Some("fake-restored-pass"));
+}
+
+// ---------- missing files, older copies ----------
+
+#[test]
+fn welcome_says_when_a_vault_was_here_and_its_files_are_gone() {
+    let app = App::new();
+    assert!(!app.core.app_status().vault_missing);
+
+    let mut app = App::new();
+    unlocked(&mut app);
+    assert!(!app.core.app_status().vault_missing);
+    app.core.lock();
+    std::fs::remove_file(vault_file(&app)).unwrap();
+    let _ = std::fs::remove_dir_all(app.data_dir().join("safety"));
+    let app = app.restart();
+    assert_eq!(app.phase(), "no_vault");
+    assert!(app.core.app_status().vault_missing);
+
+    // Without the settings file there is nothing to tell.
+    std::fs::remove_file(app.data_dir().join("settings.json")).unwrap();
+    let app = app.restart();
+    assert!(!app.core.app_status().vault_missing);
+}
+
+#[test]
+fn a_new_vault_forgets_the_last_vaults_backup_date() {
+    let mut app = App::new();
+    unlocked(&mut app);
+    app.core
+        .create_note(
+            input("text", "Fake", json!({}), json!({"body": "fake"})),
+            None,
+        )
+        .unwrap();
+    let backup = app.temp.path().join("fake-backup.enote");
+    app.core.set_backup_destination(backup).unwrap();
+    app.core.write_backup().unwrap();
+    assert!(app.core.app_status().backup.last_backup_at.is_some());
+    app.core.lock();
+    std::fs::remove_file(vault_file(&app)).unwrap();
+    let _ = std::fs::remove_dir_all(app.data_dir().join("safety"));
+    let mut app = app.restart();
+    assert!(app.core.app_status().vault_missing);
+
+    unlocked(&mut app);
+    let status = app.core.app_status();
+    assert_eq!(status.backup.last_backup_at, None);
+    assert!(!status.backup.unbacked_changes);
+    let mut app = app.restart();
+    assert_eq!(app.core.app_status().backup.last_backup_at, None);
+    app.core.unlock(password(PASSWORD)).unwrap();
+    assert!(!app.core.app_status().older_copy_opened);
+}
+
+#[test]
+fn an_older_copy_put_in_place_while_the_app_was_closed_opens_with_a_warning() {
+    let mut app = App::new();
+    unlocked(&mut app);
+    app.core
+        .create_note(
+            input("text", "Fake first", json!({}), json!({"body": "fake"})),
+            None,
+        )
+        .unwrap();
+    let older = std::fs::read(vault_file(&app)).unwrap();
+    app.core
+        .create_note(
+            input("text", "Fake second", json!({}), json!({"body": "fake"})),
+            None,
+        )
+        .unwrap();
+    app.core.lock();
+    // The newest Vault opens with no warning, also after a restart.
+    let mut app = app.restart();
+    app.core.unlock(password(PASSWORD)).unwrap();
+    assert!(!app.core.app_status().older_copy_opened);
+    app.core.lock();
+
+    std::fs::write(vault_file(&app), &older).unwrap();
+    let mut app = app.restart();
+    assert!(!app.core.app_status().older_copy_opened);
+    // It opens: a restore from Time Machine is allowed. It is only said.
+    app.core.unlock(password(PASSWORD)).unwrap();
+    assert!(app.core.app_status().older_copy_opened);
+    assert_eq!(app.core.list_notes(all(), "").unwrap().len(), 1);
+    app.core.lock();
+    assert!(!app.core.app_status().older_copy_opened);
+    app.core.unlock(password(PASSWORD)).unwrap();
+    assert!(
+        app.core.app_status().older_copy_opened,
+        "nothing was saved meanwhile"
+    );
+
+    // A change the owner saves from it makes it the newest: the warning doesn't come back.
+    app.core
+        .create_note(
+            input("text", "Fake third", json!({}), json!({"body": "fake"})),
+            None,
+        )
+        .unwrap();
+    assert!(
+        app.core.app_status().older_copy_opened,
+        "said until the next lock"
+    );
+    app.core.lock();
+    app.core.unlock(password(PASSWORD)).unwrap();
+    assert!(!app.core.app_status().older_copy_opened);
+    let settings = std::fs::read_to_string(app.data_dir().join("settings.json")).unwrap();
+    assert!(!settings.contains("Fake"), "no titles in the settings file");
+}
+
+#[test]
+fn a_copy_the_owner_restores_or_another_vault_brings_no_older_copy_warning() {
+    let mut app = App::new();
+    unlocked(&mut app);
+    app.core
+        .create_note(
+            input("text", "Fake first", json!({}), json!({"body": "fake"})),
+            None,
+        )
+        .unwrap();
+    app.core
+        .create_note(
+            input("text", "Fake second", json!({}), json!({"body": "fake"})),
+            None,
+        )
+        .unwrap();
+    // Restoring an older Safety Copy in the app: it was warned about there, and it is chosen.
+    let copies = app.core.list_safety_copies().unwrap();
+    app.core
+        .inspect_safety_copy(&copies[copies.len() - 1].id, password(PASSWORD))
+        .unwrap();
+    app.core.restore_safety_copy().unwrap();
+    assert!(!app.core.app_status().older_copy_opened);
+    app.core.lock();
+    app.core.unlock(password(PASSWORD)).unwrap();
+    assert!(!app.core.app_status().older_copy_opened);
+    app.core.lock();
+
+    // Another Vault (another vault id) put in its place is not an older copy of this one.
+    let (_other, backup) = a_backup();
+    std::fs::copy(&backup, vault_file(&app)).unwrap();
+    let mut app = app.restart();
+    app.core.unlock(password(PASSWORD)).unwrap();
+    assert!(!app.core.app_status().older_copy_opened);
 }

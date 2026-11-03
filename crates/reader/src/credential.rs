@@ -59,7 +59,7 @@ pub fn read(options: &Options) -> Result<Secret, Failure> {
             .map_err(|e| {
                 Failure::UsageOrIo(format!(
                     "Couldn't read the {what} from the terminal ({e}). \
-                     To give it on stdin instead, add --credential-stdin."
+                     Run this in a terminal window, where you can type it without it showing."
                 ))
             })?
     };

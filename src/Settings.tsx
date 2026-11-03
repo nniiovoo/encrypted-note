@@ -253,6 +253,14 @@ const AgentKeyPath = ({ confirmed }: { confirmed: boolean }) => (
   </>
 );
 
+/** Where the owner revokes the Agent Key: a fixed address to copy. The WebView opens no address. */
+const AgentKeyRevoke = () => (
+  <>
+    <p>{s.storage.agentRevoke}</p>
+    <p className="path">{s.storage.agentRevokePage}</p>
+  </>
+);
+
 /** Answers "where are my keys?": each key and file, where it is kept, and whether it is encrypted. */
 function WhereStored({ status, folder, lockOnSwitch, clipboardSeconds, view }: {
   status: AppStatus;
@@ -289,6 +297,7 @@ function WhereStored({ status, folder, lockOnSwitch, clipboardSeconds, view }: {
               word={view?.local.credential ? t.status.notEncrypted : t.status.optional}
             >
               <AgentKeyPath confirmed={!!view?.local.credential} />
+              {view?.local.credential && <AgentKeyRevoke />}
             </StorageRow>
           )}
         </dl>
@@ -418,6 +427,10 @@ function useCompanion() {
   return { view, setView, settled, acting };
 }
 
+/** Off says why when the app stopped it because the Vault locked. */
+const companionStateName = (view: CompanionView) =>
+  view.ended_by_lock ? s.companionEndedByLock : s.companionStates[view.state];
+
 /** The optional Agent Companion (ADR-0009): readiness, the approved operation, Start/Stop.
  *  Everything shown comes from fixed fields; Rust never sends a key, token, path or helper text. */
 function AgentCompanion({ companion }: { companion: ReturnType<typeof useCompanion> }) {
@@ -456,10 +469,11 @@ function AgentCompanion({ companion }: { companion: ReturnType<typeof useCompani
     body = (
       <>
         <p>{s.companionIntro}</p>
+        <p className="warn">{s.companionCantFinish}</p>
         {/* When folded, the summary line says this. */}
         {mustShow && (
           <p role="status" aria-live="polite">
-            <strong>{s.companionStates[view.state]}</strong>
+            <strong>{companionStateName(view)}</strong>
             {view.state === "running" && view.expires_at ? ` · ${s.companionRunningUntil(until(view.expires_at))}` : ""}
           </p>
         )}
@@ -491,6 +505,7 @@ function AgentCompanion({ companion }: { companion: ReturnType<typeof useCompani
         <div className="setting">
           <p className="hint">{view.local.credential ? s.companionCustody : s.companionCustodyIfSetUp}</p>
           <AgentKeyPath confirmed={view.local.credential} />
+          <AgentKeyRevoke />
         </div>
         <details>
           <summary>{s.companionSetupTitle}</summary>
@@ -501,6 +516,7 @@ function AgentCompanion({ companion }: { companion: ReturnType<typeof useCompani
           </ol>
         </details>
         {setupDone && <p className="warn">{s.companionSetupDone}</p>}
+        {!on && <p className="hint">{s.companionStartLocks}</p>}
         <div className="actions">
           <button disabled={busy || on} onClick={setUp}>
             {s.companionSetup}
@@ -531,7 +547,7 @@ function AgentCompanion({ companion }: { companion: ReturnType<typeof useCompani
       ) : (
         <details className="card more-details" open={open} onToggle={(e) => setOpen(e.currentTarget.open)}>
           <summary>
-            <span role="status">{s.companionSummary(view ? s.companionStates[view.state] : s.checking)}</span>
+            <span role="status">{s.companionSummary(view ? companionStateName(view) : s.checking)}</span>
           </summary>
           <div className="stack">
             {body}
@@ -740,6 +756,7 @@ function QuickUnlock({ status }: { status: AppStatus }) {
         <p className="hint">{s.quickUnlockTurnsOff}</p>
         {quick.reason && <p className="hint">{quick.reason}</p>}
         {quick.cleanup_failed && <p className="hint">{s.quickUnlockCleanupFailed}</p>}
+        {quick.file_changed && <p className="warn">{s.quickUnlockFileChanged}</p>}
         <button disabled={busy || (!quick.cleanup_failed && !quick.enabled && !quick.available)} onClick={() => run(quick.cleanup_failed || quick.enabled ? disableQuickUnlock : enableQuickUnlock)}>
           {busy ? s.checking : quick.cleanup_failed ? s.retryTouchIdCleanup : quick.enabled ? s.disableTouchId : s.enableTouchId}
         </button>

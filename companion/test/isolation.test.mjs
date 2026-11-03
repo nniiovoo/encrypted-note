@@ -30,7 +30,8 @@ const T0 = Date.parse('2026-10-26T12:00:00.000Z');
 test('isolation plan rejects missing identity, looser trial controls and unreviewed destinations', () => {
   validatePlan(plan);
   for (const changed of [
-    { ownerUid: null }, { agentUid: ownerUid }, { agentUid: 0 }, { bearerTokenFile: null },
+    { ownerUid: null }, { agentUid: ownerUid }, { agentUid: 0 }, { agentUid: 2147483648 },
+    { agentUid: 4294967294 }, { bearerTokenFile: null },
     { bearerTokenFile: '/Users/Shared/../unreviewed' }, { credentialExpirySeconds: 7200 },
     { projectHardSpendLimitCents: 200 }, { brokerHost: '0.0.0.0' }, { brokerPort: 443 },
     { providerModel: 'other' }, { providerScope: 'api.all.read' }, { unexpected: true },
@@ -174,6 +175,9 @@ test('each fixed broker failure reaches the agent through the bridge with its ow
   const cuttingOff = createGenerator({ apiKey: KEY, transport: async () => ({ status: 200, json: {
     model: POLICY.model, status: 'incomplete', incomplete_details: { reason: 'max_output_tokens' },
     output: [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'FAKE_PRIVATE_MARKER cut off mid' }] }] } }) });
+  // Its own counters, so these calls leave main's allowance as the busy and usage_limit steps expect.
+  let respondOther = async () => providerOutput;
+  const other = createGenerator({ apiKey: KEY, now: () => 0, transport: () => respondOther() });
   let selected = main;
   const server = await startHttpServer({ generate: (...args) => selected(...args), bearerToken: TOKEN_ONE, port: 0 });
   const client = await connectLocalBroker(TOKEN_ONE, server.address().port);
@@ -192,13 +196,19 @@ test('each fixed broker failure reaches the agent through the bridge with its ow
     respond = async () => ({ status: 429 });
     await expectFailure('provider_limit', /Tell the owner\. Do not retry\./);
     respond = async () => ({ status: 500, json: { error: 'FAKE_PRIVATE_MARKER' } });
-    await expectFailure('provider_unavailable', /Try once more at most\./);
+    await expectFailure('provider_unavailable', /Try once more at most\. If it fails again, tell the owner\./);
     respond = async () => ({ status: 200, json: { model: 'FAKE_PRIVATE_MARKER' } });
-    await expectFailure('invalid_response', /Try once more at most\./);
+    await expectFailure('invalid_response', /Try once more at most\. If it fails again, tell the owner\./);
+    selected = other;
+    respondOther = async () => ({ status: 400, json: { error: 'FAKE_PRIVATE_MARKER' } });
+    await expectFailure('provider_rejected', /Tell the owner\. Do not retry\./);
+    respondOther = async () => ({ status: 200, json: { ...providerOutput.json, output: [{ type: 'message', role: 'assistant',
+      content: [{ type: 'refusal', refusal: 'FAKE_PRIVATE_MARKER refusal wording' }] }] } });
+    await expectFailure('model_refusal', /Do not send the same text again\. Change the request or tell the owner\./);
     selected = cuttingOff;
     await expectFailure('output_limit', /Ask for a shorter answer or split the request\. The same text will likely fail again\./);
     selected = timingOut;
-    await expectFailure('timeout', /Try once more at most\./);
+    await expectFailure('timeout', /Try once more at most\. If it fails again, tell the owner\./);
     selected = main;
     let entered; let release;
     const inFlight = new Promise(resolve => { entered = resolve; });
@@ -220,23 +230,28 @@ test('each fixed broker failure reaches the agent through the bridge with its ow
 });
 test('every fixed error says what to do next, and helper_off never says why the helper stopped', () => {
   const askOwner = /Ask the owner to choose Start for up to one hour in encrypted-note\. Do not look for keys or tokens\.$/;
+  const texts = new Set();
   for (const [code, step] of [
     ['invalid_input', /^Provide one nonempty text string of at most 4096 UTF-8 bytes\.$/],
     ['busy', /Wait for it to finish, then try again\.$/],
     ['usage_limit', /Wait a minute, then try once more\. If it fails again, tell the owner\.$/],
-    ['timeout', /Try once more at most\.$/],
+    ['timeout', /Try once more at most\. If it fails again, tell the owner\.$/],
     ['cancelled', /Send it again only if it is still needed\.$/],
     ['provider_auth', /Tell the owner\. Do not retry\.$/],
     ['provider_limit', /Tell the owner\. Do not retry\.$/],
-    ['provider_unavailable', /Try once more at most\.$/],
-    ['invalid_response', /Try once more at most\.$/],
+    ['provider_rejected', /Tell the owner\. Do not retry\.$/],
+    ['provider_unavailable', /Try once more at most\. If it fails again, tell the owner\.$/],
+    ['invalid_response', /Try once more at most\. If it fails again, tell the owner\.$/],
+    ['model_refusal', /Do not send the same text again\. Change the request or tell the owner\.$/],
     ['output_limit', /Ask for a shorter answer or split the request\. The same text will likely fail again\.$/],
     ['grant_expired', askOwner],
     ['helper_off', askOwner],
   ]) {
     assert.equal(new CompanionError(code).code, code);
     assert.match(fixedText(code), step);
+    texts.add(fixedText(code));
   }
+  assert.equal(texts.size, 14); // each code has its own text, which errorFromPublicText relies on
   assert.doesNotMatch(fixedText('helper_off'), /vault|lock|expire|stop/i);
 });
 test('the bridge passes only an exact fixed text; anything else from a broker becomes the generic text', async () => {
@@ -263,7 +278,9 @@ test('the bridge passes only an exact fixed text; anything else from a broker be
     assert.equal(errorFromPublicText(text).code, 'provider_unavailable');
   }
   assert.equal(errorFromPublicText(fixedText('helper_off')).code, 'helper_off');
-  assert.equal(errorFromPublicText(fixedText('output_limit')).code, 'output_limit');
+  for (const code of ['output_limit', 'provider_rejected', 'model_refusal', 'timeout', 'provider_unavailable', 'invalid_response']) {
+    assert.equal(errorFromPublicText(fixedText(code)).code, code);
+  }
   // Cancellation by the caller stays cancellation, with no broker text involved.
   const controller = new AbortController();
   controller.abort();

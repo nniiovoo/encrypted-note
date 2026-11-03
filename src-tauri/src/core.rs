@@ -164,6 +164,11 @@ pub struct AppStatus {
     pub save_durability_uncertain: bool,
     /// The settings file was there but unreadable, so the strictest lock rules are in force.
     pub settings_unreadable: bool,
+    /// No Vault file, but the settings file says a Vault was here: its files are missing.
+    pub vault_missing: bool,
+    /// The Vault open now is an older copy of the newest one this app saved or opened here (a
+    /// restore from a full-computer backup, or a file put back by hand). Until the next lock.
+    pub older_copy_opened: bool,
     pub settings: SettingsView,
     pub quick_unlock: QuickUnlockStatus,
 }
@@ -331,6 +336,17 @@ struct StoredSettings {
     count_activity_anywhere: bool,
     /// Header fingerprint only; authorization deadlines never persist.
     quick_unlock_binding: Option<[u8; 32]>,
+    /// The newest version of a Vault this app has saved or opened here (see [`SeenVault`]).
+    newest_seen: Option<SeenVault>,
+}
+
+/// A Vault's id (also in its file's plaintext header) and its document's `change_counter`. Kept
+/// in the settings file only to warn when an older copy of the same Vault opens. The settings
+/// file has no signature, so this catches mistakes, not someone who replaces both files.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct SeenVault {
+    vault_id: [u8; 16],
+    change_counter: u64,
 }
 
 impl Default for StoredSettings {
@@ -346,6 +362,7 @@ impl Default for StoredSettings {
             clipboard_clear_seconds: session::DEFAULT_CLIPBOARD_CLEAR_SECONDS,
             count_activity_anywhere: false,
             quick_unlock_binding: None,
+            newest_seen: None,
         }
     }
 }
@@ -362,6 +379,15 @@ impl StoredSettings {
             count_activity_anywhere: false,
             ..StoredSettings::default()
         }
+    }
+
+    /// Whether this file was written while a Vault was here: a Backup or Trash date, a change not
+    /// backed up yet, or a Vault seen. Best effort: the file can be deleted too.
+    fn had_vault(&self) -> bool {
+        self.newest_seen.is_some()
+            || self.last_backup_at.is_some()
+            || self.oldest_unbacked_change_at.is_some()
+            || self.trash_expiry_seen_at.is_some()
     }
 }
 
@@ -448,6 +474,10 @@ pub struct AppCore {
     phase: Phase,
     settings: StoredSettings,
     settings_unreadable: bool,
+    /// Set when an unlock finds an older copy of the newest Vault seen; cleared on any lock.
+    older_copy_opened: bool,
+    /// Whether the app's window is in front, from the focus events. Show and Copy need it.
+    window_in_front: bool,
     activity_anywhere_supported: bool,
     backup_destination: Option<BackupDestination>,
     backup_to_open: Option<PathBuf>,
@@ -465,6 +495,7 @@ pub struct AppCore {
     quick_pending: Option<u64>,
     quick_cleanup_needed: bool,
     quick_cleanup_failed: bool,
+    quick_unlock_file_changed: bool,
 }
 
 impl AppCore {
@@ -513,6 +544,9 @@ impl AppCore {
             phase,
             settings,
             settings_unreadable,
+            older_copy_opened: false,
+            // The window opens in front; the first focus event corrects it if not.
+            window_in_front: true,
             activity_anywhere_supported,
             backup_destination: None,
             backup_to_open: None,
@@ -529,6 +563,7 @@ impl AppCore {
             quick_pending: None,
             quick_cleanup_needed: false,
             quick_cleanup_failed: false,
+            quick_unlock_file_changed: false,
         };
         core.load_quick_unlock_registration();
         Ok(core)
@@ -589,6 +624,8 @@ impl AppCore {
             purge_trash_failed: self.purge_trash_failed,
             save_durability_uncertain: self.save_durability_uncertain,
             settings_unreadable: self.settings_unreadable,
+            vault_missing: matches!(self.phase, Phase::NoVault) && self.settings.had_vault(),
+            older_copy_opened: self.older_copy_opened,
             quick_unlock: self.quick_unlock_status(),
             settings: SettingsView {
                 idle_minutes: lock.idle_minutes,
@@ -658,6 +695,11 @@ impl AppCore {
         if !matches!(event, OsEvent::FocusGained) {
             self.invalidate_native();
         }
+        match event {
+            OsEvent::FocusLost => self.window_in_front = false,
+            OsEvent::FocusGained => self.window_in_front = true,
+            _ => {}
+        }
         let effects = self.session.os_event(event, self.clock.now_ms());
         self.apply(effects);
         // Also when no Vault is open (e.g. a pending inspection with no Vault on this computer).
@@ -669,6 +711,12 @@ impl AppCore {
         if locks {
             self.forget_open_vaults();
         }
+    }
+
+    /// The window's latest focus, as the OS last reported it. Focus events can reach the core
+    /// out of order, so the shell sets this after each one.
+    pub fn set_window_in_front(&mut self, in_front: bool) {
+        self.window_in_front = in_front;
     }
 
     /// Latest running apps from the OS adapter (every ~2 s).
@@ -774,6 +822,12 @@ impl AppCore {
         self.save()?;
         if rotation {
             self.note_change();
+        } else {
+            // A new Vault: the dates of any earlier one, Backups included, aren't about it.
+            self.settings.last_backup_at = None;
+            self.settings.oldest_unbacked_change_at = None;
+            self.settings.trash_expiry_seen_at = None;
+            let _ = self.write_settings();
         }
         if let Phase::ConfirmRecoveryKit { open, .. } =
             std::mem::replace(&mut self.phase, Phase::Locked)
@@ -807,10 +861,13 @@ impl AppCore {
         });
         let open = opened?;
         self.start_session();
+        // The credential was typed in the app's own window, so that window is in front.
+        self.window_in_front = true;
         self.set_phase(match cred {
             Cred::Password(_) => Phase::Unlocked(open),
             Cred::Key(recovery_key) => Phase::NeedsNewPassword { open, recovery_key },
         });
+        self.check_newest_seen();
         self.purge_trash();
         Ok(())
     }
@@ -1015,6 +1072,7 @@ impl AppCore {
         self.tick();
         self.open()?;
         self.guard_check()?;
+        self.in_front_check()?;
         let value = self.open()?.doc.reveal(id, field).map_err(notes_error)?;
         self.session
             .start_reveal(id, field, RevealMode::Timed, self.clock.now_ms())
@@ -1033,6 +1091,7 @@ impl AppCore {
         self.tick();
         self.open()?;
         self.guard_check()?;
+        self.in_front_check()?;
         if !self.note_kind(id)?.is_wallet() {
             return Err(err("invalid_input", MSG_NOT_WALLET));
         }
@@ -1068,6 +1127,7 @@ impl AppCore {
         self.tick();
         self.open()?;
         self.guard_check()?;
+        self.in_front_check()?;
         if !self.note_kind(id)?.is_wallet() {
             return Err(err("invalid_input", MSG_NOT_WALLET));
         }
@@ -1120,6 +1180,7 @@ impl AppCore {
         self.tick();
         self.open()?;
         self.guard_check()?;
+        self.in_front_check()?;
         let wallet_kind = self.note_kind(id)?.is_wallet();
         let value = if wallet_kind {
             let wallet = self.wallet(master_password)?;
@@ -1144,6 +1205,7 @@ impl AppCore {
         self.tick();
         self.open()?;
         self.guard_check()?;
+        self.in_front_check()?;
         let view = self.open()?.doc.get(id).ok_or_else(note_not_found)?;
         if field == notes::field::WORD_COUNT || !view.kind.visible_fields().contains(&field) {
             return Err(err("invalid_input", MSG_NOT_VISIBLE));
@@ -1164,6 +1226,7 @@ impl AppCore {
         self.tick();
         self.open()?;
         self.guard_check()?;
+        self.in_front_check()?;
         if self.note_kind(id)?.is_wallet() {
             return Err(err("invalid_input", MSG_LINE_NOT_WALLET));
         }
@@ -1188,6 +1251,7 @@ impl AppCore {
         self.tick();
         self.open()?;
         self.guard_check()?;
+        self.in_front_check()?;
         let view = self.open()?.doc.get(id).ok_or_else(note_not_found)?;
         if view.kind != Kind::ApiKey {
             return Err(err("invalid_input", MSG_ENV_NOT_API_KEY));
@@ -1560,6 +1624,7 @@ impl AppCore {
     fn forget_open_vaults(&mut self) {
         self.invalidate_native();
         self.clipboard_source = None;
+        self.older_copy_opened = false;
         self.phase = match std::mem::replace(&mut self.phase, Phase::Locked) {
             Phase::NoVault
             | Phase::ConfirmRecoveryKit {
@@ -1585,7 +1650,8 @@ impl AppCore {
     }
 
     /// A Vault was just opened (created, unlocked or installed): start the idle timer, and forget
-    /// a Sharing Guard dismissal made while none was open.
+    /// a Sharing Guard dismissal made while none was open. The window's focus stays as it was:
+    /// an install can be pressed from the background.
     fn start_session(&mut self) {
         self.initialize_session();
         self.reset_guard();
@@ -1614,6 +1680,17 @@ impl AppCore {
 
     fn note_kind(&self, id: &str) -> Result<Kind, ApiError> {
         Ok(self.open()?.doc.get(id).ok_or_else(note_not_found)?.kind)
+    }
+
+    /// Show and Copy of a Note's fields, only while the app's window is in front: a press from
+    /// a program working the app in the background is refused. It doesn't stop one that brings
+    /// the window to the front first.
+    fn in_front_check(&self) -> Result<(), ApiError> {
+        if self.window_in_front {
+            Ok(())
+        } else {
+            Err(err("invalid_input", MSG_NOT_IN_FRONT))
+        }
     }
 
     fn guard_check(&self) -> Result<(), ApiError> {
@@ -1732,7 +1809,49 @@ impl AppCore {
             .save_vault(&bytes, &verify, self.clock.unix_secs())
             .map_err(store_error)?;
         self.save_durability_uncertain = status == store::CommitStatus::Uncertain;
+        if let Some(here) = self.seen_here() {
+            self.remember_seen(here);
+        }
         Ok(())
+    }
+
+    /// After an unlock: whether this is an older copy of the newest version of this Vault seen
+    /// here, which is then said until the next lock. A restore can be wanted (Time Machine), so
+    /// this warns and refuses nothing. A newer version, or another Vault, becomes the newest.
+    fn check_newest_seen(&mut self) {
+        let Some(here) = self.seen_here() else {
+            return;
+        };
+        match self.settings.newest_seen {
+            Some(seen)
+                if seen.vault_id == here.vault_id && here.change_counter < seen.change_counter =>
+            {
+                self.older_copy_opened = true;
+            }
+            _ => self.remember_seen(here),
+        }
+    }
+
+    /// The Vault held in the current phase, as the settings file remembers it.
+    fn seen_here(&self) -> Option<SeenVault> {
+        match &self.phase {
+            Phase::Unlocked(open)
+            | Phase::NeedsNewPassword { open, .. }
+            | Phase::ConfirmRecoveryKit { open, .. } => Some(SeenVault {
+                vault_id: open.vault.vault_id(),
+                change_counter: open.doc.change_counter(),
+            }),
+            Phase::NoVault | Phase::Locked => None,
+        }
+    }
+
+    /// This app saved this version, or the owner chose it: it is the newest here now.
+    fn remember_seen(&mut self, here: SeenVault) {
+        if self.settings.newest_seen != Some(here) {
+            self.settings.newest_seen = Some(here);
+            // Only a warning depends on it; not worth failing what was just done.
+            let _ = self.write_settings();
+        }
     }
 
     /// Remove Notes that have been in Trash for 30 days (after an unlock).
@@ -1950,6 +2069,11 @@ impl AppCore {
             Some(recovery_key) => Phase::NeedsNewPassword { open, recovery_key },
             None => Phase::Unlocked(open),
         });
+        // The owner chose this copy, after its own warning if it was older.
+        self.older_copy_opened = false;
+        if let Some(here) = self.seen_here() {
+            self.remember_seen(here);
+        }
         match source {
             // This computer now holds exactly what the Backup holds.
             Source::Backup => {
@@ -2143,6 +2267,8 @@ const MSG_UNSUPPORTED: &str =
 const MSG_WEAK: &str = "This password is too easy to guess.";
 const MSG_LOCKED: &str = "encrypted-note is locked. Unlock it, then try again.";
 const MSG_NOT_NOW: &str = "That can't be done right now. If a window from this app is still open, finish it first. Then try again.";
+const MSG_NOT_IN_FRONT: &str =
+    "Show and Copy work only while this window is in front. Click in the window, then try again.";
 const MSG_GUARD_UP: &str =
     "A screen-sharing or recording app is running, so nothing can be shown or copied right now.";
 const MSG_NOTE_NOT_FOUND: &str = "That Note couldn't be found. It may have been deleted.";

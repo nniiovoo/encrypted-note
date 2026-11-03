@@ -116,7 +116,8 @@ pub struct KdfParams {
 }
 
 impl KdfParams {
-    /// Starting point for calibration: 512 MiB, t=3, p=4.
+    /// Calibration's upper memory bound and its starting t and p: 512 MiB, t=3, p=4 (it starts
+    /// at the memory floor; see [`calibrate`]).
     pub const DEFAULT: KdfParams = KdfParams {
         m_kib: 512 * 1024,
         t: 3,
