@@ -13,6 +13,7 @@ const PUBLIC_ERRORS = Object.freeze({
   provider_limit: 'The provider rejected the request because of a limit. Tell the owner. Do not retry.',
   provider_unavailable: 'The provider request could not be completed. Try once more at most.',
   invalid_response: 'The provider returned an unsupported response. Try once more at most.',
+  output_limit: 'The answer was longer than 512 tokens, so it was cut off and not returned. It may still be billed. Ask for a shorter answer or split the request. The same text will likely fail again.',
   grant_expired: "The owner's grant has ended. Ask the owner to choose Start for up to one hour in encrypted-note. Do not look for keys or tokens.",
   // Never says why the Agent Companion is off, so it carries nothing about the Vault being locked.
   helper_off: "The Agent Companion isn't running. Ask the owner to choose Start for up to one hour in encrypted-note. Do not look for keys or tokens.",
@@ -100,6 +101,9 @@ function extractText(result, apiKey) {
     throw new CompanionError('provider_unavailable');
   }
   const json = result.json;
+  // A cut-off answer is never returned in part; the agent is told to ask for less instead.
+  if (json?.model === POLICY.model && json?.status === 'incomplete' &&
+      json?.incomplete_details?.reason === 'max_output_tokens') throw new CompanionError('output_limit');
   if (json?.model !== POLICY.model || json?.status !== 'completed' ||
       !Array.isArray(json.output) || !json.output.length || json.output.length > 8) {
     throw new CompanionError('invalid_response');
