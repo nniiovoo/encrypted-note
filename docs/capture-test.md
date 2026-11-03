@@ -59,6 +59,29 @@ macOS 26.4.1 · Zoom 7.0.6 · Discord 0.0.413 · OBS 32.1.2 · Chrome 153 · Qui
 
 A ❌ result means that tool can see the app. Add it to the Sharing Guard list if it's missing (`crates/guard`), and note it here. Nothing here stops a phone camera.
 
+### AI features and Accessibility (added 2026-11-03, none run)
+
+None of these rows has been run. Use a fake-data Vault only, never your real one. These tools can read a window's text as well as its pixels, so record what each one got from the pixels and from the text separately. A blank screenshot doesn't show the text was hidden.
+
+| Capture path | How to test | Pixels | Text |
+|---|---|---|---|
+| Visual Intelligence | with a fake Note open, start Visual Intelligence on the screen and look at what it describes | ⬜ not run | ⬜ not run |
+| Siri, asked about the screen | ask Siri what is on the screen with a fake Note open | ⬜ not run | ⬜ not run |
+| Writing Tools | type fake text into a Text Note, then check whether Writing Tools appears in the Edit menu or the context menu, and what it receives | ⬜ not run | ⬜ not run |
+| Claude computer use | in a throwaway session, let it take a screenshot and read the window while a fake Note is open; never approve encrypted-note for it in a real session | ⬜ not run | ⬜ not run |
+| ChatGPT app, working with apps | point it at encrypted-note with a fake Note open | ⬜ not run | ⬜ not run |
+| Screenpipe | record for 30 s with a fake Note open, then search its history for a fake value and a fake title. It is on the Sharing Guard list (Mac bundle id `screenpi.pe`), so also record whether the shield covered the window | ⬜ not run | ⬜ not run |
+
+**Accessibility Inspector**, from Xcode, with the fake-data Vault Unlocked. Point it at each of these and record whether the fake value appears in the element's value, title or description. Fake values only.
+
+| What is shown | Fake value appears in the accessibility tree? |
+|---|---|
+| A Login password after Show | ⬜ not run |
+| A Seed Phrase or Private Key Wallet readout | ⬜ not run |
+| The Recovery Key on the Recovery Kit step of a new fake Vault | ⬜ not run |
+
+**Show and Copy from the background.** Since 2026-11-03 the Rust core refuses Show and Copy of a Note's field while the app's window isn't in front. With a fake Note open, bring another app forward, then press Show and each Copy button through Accessibility Inspector or a script. Expected: each is refused with "Show and Copy work only while this window is in front." and the clipboard is unchanged. Then click back into the window and check that Show and Copy work again, also after the native Wallet panel, the Backup dialog and Show in Finder. ⬜ not run
+
 ## Physical Windows validation ([#11](https://github.com/nniiovoo/encrypted-note/issues/11))
 
 Status: pending. Cross-compilation and unit tests do not establish these results. Run this on a physical Windows PC in an owner-prepared test account with only fake Notes. The Mac side of the Backup test also needs a separate fake-data session. Release builds ignore the development data-directory override; do not open, replace, or capture a real Vault for this checklist.
@@ -79,6 +102,8 @@ Use the welcome or lock screen. Inspect the saved capture or remote receiver. Te
 | OBS display capture | pending | pending | |
 | Discord Go Live | pending | pending | |
 | Google Meet in Chrome, entire-screen share | pending | pending | |
+| Click to Do, if present | pending | pending | |
+| Copilot Vision, if present | pending | pending | |
 
 ### Clipboard, locking and Sharing Guard
 

@@ -45,6 +45,7 @@ const MAC_IDS: &[(&str, &str)] = &[
     ("com.philandro.anydesk", "AnyDesk"),
     ("com.carriez.rustdesk", "RustDesk"),
     ("com.apple.screensharing.agent", "Screen Sharing"),
+    ("screenpi.pe", "Screenpipe"),
 ];
 
 #[test]
@@ -62,6 +63,8 @@ fn detect_mac_known_bundle_ids() {
 fn detect_mac_ignores_unknown_and_near_misses() {
     let table: &[&str] = &[
         "com.tinyspeck.slackmacgap", // Slack is deliberately not included
+        "SCREENPI.PE",               // exact match only
+        "screenpi.pe.helper",        // no prefix matching
         "com.google.Chrome",
         "US.ZOOM.XOS",       // exact match only
         "us.zoom.xos.extra", // no prefix matching
@@ -191,6 +194,7 @@ fn detect_every_required_app_exists_on_some_platform() {
         "RustDesk",
         "Quick Assist",
         "Screen Sharing",
+        "Screenpipe",
     ] {
         assert!(
             MAC_IDS

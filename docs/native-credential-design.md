@@ -25,7 +25,7 @@ Only the native callback can submit credential text to the frozen action. A requ
 | Loosen Auto-lock | Normalize the complete candidate, collect native Master Password only for a weaker rule, and persist before applying it. Tightening stays prompt-free. | Non-secret settings |
 | Enable Quick Unlock | Fresh native Master Password proof of the current committed Vault precedes local Secure Enclave enrollment. | Availability/status only |
 
-Raw password-generation/scoring IPC, password arguments, React password modals and Recovery Kit state have been removed from the app callers and registered command/capability routes. New-password controls call the existing policy internally. Native create calibration is owned by the operation lease. The terminal Emergency Reader retains its separate no-echo credential entry; it has no agent or biometric route.
+Raw password-generation/scoring IPC, password arguments, React password modals and Recovery Kit state have been removed from the app callers and registered command/capability routes. New-password controls call the existing policy internally. Native create calibration is owned by the operation lease. The terminal Emergency Reader retains its separate no-echo credential entry; it has no biometric route and is not an agent integration, though any program in the owner's account can run it.
 
 ## Cancellation, retention and limits
 

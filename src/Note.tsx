@@ -443,13 +443,14 @@ export function Detail(
                 )}
                 {/* Under Copy, on a line of its own: the name can be long. The line is built and
                     copied in Rust, and a refusal (a key that can't be written that way) shows as
-                    it comes. */}
+                    it comes. The hint under it: this is the owner's own key, not one for an agent. */}
                 {has && envVar && (
                   <div className="actions env">
                     <button className="small" onClick={() => run(() => copyFieldEnv(id))}>
                       <Icon name="copy" />
                       <span>{s.copyAsEnv(envVar)}</span>
                     </button>
+                    <p className="hint">{s.copyAsEnvNotForAgents}</p>
                   </div>
                 )}
                 {on && (

@@ -10,11 +10,15 @@
 //! The known-app table covers, per platform, at least: Zoom, Microsoft Teams (classic and new),
 //! Discord, OBS Studio, QuickTime Player, macOS Screenshot (Cmd+Shift+5 UI), Loom, Webex,
 //! Tencent Meeting / VooV, Skype, Snipping Tool, Xbox Game Bar, ShareX, CleanShot X, Snagit,
-//! Screen Studio, Kap, FaceTime, and the remote-control tools TeamViewer, AnyDesk, RustDesk,
-//! Quick Assist and macOS Screen Sharing (someone operating this computer sees everything).
-//! Slack is deliberately NOT included (it's open all day). Match on macOS bundle id (exact) and
-//! on Windows executable file name (case-insensitive exact). Display names are what the shield
-//! shows ("Zoom", "Microsoft Teams", ...).
+//! Screen Studio, Kap, FaceTime, the remote-control tools TeamViewer, AnyDesk, RustDesk,
+//! Quick Assist and macOS Screen Sharing (someone operating this computer sees everything), and
+//! the AI screen recorder Screenpipe, which records the screen all day and keeps what it reads.
+//! Slack is deliberately NOT included (it's open all day). AI assistants that stay open, such as
+//! the ChatGPT, Claude and Copilot apps, are not included either, by the same rule, until the
+//! owner decides. A recorder started from a terminal has no bundle id, so the Mac check can't
+//! see it. Match on macOS bundle id (exact) and on Windows executable file name
+//! (case-insensitive exact). Display names are what the shield shows ("Zoom", "Microsoft
+//! Teams", ...).
 //!
 //! A helper process that only exists while its app is capturing (Zoom's share host, the
 //! Snipping Tool overlay) has its own entry and name. Under the app's name it would be covered
@@ -216,6 +220,14 @@ const KNOWN_APPS: &[KnownApp] = &[
         // The agent macOS runs while someone views or controls this Mac's screen.
         name: "Screen Sharing",
         mac_bundle_ids: &["com.apple.screensharing.agent"],
+        windows_exe_names: &[],
+    },
+    // AI recorders.
+    KnownApp {
+        // The desktop app's identifier in its public tauri.conf.json. Its Windows file name
+        // isn't confirmed yet, so there is no Windows entry.
+        name: "Screenpipe",
+        mac_bundle_ids: &["screenpi.pe"],
         windows_exe_names: &[],
     },
 ];

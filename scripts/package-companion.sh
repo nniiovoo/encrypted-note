@@ -2,7 +2,7 @@
 # Builds the optional Agent Companion helper (ADR-0009) as a signed XPC service bundle, and
 # optionally an encrypted-note.app that contains it. macOS only.
 #
-#   scripts/package-companion.sh [--identifier ID] [--cache DIR] [--out DIR] [--app]
+#   scripts/package-companion.sh [--identifier ID] [--cache DIR] [--out DIR] [--app [--owner-build]]
 #
 # The companion comes from this commit's companion/ folder (ADR-0010). Its policy.json and the
 # Node.js release archive are verified against src-tauri/companion/companion.lock.json. This
@@ -14,7 +14,11 @@
 #                    sandbox containers and never touches the owner's real Vault.
 #   --cache DIR      Where the verified Node.js archive is kept (default target/companion-cache).
 #   --out DIR        Output folder (default target/companion).
-#   --app            Also run `tauri build` with the helper bundled and verify the result.
+#   --app            Also run `tauri build` with the helper bundled and verify the result. A release
+#                    app with the real identifier opens the owner's real Vault folder, so --app
+#                    refuses it (and any identifier under it) unless --owner-build is also given.
+#   --owner-build    The owner only, building the app they install: allows --app with the real
+#                    identifier, after typing that identifier in Terminal. Agents never pass it.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 ROOT=$(pwd)
@@ -25,12 +29,14 @@ IDENTIFIER=""
 CACHE="$ROOT/target/companion-cache"
 OUT="$ROOT/target/companion"
 BUILD_APP=0
+OWNER_BUILD=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --identifier) IDENTIFIER="$2"; shift 2 ;;
     --cache) CACHE="$2"; shift 2 ;;
     --out) OUT="$2"; shift 2 ;;
     --app) BUILD_APP=1; shift ;;
+    --owner-build) OWNER_BUILD=1; shift ;;
     *) echo "Unknown option: $1" >&2; exit 2 ;;
   esac
 done
@@ -46,6 +52,26 @@ LOCK="$ROOT/src-tauri/companion/companion.lock.json"
 lock() { node -e 'const v = require(process.argv[1]); const r = process.argv[2].split(".").reduce((o, k) => o?.[k], v); if (typeof r !== "string") process.exit(1); process.stdout.write(r);' "$LOCK" "$1"; }
 conf() { node -e 'const v = require(process.argv[1]); process.stdout.write(String(process.argv[2].split(".").reduce((o, k) => o?.[k], v)));' "$ROOT/src-tauri/tauri.conf.json" "$1"; }
 
+REAL_IDENTIFIER=$(conf identifier)
+[[ -n "$IDENTIFIER" ]] || IDENTIFIER=$REAL_IDENTIFIER
+[[ "$IDENTIFIER" =~ ^[A-Za-z0-9.-]+$ ]] || { echo "Invalid identifier." >&2; exit 1; }
+# Containers and app data folders are named by identifier, and a default Mac disk ignores case.
+id_lc=$(tr '[:upper:]' '[:lower:]' <<<"$IDENTIFIER")
+real_lc=$(tr '[:upper:]' '[:lower:]' <<<"$REAL_IDENTIFIER")
+TEST_HINT="For a test build, pass --identifier com.encryptednote.companiontest."
+[[ $OWNER_BUILD == 0 || $BUILD_APP == 1 ]] || { echo "--owner-build only applies with --app." >&2; exit 2; }
+if [[ $BUILD_APP == 1 && $id_lc == "$real_lc".* ]]; then
+  echo "$IDENTIFIER would share a folder with the real app or its helper. $TEST_HINT" >&2; exit 1
+fi
+if [[ $BUILD_APP == 1 && $id_lc == "$real_lc" ]]; then
+  [[ $OWNER_BUILD == 1 ]] || { echo "--app with the real identifier ($REAL_IDENTIFIER) builds an app that opens the owner's real Vault folder. $TEST_HINT The owner adds --owner-build to build the app they install." >&2; exit 1; }
+  [[ -t 0 && -t 2 ]] || { echo "--owner-build needs the owner at a Terminal prompt. $TEST_HINT" >&2; exit 1; }
+  read -r -p "This builds the app that opens your real Vault folder. Type $REAL_IDENTIFIER to continue: " confirm
+  [[ $confirm == "$REAL_IDENTIFIER" ]] || { echo "Not confirmed. Nothing was built." >&2; exit 1; }
+elif [[ $OWNER_BUILD == 1 ]]; then
+  echo "--owner-build is only for the real identifier ($REAL_IDENTIFIER)." >&2; exit 2
+fi
+
 COMMIT=$(git rev-parse HEAD)
 POLICY_SHA=$(lock companion.policySha256)
 NODE_VERSION=$(lock node.version)
@@ -56,8 +82,6 @@ case "$(uname -m)" in
 esac
 NODE_FILE=$(lock "node.$ARCH.file")
 NODE_SHA=$(lock "node.$ARCH.sha256")
-[[ -n "$IDENTIFIER" ]] || IDENTIFIER=$(conf identifier)
-[[ "$IDENTIFIER" =~ ^[A-Za-z0-9.-]+$ ]] || { echo "Invalid identifier." >&2; exit 1; }
 SIGN_IDENTITY=$(conf bundle.macOS.signingIdentity)
 VERSION=$(conf version)
 SERVICE="$IDENTIFIER.companion"

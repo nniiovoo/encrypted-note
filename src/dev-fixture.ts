@@ -2,7 +2,10 @@
 // data so a browser can draw the screens: `npm run dev`, then
 // /fixture.html?phase=unlocked&companion=running (add &guard for the Sharing Guard).
 // phase: no_vault, confirm_recovery_kit, locked, needs_new_password, unlocked.
-// companion: unsupported, unavailable, stopped, starting, running, stopping, expired, error.
+// companion: unsupported, unavailable, stopped, starting, running, stopping, expired, error,
+// and ended_by_lock (stopped because the Vault locked).
+// Notices: &missing (no_vault: the Vault's files are gone), &older (an older copy is open),
+// &touchid_changed (Touch ID turned off because the Vault file changed).
 // It never reaches Rust, so it proves nothing about native panels, locks or the real helper.
 import { mockIPC } from "@tauri-apps/api/mocks";
 import type { AppStatus, CompanionState, CompanionView, Filter, NoteSummary, NoteView, Phase } from "./api";
@@ -31,7 +34,9 @@ const status: AppStatus = {
   purge_trash_failed: false,
   save_durability_uncertain: false,
   settings_unreadable: false,
-  quick_unlock: { available: false, enabled: false, can_unlock: false, cleanup_failed: false, reason: null },
+  vault_missing: query.has("missing"),
+  older_copy_opened: query.has("older"),
+  quick_unlock: { available: false, enabled: false, can_unlock: false, cleanup_failed: false, file_changed: query.has("touchid_changed"), reason: null },
   settings: {
     idle_minutes: 10,
     lock_on_app_switch: true,
@@ -60,7 +65,8 @@ const views: NoteView[] = [
     id: "n2",
     kind: "api_key",
     title: "Fake API key",
-    visible: { service: "Example Test Service" },
+    // A variable name, so Copy as NAME=value and the line under it are drawn.
+    visible: { service: "Example Test Service", env_var: "FAKE_API_KEY" },
     hidden: [["key", true]],
     favorite: false,
     created_at: now,
@@ -103,13 +109,16 @@ const summaries: NoteSummary[] = views.map(({ id, kind, title, favorite, updated
   has_hidden: true,
 }));
 
-const companionState = (query.get("companion") ?? "stopped") as CompanionState;
+const companionQuery = query.get("companion") ?? "stopped";
+const endedByLock = companionQuery === "ended_by_lock";
+const companionState = (endedByLock ? "stopped" : companionQuery) as CompanionState;
 const companion: CompanionView = {
   platform_supported: companionState !== "unsupported",
   helper_bundled: companionState !== "unsupported" && companionState !== "unavailable",
   state: companionState,
   error: companionState === "error" ? "internal" : null,
   expires_at: now + 3600,
+  ended_by_lock: endedByLock,
   local: { ready: true, runtime: true, plan: true, credential: true, handoff: true, agent: true, code: true },
   operation: {
     name: "generate_text",

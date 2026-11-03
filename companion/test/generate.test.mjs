@@ -3,6 +3,10 @@ import assert from 'node:assert/strict';
 import https from 'node:https';
 import { EventEmitter } from 'node:events';
 import { Readable } from 'node:stream';
+import { spawnSync } from 'node:child_process';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import { createGenerator, makeProviderBody, sendToOpenAI, POLICY } from '../src/generate.mjs';
 import { readRuntimeConfig } from '../src/config.mjs';
 
@@ -116,6 +120,31 @@ test('never forwards provider error bodies, headers, keys or thrown messages', a
   await assert.rejects(throwing({ text: 'Fiction.' }), error =>
     error.code === 'provider_unavailable' && !error.message.includes(marker) && !error.message.includes(KEY));
 });
+test('each provider status gets its own fixed error and next step', async () => {
+  for (const [status, code] of [[400, 'provider_rejected'], [404, 'provider_rejected'], [401, 'provider_auth'],
+    [403, 'provider_auth'], [429, 'provider_limit'], [500, 'provider_unavailable'], [503, 'provider_unavailable'],
+    [307, 'provider_unavailable']]) {
+    const generate = createGenerator({ apiKey: KEY, transport: async () => ({ status }) });
+    await assert.rejects(generate({ text: 'Fiction.' }), { code });
+  }
+});
+test('a model refusal says so and returns none of its wording', async () => {
+  const wording = 'FAKE_PRIVATE_REFUSAL_WORDING';
+  const refusal = { type: 'refusal', refusal: wording };
+  for (const content of [[refusal], [{ type: 'output_text', text: 'A fictional start' }, refusal]]) {
+    const generate = createGenerator({ apiKey: KEY, transport: async () => ({ status: 200, json: { ...success().json,
+      output: [{ type: 'message', role: 'assistant', content }] } }) });
+    await assert.rejects(generate({ text: 'Fiction.' }), error =>
+      error.code === 'model_refusal' && /Do not send the same text again\./.test(error.message) &&
+      !error.message.includes(wording) && !error.message.includes('fictional start'));
+  }
+  // Only the fixed model's completed reply counts as a refusal.
+  for (const json of [{ model: 'other-model' }, { status: 'failed' }]) {
+    const generate = createGenerator({ apiKey: KEY, transport: async () => ({ status: 200, json: { ...success().json,
+      ...json, output: [{ type: 'message', role: 'assistant', content: [refusal] }] } }) });
+    await assert.rejects(generate({ text: 'Fiction.' }), { code: 'invalid_response' });
+  }
+});
 test('rejects unexpected model, tools, incomplete output, oversized text and exact-key echoes', async () => {
   const responses = [
     { status: 200, json: { ...success().json, model: 'other-model' } },
@@ -172,6 +201,26 @@ test('HTTPS transport fixes destination and does not follow a redirect', async t
   assert.equal(options.path, '/v1/responses');
   assert.equal(options.method, 'POST');
   assert.equal(options.rejectUnauthorized, true);
+  // The destination comes from policy.json, so its pinned SHA-256 covers it.
+  assert.deepEqual([options.protocol, options.hostname, options.port, options.method, options.path],
+    [POLICY.providerProtocol, POLICY.providerHost, POLICY.providerPort, POLICY.providerMethod, POLICY.providerPath]);
+});
+test('the broker refuses to load a policy that names another destination', async t => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'enote-policy-'));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  await fs.mkdir(path.join(directory, 'src'));
+  await fs.copyFile(new URL('../src/generate.mjs', import.meta.url), path.join(directory, 'src', 'generate.mjs'));
+  const load = async changes => {
+    await fs.writeFile(path.join(directory, 'policy.json'), JSON.stringify({ ...POLICY, ...changes }));
+    return spawnSync(process.execPath, [path.join(directory, 'src', 'generate.mjs')], { encoding: 'utf8', timeout: 10_000 });
+  };
+  assert.equal((await load({})).status, 0);
+  for (const changes of [{ providerHost: 'unallowed.invalid' }, { providerPort: 8443 }, { providerProtocol: 'http:' },
+    { providerMethod: 'GET' }, { providerPath: '/v1/files' }, { providerPath: undefined }]) {
+    const result = await load(changes);
+    assert.notEqual(result.status, 0, JSON.stringify(changes));
+    assert.match(result.stderr, /The companion policy names an unapproved provider destination\./);
+  }
 });
 test('configuration accepts only the separate Agent Key and distinct HTTP authorization', () => {
   assert.throws(() => readRuntimeConfig({ OPENAI_API_KEY: KEY }));

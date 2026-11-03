@@ -745,3 +745,27 @@ fn never_enabled_quick_unlock_does_not_add_a_settings_write_requirement_to_accou
     assert!(!app.core.app_status().quick_unlock.enabled);
     assert!(!app.core.take_quick_unlock_cleanup());
 }
+
+#[test]
+fn touch_id_turned_off_by_a_vault_file_replaced_while_closed_says_so() {
+    let mut app = App::new();
+    let _ = app.enroll();
+    app.core.lock();
+    // A plain restart keeps it on and says nothing.
+    let app = app.restart();
+    assert!(app.core.app_status().quick_unlock.enabled);
+    assert!(!app.core.app_status().quick_unlock.file_changed);
+
+    let other = App::new();
+    std::fs::copy(other.vault(), app.vault()).unwrap();
+    let mut app = app.restart();
+    let status = app.core.app_status().quick_unlock;
+    assert!(!status.enabled);
+    assert!(status.file_changed);
+    // Turning it on again ends the notice.
+    app.native_unlock();
+    let _ = app.enroll();
+    let status = app.core.app_status().quick_unlock;
+    assert!(status.enabled);
+    assert!(!status.file_changed);
+}

@@ -10,6 +10,9 @@ import { strings as s } from "./strings";
 export function App() {
   const [status, setStatus] = useState<AppStatus | null>(null);
   const [operationOutcome, setOperationOutcome] = useState<string | null>(null);
+  // The unlock whose older-copy notice the owner dismissed. Another unlock of that copy says it
+  // again, until something is saved from it.
+  const [olderCopySeen, setOlderCopySeen] = useState<number | null>(null);
   // Where the owner was in Home (sidebar filter, open Note id, sort choice), so an Auto-lock or
   // the Shield brings them back to it. Memory only; never a title, the search text or a draft.
   const [place, setPlace] = useState(START);
@@ -120,7 +123,8 @@ export function App() {
   // Kept for after the Shield: it can say what the owner was doing, and the Shield is on screen
   // because something may be capturing it.
   const outcomeNow = status?.sharing_guard.up ? null : operationOutcome;
-  const notices = status?.save_durability_uncertain || status?.settings_unreadable || lockEvents.length > 0 || outcomeNow;
+  const olderCopy = !!status?.older_copy_opened && olderCopySeen !== status.session_generation;
+  const notices = status?.save_durability_uncertain || status?.settings_unreadable || olderCopy || lockEvents.length > 0 || outcomeNow;
 
   // Home draws its own drag areas over this strip.
   return (
@@ -130,6 +134,12 @@ export function App() {
         <div className="app-notices">
           {status?.save_durability_uncertain && <p className="warn">{s.saveDurabilityWarning}</p>}
           {status?.settings_unreadable && <p className="warn">{s.settingsUnreadable}</p>}
+          {olderCopy && (
+            <p className="warn" role="alert">
+              {s.olderCopyOpened}
+              <button className="small" onClick={() => setOlderCopySeen(status?.session_generation ?? null)}>{s.dismiss}</button>
+            </p>
+          )}
           {lockEvents.length > 0 && (
             <p className="warn" role="alert">{s.lockEventsUnavailable(lockEvents.map((event) => s.lockEventNames[event]).join(", "))}</p>
           )}
@@ -202,7 +212,7 @@ function Screen({ status, place, onPlace, restarts, setupStep, onSetupStep, afte
   if (shield) return <Shield apps={status.sharing_guard.apps} afterUnlock={status.phase !== "locked" && seen.before === "locked"} />;
   switch (status.phase) {
     case "no_vault":
-      return <NoVault onOperationOutcome={onOutcomeOutside} afterKit={afterKit} initialStep={setupStep} onStep={onSetupStep} />;
+      return <NoVault vaultMissing={status.vault_missing} onOperationOutcome={onOutcomeOutside} afterKit={afterKit} initialStep={setupStep} onStep={onSetupStep} />;
     case "confirm_recovery_kit":
       return <NativeRecoveryKit />;
     case "locked":

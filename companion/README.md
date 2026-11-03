@@ -18,7 +18,7 @@ Exactly one MCP tool is exposed:
 
 - generate_text accepts exactly { "text": "..." }; no other properties.
 - Nonempty, well-formed text: at most 4096 UTF-8 bytes.
-- One fixed POST destination: https://api.openai.com/v1/responses.
+- One fixed POST destination: https://api.openai.com/v1/responses. It is in policy.json, so the pinned policy hash covers it, and the broker refuses to load a policy that names any other.
 - One fixed model: gpt-6-luna; reasoning none; service tier default.
 - At most 512 output tokens, including any reasoning; response text is additionally bounded to 64 KiB.
 - store, stream and background are false. tools is empty and tool_choice is none.
@@ -26,6 +26,7 @@ Exactly one MCP tool is exposed:
 - No automatic retry or redirect following. A timeout or cancellation may still incur a provider charge.
 - One in-flight request, six admitted requests per rolling minute, 60 per rolling hour, and 100 per process. Failed admitted requests consume the local allowance.
 - Provider response bodies are bounded to 256 KiB. Only completed assistant text from the fixed model returns to the caller; provider errors, headers and response identifiers do not.
+- Each failure returns one fixed text with a next step. HTTP 400 and 404 say the request will fail again, so tell the owner and don't retry. A model refusal says so without its wording, and tells the agent not to send the same text again. An answer cut off at the output limit returns none of its text.
 - Local counters reset when this process restarts. They supplement independent provider caps; they are not durable provider spending controls.
 - An owner grant ends at an absolute time at most one hour away, or after one hour of monotonic time, whichever is first. Restarting never extends it; an expired grant returns a fixed error with no provider work.
 - Returned text is untrusted. The companion never executes it.

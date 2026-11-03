@@ -11,6 +11,11 @@
 // OpenAI request, and it runs only inside the helper's sandbox. In its place, a second check here
 // fails if any file in src/, src-tauri/src/ or crates/ imports from it, so no Vault code reaches
 // that network code. That check also needs a literal path, so a computed one gets past it.
+// A third check keeps the broker narrow: in companion/src/ and companion/isolation/, only
+// src/generate.mjs may import node:https (the one provider request) and only src/http.mjs
+// node:http (the loopback server); no other Node networking module or browser network API may
+// appear. companion/policy.json must match the SHA-256 pinned in companion.lock.json and name
+// exactly the approved destination, which generate.mjs also refuses to load without.
 // Patterns: browser fetch/sendBeacon calls (also fetch?.()), XMLHttpRequest, WebSocket,
 // EventSource, WebTransport and RTCPeerConnection names; Rust std::net/tokio::net, socket types,
 // libc socket/connect/getaddrinfo and NSURLSession/NSURLConnection names.
@@ -28,6 +33,7 @@
 // paths; extend rules when reviewing a new entry point. This is no runtime egress
 // sandbox and cannot contain compromised native code. CSP and cargo-deny are separate.
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
 import { join, posix } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -42,6 +48,14 @@ const nativeSource = /^src-tauri\/native\/.*\.(?:swift|m|mm|c|cc|cpp|cxx|c\+\+|h
 const vaultSource = /^(?:src\/.*\.(?:[cm]?[jt]s|jsx|tsx|html|css)|(?:src-tauri\/src|crates)\/.*\.rs)$/;
 const importForm = /(?:\bfrom\s*|\bimport\s*\(?\s*|\brequire\s*\(\s*|\bnew\s+URL\s*\(\s*|\binclude(?:_str|_bytes)?!\s*\(\s*|#\[\s*path\s*=\s*)["'`]([^"'`\n]+)["'`]/g;
 const companionPath = /^\/?(?:companion|encrypted-note-agent-companion)(?:\/|$)/;
+const companionRuntime = /^companion\/(?:src|isolation)\/.*\.(?:[cm]?js)$/;
+const nodeNetwork = /^(?:node:)?(?:https?|http2|net|tls|dgram|dns|undici)(?:\/|$)/;
+const allowedNetwork = { "companion/src/generate.mjs": "node:https", "companion/src/http.mjs": "node:http" };
+// ADR-0009: the one provider request. Only this destination may be named in companion/policy.json.
+const approvedDestination = {
+  providerProtocol: "https:", providerHost: "api.openai.com", providerPort: 443,
+  providerMethod: "POST", providerPath: "/v1/responses",
+};
 
 // Resolved against the importing file, so src-tauri/companion/ (the helper's pins, not the broker)
 // and a WebView file such as src/companion.ts are not confused with the top-level companion/.
@@ -53,6 +67,27 @@ function companionImports(path, source) {
     const line = source.slice(0, match.index).split("\n").length;
     return [`${path}:${line}: Vault code imports the Agent Companion (${match[1]})`];
   });
+}
+
+function companionNetwork(path, source) {
+  if (!companionRuntime.test(path)) return [];
+  const found = [...source.matchAll(importForm)].filter((match) => nodeNetwork.test(match[1]) && match[1] !== allowedNetwork[path]);
+  return [...found, ...source.matchAll(browserApi)].map((match) => {
+    const line = source.slice(0, match.index).split("\n").length;
+    return `${path}:${line}: networking outside the Agent Companion's one request and loopback server (${match[1] ?? match[0]})`;
+  });
+}
+
+function policyProblems(policyText, pinnedSha256) {
+  const problems = [];
+  if (createHash("sha256").update(policyText).digest("hex") !== pinnedSha256) {
+    problems.push("companion/policy.json differs from policySha256 in src-tauri/companion/companion.lock.json");
+  }
+  const policy = JSON.parse(policyText);
+  for (const [key, value] of Object.entries(approvedDestination)) {
+    if (policy[key] !== value) problems.push(`companion/policy.json: ${key} is not the approved destination`);
+  }
+  return problems;
 }
 
 function patternFor(path) {
@@ -215,6 +250,39 @@ for (const [path, source] of [
   assert.deepEqual(companionImports(path, source), [], source);
 }
 
+for (const [path, source] of [
+  ["companion/src/fake.mjs", "import https from 'node:https';"],
+  ["companion/src/generate.mjs", "import http from 'node:http';"],
+  ["companion/src/http.mjs", "import https from \"https\";"],
+  ["companion/isolation/fake.mjs", "const net = await import('node:net');"],
+  ["companion/isolation/fake.mjs", "const tls = require('tls');"],
+  ["companion/src/fake.mjs", "import { request } from 'node:http2';"],
+  ["companion/src/fake.mjs", "import { fetch } from 'undici';"],
+  ["companion/src/fake.mjs", "import dns from 'node:dns';"],
+  ["companion/src/fake.mjs", "import { lookup } from 'node:dns/promises';"],
+  ["companion/src/fake.mjs", "await fetch('https://example.invalid/fake');"],
+  ["companion/isolation/fake.mjs", "new WebSocket('wss://example.invalid/fake');"],
+]) {
+  assert.equal(companionNetwork(path, source).length, 1, `${path}: ${source}`);
+}
+for (const [path, source] of [
+  ["companion/src/generate.mjs", "import https from 'node:https';"],
+  ["companion/src/http.mjs", "import http from 'node:http';"],
+  ["companion/isolation/fake.mjs", "import { pathToFileURL } from 'node:url';"],
+  ["companion/isolation/fake.mjs", "import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';"],
+  ["companion/test/fake.test.mjs", "import http from 'node:http'; await fetch('http://127.0.0.1:1/fake');"],
+]) {
+  assert.deepEqual(companionNetwork(path, source), [], `${path}: ${source}`);
+}
+const fakePolicy = JSON.stringify({ model: "fake-model", ...approvedDestination });
+const fakePin = createHash("sha256").update(fakePolicy).digest("hex");
+assert.deepEqual(policyProblems(fakePolicy, fakePin), []);
+assert.equal(policyProblems(fakePolicy, "0".repeat(64)).length, 1);
+for (const change of [{ providerHost: "unallowed.invalid" }, { providerPort: 8443 }, { providerMethod: "GET" }, { providerPath: undefined }]) {
+  const changed = JSON.stringify({ ...JSON.parse(fakePolicy), ...change });
+  assert.deepEqual(policyProblems(changed, createHash("sha256").update(changed).digest("hex")).length, 1, JSON.stringify(change));
+}
+
 const root = fileURLToPath(new URL("../", import.meta.url));
 const paths = ["index.html", "fixture.html"];
 for (const directory of ["src", "isolation", "src-tauri/src", "src-tauri/native", "crates"]) {
@@ -230,8 +298,20 @@ for (const directory of ["src", "src-tauri/src", "crates"]) {
     if (vaultSource.test(path)) vaultPaths.push(path);
   }
 }
+const companionPaths = [];
+for (const directory of ["companion/src", "companion/isolation"]) {
+  for (const relative of readdirSync(join(root, directory), { recursive: true })) {
+    const path = `${directory}/${relative.replaceAll("\\", "/")}`;
+    if (companionRuntime.test(path)) companionPaths.push(path);
+  }
+}
 const violations = paths.sort().flatMap((path) => matches(path, readFileSync(join(root, path), "utf8")));
 const imports = vaultPaths.sort().flatMap((path) => companionImports(path, readFileSync(join(root, path), "utf8")));
+const companionViolations = [
+  ...companionPaths.sort().flatMap((path) => companionNetwork(path, readFileSync(join(root, path), "utf8"))),
+  ...policyProblems(readFileSync(join(root, "companion/policy.json"), "utf8"),
+    JSON.parse(readFileSync(join(root, "src-tauri/companion/companion.lock.json"), "utf8")).companion.policySha256),
+];
 if (violations.length) {
   console.error(violations.join("\n"));
   console.error("Remove the entry point (ADR-0001). For a harmless match, narrow the rule with a fake regression case; do not exempt a file or line.");
@@ -245,4 +325,11 @@ if (imports.length) {
   process.exitCode = 1;
 } else {
   console.log(`No Vault source imports companion/ (${vaultPaths.length} files; fake pass/fail self-check passed).`);
+}
+if (companionViolations.length) {
+  console.error(companionViolations.join("\n"));
+  console.error("The Agent Companion makes one fixed request and serves only loopback (ADR-0009). Do not widen it, and do not change the pin to match an unreviewed policy.");
+  process.exitCode = 1;
+} else {
+  console.log(`Agent Companion networking and policy pin passed (${companionPaths.length} files; fake pass/fail self-check passed).`);
 }

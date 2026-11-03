@@ -41,7 +41,7 @@ static ALLOCATOR: wipe_on_free::WipeOnFree = wipe_on_free::WipeOnFree;
 
 use std::path::PathBuf;
 use std::sync::Mutex;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -50,6 +50,19 @@ use tauri::{AppHandle, Emitter, Manager, RunEvent, Url, Window, WindowEvent};
 
 use crate::commands::{CoreState, DIALOG_OPEN, STATUS_EVENT};
 use crate::core::{AppCore, AppStatus, Clock, Config};
+
+/// Whether the window is in front, by the latest focus event. Set on the thread that reports
+/// the event, before the core hears of it on a thread of its own. Those threads reach the core
+/// in no set order, so each then gives the core this latest value (`commands::os_event`).
+static WINDOW_FOCUSED: AtomicBool = AtomicBool::new(true);
+
+fn note_focus(event: OsEvent) {
+    match event {
+        OsEvent::FocusLost => WINDOW_FOCUSED.store(false, Ordering::SeqCst),
+        OsEvent::FocusGained => WINDOW_FOCUSED.store(true, Ordering::SeqCst),
+        _ => {}
+    }
+}
 
 pub fn run() {
     hardening::apply();
@@ -217,8 +230,9 @@ fn setup(app: &AppHandle) {
             event,
             OsEvent::Sleep | OsEvent::ScreenLocked | OsEvent::UserSwitched | OsEvent::Quit
         ) {
-            companion::stop_for_lifecycle(&handle);
+            companion::stop_for_lifecycle(&handle, true);
         }
+        note_focus(event);
         // Never block the main thread on the core (an unlock may be running Argon2id).
         let handle = handle.clone();
         std::thread::spawn(move || commands::os_event(&handle, event));
@@ -286,6 +300,7 @@ fn on_window_event(window: &Window, event: &WindowEvent) {
         WindowEvent::Focused(true) => OsEvent::FocusGained,
         _ => return,
     };
+    note_focus(event);
     let app = window.app_handle().clone();
     // Off the main thread: the core may be busy with Argon2id for a second.
     std::thread::spawn(move || commands::os_event(&app, event));
@@ -327,8 +342,10 @@ fn background(app: &AppHandle) {
         let key = without_countdowns(core.app_status());
         // Whatever locked the Vault (Auto-lock, Lock, a lost focus, an OS event), an Agent
         // Companion grant ends with it (ADR-0009). Only an atomic check unless one may run.
+        // Key Rotation and a copy needing a new password end it too, but the Vault stays open.
         if key.phase != "unlocked" {
-            companion::stop_for_lifecycle(app);
+            let locked = matches!(key.phase, "locked" | "no_vault");
+            companion::stop_for_lifecycle(app, locked);
         }
         if last.as_ref() != Some(&key) {
             let _ = app.emit(STATUS_EVENT, commands::status(&core));

@@ -191,6 +191,15 @@ impl AppCore {
             return Err(not_now());
         }
         self.guard_check()?;
+        // A press from the background is refused before any panel opens.
+        if matches!(
+            action,
+            NativeAction::ShowWalletField { .. }
+                | NativeAction::ShowAndCopyWalletField { .. }
+                | NativeAction::CopyField { .. }
+        ) {
+            self.in_front_check()?;
+        }
         let described = self.native_description(&action);
         // Copying an ordinary Hidden Field opens no panel, so the value being read stays shown.
         let keeps_reveal = matches!(action, NativeAction::CopyField { .. })
@@ -697,10 +706,13 @@ impl AppCore {
             }
             (NativeAction::Unlock { .. }, Prepared::Unlocked { open, recovery_key }) => {
                 self.start_session();
+                // The credential was typed in the app's own window, so that window is in front.
+                self.window_in_front = true;
                 self.set_phase(match recovery_key {
                     Some(recovery_key) => Phase::NeedsNewPassword { open, recovery_key },
                     None => Phase::Unlocked(open),
                 });
+                self.check_newest_seen();
                 self.purge_trash();
                 Ok(NativeResult::Unit)
             }

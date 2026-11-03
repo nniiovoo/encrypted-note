@@ -19,7 +19,8 @@ ROOT=$(pwd)
 HELPER=${1:?"usage: scripts/verify-companion.sh HELPER.xpc [WORK_DIR]"}
 WORK=${2:-$ROOT/target/companion-verify}
 BUILT=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$HELPER/Contents/Info.plist")
-[[ "${BUILT%.companion}" != com.encryptednote.app ]] || { echo "Use a test identifier; never verify against the real app's container. Build one with: scripts/package-companion.sh --identifier com.encryptednote.companiontest" >&2; exit 1; }
+# Container folders are named by identifier and a default Mac disk ignores case, so COM.EncryptedNote.App is the real app too.
+[[ $(tr '[:upper:]' '[:lower:]' <<<"${BUILT%.companion}") != com.encryptednote.app ]] || { echo "Use a test identifier; never verify against the real app's container. Build one with: scripts/package-companion.sh --identifier com.encryptednote.companiontest" >&2; exit 1; }
 # A fresh identifier per run: new, empty, fictional containers every time. (Old test containers
 # stay in ~/Library/Containers; remove them by hand if wanted.)
 APP_ID="${BUILT%.companion}.v$(date +%s)"

@@ -63,7 +63,7 @@ A separate credential the owner creates at a service only for AI agent work, wit
 _Avoid_: sharing an owner key, agent access to the Vault
 
 **Agent Companion**:
-The optional helper inside the app, with its own macOS sandbox, that lets one approved agent use one fixed OpenAI text operation with an **Agent Key**. It can't open the **Vault**, is off unless the owner starts it, and stops at the end of its one-hour grant, on Stop, whenever the app is **Locked**, on sleep and when the app quits ([ADR-0009](docs/adr/0009-optional-agent-companion-helper.md)).
+The optional helper inside the app, with its own macOS sandbox, that lets the agent tools in one separate Mac account use one fixed OpenAI text operation with an **Agent Key**. It can't open the **Vault**, is off unless the owner starts it, and stops at the end of its one-hour grant, on Stop, whenever the app is **Locked**, on sleep and when the app quits ([ADR-0009](docs/adr/0009-optional-agent-companion-helper.md)).
 _Avoid_: agent bridge (that's the agent account's side), Vault connector, plugin
 
 ### Screen privacy
@@ -128,7 +128,7 @@ _Avoid_: pinned, bookmarked, starred item
 ## Relationships
 
 - The owner has one **Vault**; it moves between computers only when the owner copies the file by hand.
-- AI agents have no access to the **Vault**, its **Notes**, their metadata, **Backups**, **Safety Copies**, or the **Emergency Reader**. The **Master Password**, **Recovery Key** and **Wallet Kinds** never take part in agent work.
+- The app gives AI agents no interface to the **Vault**, its **Notes**, their metadata, **Backups**, **Safety Copies** or the **Emergency Reader**, and agents are told never to use them. That limits the app, not the computer: what keeps an agent running in the owner's own Mac account away from these files is the owner's setup. The **Master Password**, **Recovery Key** and **Wallet Kinds** never take part in agent work.
 - The **Agent Companion** is the only **Agent Key** integration inside the app; it runs apart from the **Vault** in its own sandbox and never receives Vault content. Any other **Agent Key** integration is separate from this app. Hiding the key still lets an agent perform every operation its provider scope permits, within its enforced limits; only the owner can independently approve scope or limit changes ([ADR-0007](docs/adr/0007-agents-use-separate-restricted-keys.md)).
 - Results from an external agent's allowed service actions may leave this computer, including for a cloud model provider; no Vault content or metadata may enter that route.
 - Moving a **Vault** to the other computer means opening a **Backup** there. There is no separate "export" or "sync" concept.
@@ -146,7 +146,7 @@ _Avoid_: pinned, bookmarked, starred item
 - The **Vault** file has only **Master Password** and **Recovery Key** credential slots. Enabled **Quick Unlock** opens this computer's current Vault with a separately protected **Vault Key**, without adding a credential slot or releasing the **Wallet Key**.
 - A **Vault** has exactly one **Recovery Key**, shown to the owner once, at setup, to write onto their **Recovery Kit**.
 - **Safety Copies** stay on this computer; a **Backup** is the owner's copy somewhere else. Both are complete **Vaults**.
-- The **Emergency Reader** never writes **Notes** to disk; it only shows them.
+- The **Emergency Reader** never writes **Notes** to disk; it only shows them, and only in a terminal unless the owner adds `--allow-non-terminal`.
 - A **Vault** that uses any of the newer optional parts of a **Note** (the address or derivation path of a **Seed Phrase**; the purpose of a **Login**; the key ID, secret, purpose, where it is managed, expiry date or variable name of an **API Key**), even on a **Note** in **Trash**, opens only in a current app and a current **Emergency Reader**. Older ones refuse the whole file, and some of them call it damaged, so the app on the other computer and any saved **Emergency Reader** must be updated first, before such a **Vault** is moved there.
 - A **Note** in **Trash** is still inside the **Vault** (still encrypted); "Delete forever" removes it from this copy only; older copies still contain it.
 - Removing a **Wallet Kind** needs the **Master Password**, like every other change to one: moving it to **Trash**, "Delete forever", and emptying a **Trash** that holds one.

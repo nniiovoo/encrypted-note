@@ -122,6 +122,9 @@ pub struct CompanionView {
     pub error: Option<&'static str>,
     /// Unix seconds; only while running or just expired, and only within one grant.
     pub expires_at: Option<i64>,
+    /// Off because the Vault locked (or the computer slept, locked its screen or switched
+    /// user) while a broker ran. Known here, from the stop this app sent; never from the helper.
+    pub ended_by_lock: bool,
     pub local: Readiness,
     /// The private ChatGPT connection is set up and checked outside this app.
     pub operation: OperationView,
@@ -190,6 +193,8 @@ struct Inner {
     last: Option<Raw>,
     /// An error noticed here rather than reported by the helper.
     noticed: Option<&'static str>,
+    /// The last stop was a lock's lifecycle stop of a broker that may have been running.
+    ended_by_lock: bool,
 }
 
 pub struct Companion {
@@ -213,6 +218,7 @@ impl Companion {
                 owner_started: false,
                 last: None,
                 noticed: None,
+                ended_by_lock: false,
             }),
             active: AtomicBool::new(false),
         }
@@ -238,10 +244,16 @@ impl Companion {
         self.run(Op::Install, Some((plan, credential)), INSTALL_TIMEOUT_MS)
     }
 
-    /// Lifecycle stop (lock, sleep, screen lock, user switch, exit): only when a broker may run.
-    pub fn stop_if_active(&self) {
+    /// Lifecycle stop (lock, sleep, screen lock, user switch, exit, or new keys for the open
+    /// Vault): only when a broker may run. After a `locked` one, Off says why, until the owner
+    /// next starts, stops or sets it up.
+    pub fn stop_if_active(&self, locked: bool) {
         if self.active.load(Ordering::SeqCst) {
             self.stop();
+            self.inner
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .ended_by_lock = locked;
         }
     }
 
@@ -261,12 +273,14 @@ impl Companion {
             Op::Start => {
                 inner.owner_started = true;
                 inner.noticed = None;
+                inner.ended_by_lock = false;
                 self.active.store(true, Ordering::SeqCst);
             }
             // An owner action acknowledges an earlier unexpected stop; status refreshes don't.
             Op::Stop | Op::Install => {
                 inner.owner_started = false;
                 inner.noticed = None;
+                inner.ended_by_lock = false;
             }
             Op::Status => {}
         }
@@ -287,6 +301,7 @@ impl Companion {
             },
             error: None,
             expires_at: None,
+            ended_by_lock: false,
             local: Readiness::default(),
             operation: OPERATION,
         };
@@ -346,6 +361,7 @@ impl Companion {
         if view.error == Some("helper_restarted") {
             view.state = "error";
         }
+        view.ended_by_lock = inner.ended_by_lock && view.state == "stopped" && view.error.is_none();
         if matches!(state, "running" | "expired") {
             view.expires_at = self.shown_end(raw.expires);
         }
@@ -361,8 +377,9 @@ impl Companion {
 }
 
 /// Stops a broker that may be running, off the calling thread (lock/sleep events arrive on the
-/// main thread or the 500 ms status loop and must not wait for the helper).
-pub fn stop_for_lifecycle<R: Runtime>(app: &AppHandle<R>) {
+/// main thread or the 500 ms status loop and must not wait for the helper). `locked`: the Vault
+/// locked, or the computer slept, locked its screen or switched user.
+pub fn stop_for_lifecycle<R: Runtime>(app: &AppHandle<R>, locked: bool) {
     let Some(companion) = app.try_state::<Companion>() else {
         return;
     };
@@ -372,7 +389,7 @@ pub fn stop_for_lifecycle<R: Runtime>(app: &AppHandle<R>) {
     let app = app.clone();
     std::thread::spawn(move || {
         if let Some(companion) = app.try_state::<Companion>() {
-            companion.stop_if_active();
+            companion.stop_if_active(locked);
         }
     });
 }
@@ -381,7 +398,7 @@ pub fn stop_for_lifecycle<R: Runtime>(app: &AppHandle<R>) {
 /// broker by itself when this process's connection goes away.
 pub fn stop_on_exit<R: Runtime>(app: &AppHandle<R>) {
     if let Some(companion) = app.try_state::<Companion>() {
-        companion.stop_if_active();
+        companion.stop_if_active(true);
     }
 }
 
@@ -556,13 +573,13 @@ mod tests {
         assert_eq!(running.state, "running");
         assert_eq!(running.expires_at, Some(NOW + 3600));
         assert!(companion.active.load(Ordering::SeqCst));
-        companion.stop_if_active();
+        companion.stop_if_active(true);
         assert!(!companion.active.load(Ordering::SeqCst));
         assert_eq!(*script.calls.lock().unwrap(), vec![Op::Start, Op::Stop]);
         // Stopped: later polls and locks make no call, and Start stays refused.
         assert!(!companion.status().helper_bundled);
         assert!(!companion.active.load(Ordering::SeqCst));
-        companion.stop_if_active();
+        companion.stop_if_active(true);
         assert!(!companion.start().helper_bundled);
         assert_eq!(*script.calls.lock().unwrap(), vec![Op::Start, Op::Stop]);
     }
@@ -595,7 +612,7 @@ mod tests {
         assert_eq!(*script.calls.lock().unwrap(), vec![Op::Start]);
         // The broker's state is still unknown, so the next lifecycle stop goes out.
         assert!(companion.active.load(Ordering::SeqCst));
-        companion.stop_if_active();
+        companion.stop_if_active(true);
         assert!(!companion.active.load(Ordering::SeqCst));
         assert_eq!(*script.calls.lock().unwrap(), vec![Op::Start, Op::Stop]);
     }
@@ -646,9 +663,9 @@ mod tests {
         let (companion, script) = companion(vec![raw(3, 0, NOW + 3600, 0), raw(1, 0, 0, 0)]);
         assert_eq!(companion.start().state, "running");
         assert!(companion.active.load(Ordering::SeqCst));
-        companion.stop_if_active();
+        companion.stop_if_active(true);
         assert!(!companion.active.load(Ordering::SeqCst));
-        companion.stop_if_active(); // nothing running: no call
+        companion.stop_if_active(true); // nothing running: no call
         assert_eq!(*script.calls.lock().unwrap(), vec![Op::Start, Op::Stop]);
         let (companion, _) = self::companion(vec![raw(6, 0, 0, 5)]);
         let refused = companion.start();
@@ -657,6 +674,47 @@ mod tests {
             ("error", Some("agent_unverified"))
         );
         assert!(!companion.active.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn a_grant_ended_by_a_lock_says_so_until_the_owner_acts() {
+        let (companion, script) = companion(vec![
+            raw(3, 63, NOW + 3600, 0),
+            raw(1, 63, 0, 0),
+            raw(1, 63, 0, 0),
+            raw(1, 63, 0, 0),
+        ]);
+        assert!(!companion.start().ended_by_lock);
+        companion.stop_if_active(true);
+        let after = companion.status();
+        assert_eq!((after.state, after.error), ("stopped", None));
+        assert!(after.ended_by_lock);
+        // The owner's own Stop is a plain Off again. Nothing new went to the helper meanwhile.
+        assert!(!companion.stop().ended_by_lock);
+        assert_eq!(
+            *script.calls.lock().unwrap(),
+            vec![Op::Start, Op::Stop, Op::Status, Op::Stop]
+        );
+        // Nothing running: a lock makes no call and changes nothing.
+        let (companion, script) = self::companion(vec![raw(1, 63, 0, 0)]);
+        companion.stop_if_active(true);
+        assert!(!companion.status().ended_by_lock);
+        assert_eq!(*script.calls.lock().unwrap(), vec![Op::Status]);
+        // Key Rotation ends the grant too, with a plain Off: the Vault never locked.
+        let (companion, script) = self::companion(vec![
+            raw(3, 63, NOW + 3600, 0),
+            raw(1, 63, 0, 0),
+            raw(1, 63, 0, 0),
+        ]);
+        companion.start();
+        companion.stop_if_active(false);
+        let after = companion.status();
+        assert_eq!((after.state, after.error), ("stopped", None));
+        assert!(!after.ended_by_lock);
+        assert_eq!(
+            *script.calls.lock().unwrap(),
+            vec![Op::Start, Op::Stop, Op::Status]
+        );
     }
 
     #[test]
@@ -703,7 +761,7 @@ mod tests {
         assert_eq!((expired.state, expired.error), ("expired", None));
         assert!(expired.local.ready);
         assert!(!companion.active.load(Ordering::SeqCst));
-        companion.stop_if_active(); // nothing running: no call
+        companion.stop_if_active(true); // nothing running: no call
         assert_eq!(*script.calls.lock().unwrap(), vec![Op::Start, Op::Status]);
     }
 
@@ -732,6 +790,7 @@ mod tests {
         assert_eq!(
             keys,
             [
+                "ended_by_lock",
                 "error",
                 "expires_at",
                 "helper_bundled",

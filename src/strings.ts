@@ -22,7 +22,7 @@ const TOUCH_ID_OFF = "If you used Touch ID, it is now off. You can turn it on ag
 const NOT_SHARING = "I'm not sharing right now";
 const ROTATE_CHOICE = "Someone may know it, or I lost my paper";
 const HELPER_KEEPS_KEY =
-  "helper keeps the Agent Key in a plain-text file only your macOS account can read: credential.env, in the helper's own folder. Other software running in your account may be able to read it too. That is not encrypted Vault storage. While the helper is on, the key is also in Node.js memory, which can't be reliably erased. Stop doesn't delete the file or cancel the key. Use a key with a spending cap and a short expiry, and revoke it at OpenAI if in doubt.";
+  "helper keeps the Agent Key in a plain-text file that other non-admin Mac users can't open: credential.env, in the helper's own folder. Software running in your own account may be able to read it. That is not encrypted Vault storage. While the helper is on, the key is also in Node.js memory, which can't be reliably erased. Stop doesn't delete the file or cancel the key. Use a key with a spending cap and a short expiry, and revoke it at OpenAI if in doubt.";
 type CompanionPart = "runtime" | "plan" | "credential" | "handoff" | "agent" | "code";
 const HELPER_STOPPED_UNEXPECTEDLY =
   "The helper was stopped because something unexpected happened. It won't restart by itself. You can press Start once more. If it happens again, don't keep trying: install the app again from a copy you trust, and revoke the Agent Key at OpenAI.";
@@ -77,6 +77,8 @@ export const strings = {
   enableTouchId: "Turn on Touch ID",
   disableTouchId: "Turn off Touch ID",
   quickUnlockCleanupFailed: "Touch ID is off, but the app couldn't finish removing its saved Touch ID file from this computer. Click Try again.",
+  quickUnlockFileChanged:
+    "Touch ID was turned off, because the Vault file on this computer changed while the app was closed: it was replaced by another Vault, or by a copy from before a change of Master Password or Recovery Key. Unlock with your Master Password. If you didn't replace it yourself, check your Notes before you turn Touch ID on again in Settings.",
   retryTouchIdCleanup: "Try again",
   title: "Title",
 
@@ -95,7 +97,7 @@ export const strings = {
       "Hidden until you choose",
       "Passwords, keys and Seed Phrases stay as dots until you click Show. Titles stay visible. The app also asks your computer to keep this window out of screenshots and screen shares. This is best-effort, not a guarantee. It is weaker on Mac: some screen-sharing and recording tools can still see the window.",
     ],
-    ["What it can't do", "It can't stop malware on this computer or someone watching your screen. Settings lists the main limits."],
+    ["What it can't do", "It can't stop malware or AI tools running in your account on this computer, or someone watching your screen. Settings lists the main limits."],
   ] as const,
   welcomeNext: "Next you choose a Master Password, then write down your Recovery Key.",
   createMyVault: "Create my Vault",
@@ -212,6 +214,8 @@ export const strings = {
   copyLine: (line: number, field: string) => `Copy line ${line} of ${field}`,
   // An API Key with a variable name: the name is a visible part of the Note, the key is not shown.
   copyAsEnv: (name: string) => `Copy as ${name}=value`,
+  // Under that button. The guide section's title, as it is in docs/guide.md.
+  copyAsEnvNotForAgents: "This is your own key. For an AI agent, make a separate key at the service instead: see When an agent needs a key in docs/guide.md.",
   edit: "Edit",
   duplicate: "Duplicate",
   duplicateTitle: (title: string) => `${title} copy`,
@@ -439,13 +443,18 @@ export const strings = {
   cannotCompareWarning:
     "This computer already has a Vault, and encrypted-note couldn't compare it with this copy because it is locked. If this copy is older, opening it replaces newer changes. Not sure? Cancel, unlock first, then open it from Settings.",
   backupEjectHint: "If this is a USB stick or other removable drive, eject it before you unplug it.",
+  vaultMissingTitle: "Your Vault's files are missing",
+  vaultMissingText:
+    "This app's settings show that this computer had a Vault, but its Vault file isn't in its folder now. If you have a Backup, open it to get your Notes back. A new Vault starts empty, and your Recovery Key can't bring Notes back without a Vault file.",
   vaultWasHereTitle: "A Vault was on this computer before",
   vaultWasHereText:
     "Its Vault file is missing, but Safety Copies of it are still here. A Safety Copy is an earlier version of your Vault that the app keeps by itself. You can restore one with the Master Password or Recovery Key it had when it was saved.",
-  keyRotationCompleted: `Your Master Password and Recovery Key are changed. Copies made before now still open with the old ones: Backups, the Safety Copies on this computer, and full-computer backups (such as Time Machine on Mac). ${TOUCH_ID_OFF}`,
+  keyRotationCompleted: `Your Master Password and Recovery Key are changed. Copies made before now still open with the old ones: Backups, the Safety Copies on this computer, and full-computer backups (such as Time Machine on Mac). The Safety Copies are in the safety folder inside your Vault folder: Settings → Where your keys are stored shows where. Backups are wherever you saved them, named encrypted-note-backup-YYYY-MM-DD-HHMM.enote unless you renamed them. ${TOUCH_ID_OFF}`,
   keyRotationCancelled: `Your password was not changed, because the Recovery Key step didn't finish. Your old Master Password and old Recovery Key still work. Keep your old paper and throw away only the new key you just wrote down. If someone may know your old password, or you lost your paper, do the change again now. ${TOUCH_ID_OFF}`,
   settingsUnreadable:
     "Your lock settings couldn't be read, so the strictest ones are in use: lock after 1 minute, and when you switch apps. Choose them again in Settings.",
+  olderCopyOpened:
+    "This Vault is older than one this app saved or opened on this computer before. Notes you changed or deleted since then may be back, and newer ones may be missing. If you restored it yourself, for example from Time Machine, you can keep working. If you didn't, look in Settings → Safety Copies, or open your newest Backup.",
   keptAsSafetyCopy: "This computer's current Vault will be kept as a Safety Copy for at least 30 days.",
   // Beside keptAsSafetyCopy. Installing a copy writes its credential slots too (ADR-0005).
   restoreCredentialsWarning:
@@ -503,13 +512,14 @@ export const strings = {
     "Someone pointing a phone camera at your screen.",
     "A hacked operating system.",
     "Being forced to unlock the app.",
+    "AI tools running in your own account on this computer. They work as you, so they may copy your Vault files and Backups, read what you copy and, if you allow it, see or control your screen. See AI tools on this computer in docs/guide.md.",
     "Old copies: Backups, Safety Copies and full-computer backups (such as Time Machine on Mac) keep what they held, even after you delete or change something.",
   ],
   limitsAdvice: [
     "Keep your operating system updated: many protections live there, not in this app.",
     "Review which apps may record your screen (Mac: System Settings → Privacy & Security → Screen & System Audio Recording).",
     "The Vault's own code has no network code, so the app has no built-in way to send your Vault anywhere. The app is also built with code from other projects. If someone secretly changed that code, this might not hold, and your operating system doesn't block network use. The optional Agent Companion is a separate helper that can't open the Vault.",
-    "This is a personal v1 project, not independently audited. Keep a paper or metal copy of any Seed Phrase that holds real funds.",
+    "This is a personal v1 project, not independently audited. Keep a paper or metal copy of any Seed Phrase or Private Key that holds real funds.",
   ],
 
   // ---------- Settings: Where your keys are stored ----------
@@ -553,7 +563,7 @@ export const strings = {
     },
     agentOn: {
       label: "Agent Key",
-      text: "In credential.env, in the Agent Companion helper's own folder, not in your Vault. It is plain text. Only your macOS account can open it, but other programs running under your account might read it. While the helper is on, the key is also in the helper's memory. Stop doesn't delete the file. When you are done, revoke the key at OpenAI, then delete this file and the key file you chose during setup. While the Companion is on, a short-lived agent token is also kept in /Users/Shared/encrypted-note-companion. It is removed when the Companion stops normally.",
+      text: "In credential.env, in the Agent Companion helper's own folder, not in your Vault. It is plain text. Other non-admin Mac users can't open it, but programs running in your account might read it. While the helper is on, the key is also in the helper's memory. Stop doesn't delete the file. When you are done, revoke the key at OpenAI, then delete this file and the key file you chose during setup. While the Companion is on, a short-lived agent token is also kept in /Users/Shared/encrypted-note-companion. It is removed when the Companion stops normally.",
     },
     // The flag can be false while the file is there, so never say that no file exists.
     agentUnknown: {
@@ -566,6 +576,10 @@ export const strings = {
     // with --identifier has a different folder name, which agentPathNote says.
     agentPath: "~/Library/Containers/com.encryptednote.app.companion/Data/Library/Application Support/encrypted-note-companion/credential.env",
     agentPathNote: "You don't need to open this file. A text editor can keep its own copy. If you use a test copy of the app, one name in this path is different.",
+    // The page OpenAI's documentation names for API keys (docs/agent-companion.md). Shown as text
+    // to copy, like the paths above: the WebView never opens an address. The address ends the line.
+    agentRevoke: "To revoke the key, use OpenAI's API keys page and look under the Agent Key's own project. Click the address to select it, then copy it with Cmd+C:",
+    agentRevokePage: "https://platform.openai.com/api-keys",
     folderTitle: "Your Vault folder",
     // Before the path where it is shown outside Settings. The path ends the line: a full stop
     // after it could be read as part of it.
@@ -589,7 +603,7 @@ export const strings = {
     },
     settingsFile: (mac: boolean) => ({
       label: "Settings",
-      text: `In settings.json, in your Vault folder. It holds your choices and a few facts: Auto-lock rules, Backup and Trash dates, the count of wrong passwords, ${mac ? "whether you have seen the Seed Phrase notice, and a check value for Touch ID" : "and whether you have seen the Seed Phrase notice"}. No Notes, titles, keys or passwords.`,
+      text: `In settings.json, in your Vault folder. It holds your choices and a few facts: Auto-lock rules, Backup and Trash dates, the count of wrong passwords, whether you have seen the Seed Phrase notice, your Vault's id and a count of its changes (to warn you if an older copy opens)${mac ? ", and a check value for Touch ID" : ""}. No Notes, titles, keys or passwords. Other programs could change it.`,
     }),
     copied: (n: number) => ({
       label: "Copied values",
@@ -613,9 +627,12 @@ export const strings = {
   // ---------- Agent Companion (ADR-0009) ----------
   companionTitle: "Agent Companion",
   companionIntro:
-    "Optional, and off unless you start it. It lets one AI agent you approved use one OpenAI text tool, with a separate Agent Key you made only for this. It runs apart from your Vault and can't open it. Nothing from your Vault ever reaches it.",
+    "Optional, and off unless you start it. It lets any program in the agent's Mac user use one OpenAI text tool, with a separate Agent Key you made only for this. It runs apart from your Vault and can't open it. The app never passes anything from your Vault to it.",
+  // Take this out once docs/agent-companion.md says a full run is possible.
+  companionCantFinish:
+    "You can't finish this setup yet. How you log in to the agent's Mac user is still undecided, and nobody has done a full run. See docs/agent-companion.md.",
   companionUnsupported: "Only available on Mac for now.",
-  companionNotBundled: "This build of the app doesn't include the Agent Companion helper. Build it with scripts/package-companion.sh --app.",
+  companionNotBundled: "This build of the app doesn't include the Agent Companion helper. Build it with scripts/package-companion.sh --app --owner-build.",
   companionSummary: (state: string) => `Agent Companion (optional, for AI agents) · ${state}`,
   companionChecking: "Checking the Agent Companion…",
   companionStates: {
@@ -628,31 +645,33 @@ export const strings = {
     expired: "Off: the one hour ended",
     error: "Off: needs attention",
   } satisfies Record<string, string>,
+  // Not a helper state: said for "stopped" when the app stopped it because the Vault locked.
+  companionEndedByLock: "Off: ended because the Vault locked",
   companionRunningUntil: (time: string) => `On until ${time} at the latest. It stops sooner if the Vault locks, the computer sleeps or the app quits.`,
   companionLocalTitle: "Ready on this Mac",
   companionLocal: {
     runtime: "Helper program found, and its rules match this app",
     plan: "A correct plan file is added (Set up…)",
-    credential: "A correct Agent Key file is added (Set up…)",
+    credential: "An Agent Key file is in place, not yet tried (Set up…)",
     handoff: "Private agent folder /Users/Shared/encrypted-note-companion is ready",
     agent: "The agent's Mac user is Standard, not an admin",
     code: "The helper is protected from the agent's Mac user",
   } satisfies Record<CompanionPart, string>,
   // Under an item marked ✗. Fixed text: never an account name or path from the plan file.
   companionLocalFix: {
-    runtime: "The helper program doesn't match this app. Rebuild the app with scripts/package-companion.sh --app.",
+    runtime: "The helper program doesn't match this app. Rebuild the app with scripts/package-companion.sh --app --owner-build.",
     plan: "Use Set up… to choose your filled-in plan file, with ownerUid from id -u. The items below can't be checked until this one passes.",
     credential: "Use Set up… and choose the key file you made with the command in docs/agent-companion.md.",
     handoff: "See step 3 under Before you start in docs/agent-companion.md: your own folder, mode 700, and one allow entry for the plan's agentShortName.",
     agent: "The plan's agentShortName must be an existing Mac user that is Standard, not an admin.",
     code: "Checked after the agent's Mac user passes. Only you or an admin may be able to change the app's folders: move the app to /Applications.",
   } satisfies Record<CompanionPart, string>,
-  companionReady: "Ready to start",
+  companionReady: "Ready to start. The app doesn't try the key or check its limits at OpenAI: those are yours to set.",
   companionNotReady: "Not ready: finish the items marked ✗. See Setup steps below.",
   companionChatgptTitle: "Private ChatGPT connection",
   companionChatgpt:
     "Not checked by this app. It is set up from the agent account and counts as working only after a test call you make yourself. See docs/agent-companion.md in the project folder.",
-  companionOperationTitle: "What an approved agent can do",
+  companionOperationTitle: "What any program in the agent's Mac user can do",
   companionOperation: (o: { name: string; model: string; destination: string; max_input_bytes: number; max_output_tokens: number; per_minute: number; per_hour: number; grant_minutes: number }) => [
     `One tool: ${o.name}, with the fixed model ${o.model}. No files, browsing, other tools or other models.`,
     `Sends the text an agent gives it (at most ${o.max_input_bytes.toLocaleString("en-US")} bytes) to ${o.destination}, and returns at most ${o.max_output_tokens} tokens of text.`,
@@ -664,17 +683,19 @@ export const strings = {
   companionCustodyIfSetUp: `If you set this up, the ${HELPER_KEEPS_KEY}`,
   companionSetup: "Set up…",
   companionSetupDone:
-    "The helper copied the files you chose. Press Start to test them. Once Start has worked, delete your own Agent Key file and empty the Trash. The helper keeps its own copy. If you run Set up… again, you will need a key file again. Deleting it doesn't cancel the key; only OpenAI can do that.",
+    "The helper copied the files you chose. Start checks the files, not the key: the key is first tried on an agent's first call. Once that call has returned text, delete your own Agent Key file and empty the Trash. The helper keeps its own copy. If you run Set up… again, you will need a key file again. Deleting it doesn't cancel the key; only OpenAI can do that.",
   companionSetupTitle: "Setup steps",
   // Numbered by the list that draws them.
   companionSetupSteps: [
     "Make a new Standard user on this Mac for the agent (System Settings > Users & Groups). Run the agent only in that user. Never put your own passwords, Apple Account or keys there.",
-    "Make the private agent folder /Users/Shared/encrypted-note-companion. Use the exact Terminal commands in docs/agent-companion.md, because they keep other users out. Never put your key file in this folder.",
-    "Start with a fake key, not a real one. In your own Mac user, make the fake key file and the plan file with the Terminal commands in docs/agent-companion.md. Then click Set up… and choose the plan first, then the key file.",
+    "In your own Mac user, run scripts/companion-setup.sh as docs/agent-companion.md shows. It makes the private agent folder /Users/Shared/encrypted-note-companion so that other users are kept out, a fake key file and the plan. Never put your key file in that folder.",
+    "Start with a fake key, not a real one. Click Set up… and choose the plan first, then the key file.",
     "Finish the checks in docs/agent-companion.md with the fake key. Only then make a new key at OpenAI, following The real Agent Key in that guide: one permission, one model, hosted tools off, a hard spending limit and a short expiry. Never reuse a key from your Vault.",
-    "Once Start has worked with the real key, delete your own key file and empty the Trash. The helper keeps its own copy.",
+    "Once an agent's first call with the real key has returned text, delete your own key file and empty the Trash. The helper keeps its own copy.",
   ],
   companionStart: "Start for up to one hour",
+  // Beside Start while it is off (ADR-0009: any lock ends the grant).
+  companionStartLocks: "The hour ends early if the Vault locks, so keeping the tool running means keeping your Vault Unlocked.",
   companionStop: "Stop",
   companionErrors: {
     plan_missing: "No plan file is added. Use Set up… to choose it.",

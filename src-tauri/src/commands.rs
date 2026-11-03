@@ -87,7 +87,13 @@ pub fn os_event(app: &AppHandle, event: OsEvent) {
         crate::native_coordinator::interrupt(app);
         crate::quick_runtime::cancel(app);
     }
-    with_core(app, |core| core.os_event(event));
+    with_core(app, |core| {
+        core.os_event(event);
+        // A focus event that waited for the core may be older than one applied before it.
+        if matches!(event, OsEvent::FocusLost | OsEvent::FocusGained) {
+            core.set_window_in_front(crate::WINDOW_FOCUSED.load(Ordering::SeqCst));
+        }
+    });
 }
 
 // ---------- status & events ----------
@@ -610,10 +616,10 @@ fn companion_start_text(idle_minutes: u32, count_activity_anywhere: bool) -> Str
         "window"
     };
     format!(
-        "For up to one hour, the approved agent can send text to OpenAI through the helper. That \
-         can cost money, and what it sends leaves this computer.\n\n\
+        "For up to one hour, any program in the agent's Mac user can send text to OpenAI \
+         through the helper. That can cost money, and what it sends leaves this computer.\n\n\
          The hour ends sooner if the Vault locks: Auto-lock is set to {minutes} without using this \
-         {place}.\n\n\
+         {place}. So keeping the tool running means keeping your Vault Unlocked.\n\n\
          Stop ends new requests at once. It can't undo a request already sent or billed, and it \
          doesn't revoke the Agent Key at OpenAI."
     )
@@ -768,6 +774,8 @@ mod tests {
         assert!(window.contains("can cost money"));
         assert!(window.contains("Auto-lock is set to 5 minutes without using this window."));
         assert!(window.contains("doesn't revoke the Agent Key"));
+        assert!(window.contains("any program in the agent's Mac user"));
+        assert!(window.contains("keeping your Vault Unlocked"));
         let computer = companion_start_text(1, true);
         assert!(computer.contains("Auto-lock is set to 1 minute without using this computer."));
     }

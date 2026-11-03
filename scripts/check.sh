@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # One command that must pass before any slice is done:
-#   Source hygiene + helper typecheck and companion tests (Mac) + Rust formatting/tests/clippy +
-#   cargo-deny + production WebView build.
+#   Source hygiene + pinned entitlements + helper typecheck and companion tests (Mac) +
+#   Rust formatting/tests/clippy + secret scan + cargo-deny + production WebView build.
+# It takes several minutes (about 3 on the macOS CI runner, 5 on Windows), so agents should run it
+# in the background.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -19,6 +21,24 @@ fi
 
 echo "==> networking source hygiene"
 node scripts/check-network-source.mjs
+
+# What the app and the helper may do is set by these files, so a change needs the owner's review:
+# update the pin in the same pull request and say why. Hashed with Node so this works in Windows CI.
+# check-network-source.mjs checks companion/policy.json against its pin in companion.lock.json.
+echo "==> pinned entitlements"
+node -e '
+  const { createHash } = require("node:crypto");
+  const { readFileSync } = require("node:fs");
+  const sha = (file) => createHash("sha256").update(readFileSync(file)).digest("hex");
+  const pins = readFileSync("scripts/pinned-hashes.txt", "utf8").split(/\r?\n/)
+    .filter((line) => line.trim() && !line.startsWith("#")).map((line) => line.trim().split(/\s+/));
+  const changed = pins.filter(([hash, file]) => sha(file) !== hash).map(([, file]) => file);
+  if (changed.length) {
+    console.error(`${changed.join(", ")} differs from its pinned SHA-256 in scripts/pinned-hashes.txt.`);
+    console.error("Only the owner approves this change. On Windows, check out with core.autocrlf false.");
+    process.exit(1);
+  }
+'
 
 # build.rs compiles only the client; service.swift is otherwise built by package-companion.sh alone.
 if [[ $(uname -s) == Darwin ]]; then
@@ -39,9 +59,15 @@ cargo fmt --all -- --check
 echo "==> cargo test"
 cargo test --locked --workspace --quiet
 
+# After cargo test, which puts the bip39 crate's word list in Cargo's cache.
+echo "==> secret scan"
+node scripts/scan-secrets.mjs
+
 echo "==> cargo clippy"
 cargo clippy --locked --workspace --all-targets --quiet -- -D warnings
 
+# This step needs the network: cargo deny updates its advisory database first. (npm audit runs only
+# in CI, .github/workflows/check.yml.)
 echo "==> cargo deny"
 cargo deny --locked --workspace check advisories bans licenses sources
 
