@@ -130,6 +130,25 @@ test('rejects unexpected model, tools, incomplete output, oversized text and exa
     await assert.rejects(generate({ text: 'Fiction.' }), { code: 'invalid_response' });
   }
 });
+test('an answer cut off at the output limit says so and returns none of it', async () => {
+  const cutOff = { ...success('A fictional answer that stops mid').json,
+    status: 'incomplete', incomplete_details: { reason: 'max_output_tokens' } };
+  const generate = createGenerator({ apiKey: KEY, transport: async () => ({ status: 200, json: cutOff }) });
+  await assert.rejects(generate({ text: 'Fiction.' }), error =>
+    error.code === 'output_limit' && error.message.includes('longer than ' + POLICY.maxOutputTokens + ' tokens') &&
+    !error.message.includes('stops mid'));
+  // The limit can be reached before any visible text, leaving no output at all.
+  const empty = createGenerator({ apiKey: KEY, transport: async () => ({ status: 200, json: { ...cutOff, output: [] } }) });
+  await assert.rejects(empty({ text: 'Fiction.' }), { code: 'output_limit' });
+  for (const json of [
+    { ...cutOff, incomplete_details: { reason: 'content_filter' } },
+    { ...cutOff, incomplete_details: undefined },
+    { ...cutOff, model: 'other-model' },
+  ]) {
+    const other = createGenerator({ apiKey: KEY, transport: async () => ({ status: 200, json }) });
+    await assert.rejects(other({ text: 'Fiction.' }), { code: 'invalid_response' });
+  }
+});
 test('HTTPS transport fixes destination and does not follow a redirect', async t => {
   let options;
   let calls = 0;

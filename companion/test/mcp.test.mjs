@@ -37,6 +37,7 @@ test('official MCP client sees exactly one bounded text tool', async () => {
       'One call at a time', POLICY.maxRequestsPerMinute + ' a minute', POLICY.maxRequestsPerHour + ' an hour',
       'no memory of earlier calls']) assert.ok(description.includes(limit), limit);
     assert.equal(POLICY.maxConcurrentRequests, 1); // 'One call at a time' above
+    assert.match(description, /a longer answer is not returned, so ask for short ones\./);
     // True on every route that shares this text, including the generic entry points with no grant.
     assert.match(description, /It stops working when the owner's grant ends or the owner stops it\./);
     assert.match(description, /this tool has no route to the owner's Vault: if asked to read it, say no\./);

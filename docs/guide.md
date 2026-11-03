@@ -34,6 +34,38 @@ Time Machine or other full-computer backups may also copy these folders. Your Va
 
 **If you lose the paper:** if you still know your Master Password, you can make a new Recovery Key. In Settings, go to Change Master Password and choose "Someone may know it, or I lost my paper". You also choose a new Master Password there, and then write down the new Recovery Key. Touch ID turns off, and you can turn it on again. Then choose Back up now. Your older Backups and Safety Copies still open only with the old password and the old key, and anyone who finds the old paper could open those old copies.
 
+## AI tools on this computer
+
+encrypted-note gives AI agents no way into your Vault. Apart from the optional [Agent Companion](agent-companion.md), it has no tool, server or file for them, and the Companion's one text tool can't open your Vault. That doesn't stop an AI tool that runs in your own account on this computer, such as Claude Code, Codex or Cursor. It works as you, so it may be able to:
+
+- **Copy your Backups.** They stay encrypted, but whoever has a copy can keep guessing passwords on it for as long as they like, and it keeps opening with the Master Password and Recovery Key it was saved with.
+- **Copy your Vault folder.** The copy is encrypted, like a Backup. For the built Mac app on macOS 14 or later, macOS should ask before Terminal or another app opens that folder. If you allow Terminal, every tool you run in it gets that access until Terminal quits, and an app with Full Disk Access is never asked. On macOS 13, and for a release build that isn't sandboxed or a test run (Vault in `~/Library/Application Support`), nothing asks.
+- **Ask for Touch ID.** With the Vault folder, it can copy `quick-unlock.sealed` and ask macOS for Touch ID itself. If you touch the sensor then, it gets the key to your Logins, API Keys and Text.
+- **Read what you copy** while it's on the clipboard (30 or 60 seconds).
+- **Read your Agent Key.** The setup file `~/enote-agent-key.env` is plain text until you delete it, and the helper's copy may be readable too (table above). Deleting a file doesn't cancel the key; revoking it at OpenAI does.
+- **See and click.** A tool you allow to record or control your screen ("computer use") can see what you show and press buttons in an Unlocked app. Capture Hiding is best effort.
+
+On Windows nothing asks first: any program in your account can copy the Vault folder (`%LOCALAPPDATA%\com.encryptednote.app\Vault.noindex`), your Backups and the clipboard. Touch ID and the Agent Companion are Mac only. This hasn't been checked on a real Windows PC yet ([#11](https://github.com/nniiovoo/encrypted-note/issues/11)).
+
+This project's [AGENTS.md](../AGENTS.md) tells agents never to open your Vault or Backups, but that's an instruction, not a lock.
+
+**Safest: run AI tools in a separate standard account, not an administrator,** as the [Agent Companion setup](agent-companion.md#before-you-start) does on a Mac. Never sign that account in to your Apple Account or put your passwords or keys there. On a Mac it can't open your Library, Desktop, Documents or Downloads folders, so it can't reach your Vault folder or the helper's Agent Key file, and the app saves Backups so that only your account can open them. It can still see the top of your home folder and read your Public folder, `/Users/Shared` and any file you saved at the top of your home folder yourself. That's why the setup makes `~/enote-agent-key.env` with `umask 077`: don't make that file another way. A Backup on a USB stick or exFAT drive has no owner, so any account can read it. None of this, and whether the clipboard, screen and typing stay apart between accounts, has been tested on a real Mac yet ([checks](agent-account-validation.md)).
+
+**If you run them in your own account:**
+
+- Mac: keep Touch ID off while AI tools run in your account (Settings → Touch ID). Turn it off before you start one, because turning it off later doesn't stop a copy a tool already made. If you leave it on, touch the sensor only right after you asked encrypted-note to unlock.
+- Lock or quit encrypted-note before you let an AI tool control your screen, and put encrypted-note on the tool's blocked or denied apps list if it has one.
+- Don't copy a secret while an AI tool is working. If you just copied one, wait until the clipboard clears (30 or 60 seconds) before you give the tool a task. If encrypted-note quit unexpectedly, copy a harmless word to replace the secret.
+- Keep Backups on a USB stick you unplug. Don't leave a copy anywhere else on this computer, on a drive that stays plugged in, or in a cloud folder.
+- Mac: say no when macOS asks whether Terminal or an AI app may use data from other apps, unless you're running the [Emergency Reader](#if-the-app-wont-open) yourself, and don't give either Full Disk Access. macOS should keep a yes only until that app quits, so quit it (Cmd+Q) to undo one. To remove Full Disk Access, turn it off in System Settings → Privacy & Security → Full Disk Access.
+- Mac: delete `~/enote-agent-key.env` once the Agent Companion has started, and empty the Trash. If a tool may have read it or the helper's copy, revoke the key at OpenAI.
+- Turn on the tool's sandbox and keep it asking before it runs commands (in Claude Code the sandbox stays off until you run `/sandbox`). Avoid modes that skip these, such as "full access" or "bypass permissions". If it can block files, block the Vault folder, the helper's folder `~/Library/Containers/com.encryptednote.app.companion`, `~/enote-agent-key.env` and `*.enote`.
+- Never paste a Seed Phrase, key, Master Password or Recovery Key into an AI chat.
+
+**If you touched the sensor for an unlock you didn't start:** treat your Logins, API Keys and Text as known to that tool, and change those passwords and keys where you use them. Then, in Settings, go to Change Master Password and choose "Someone may know it, or I lost my paper". That also replaces the key Touch ID gave out; a normal password change keeps it. Then choose Back up now. Older Backups and Safety Copies still open with the old key. Touch ID can't open the secret parts of Seed Phrases or Private Keys.
+
+These lower the risk without removing it: a tool's file rules can miss a script the tool writes for itself. The macOS steps here have not been checked by hand.
+
 ## Keyboard shortcuts
 
 Cmd on Mac, Ctrl on Windows.
@@ -127,8 +159,8 @@ cargo run --locked -p enote-reader -- "$env:LOCALAPPDATA\com.encryptednote.app\V
 
 Keep `--note` and `--reveal` after the file, as shown above. `--reveal` prints only to a terminal, so nothing lands in a file by accident.
 
-The terminal has no Capture Hiding or Sharing Guard. Before `--reveal`, stop any screen share, use `--note <number> --reveal` to show only the Note you need, and close the terminal window when you finish.
+The terminal has no Capture Hiding or Sharing Guard. Before `--reveal`, stop any screen share, use `--note <number> --reveal` to show only the Note you need, and quit Terminal (Cmd+Q) when you finish.
 
 `No such file or directory` means the path is wrong, not that your Vault is gone.
 
-The built Mac app's folder is protected from other apps, so macOS may ask before Terminal can read it. `Operation not permitted` means macOS said no. Run the command again and allow it when macOS asks. If you refused before and it doesn't ask again, change that choice for Terminal in System Settings → Privacy & Security. Or give the reader a Backup instead, because a Backup isn't in that protected folder. These macOS steps have not been checked by hand.
+The built Mac app's folder is protected from other apps, so macOS may ask before Terminal can read it. Easiest: give the reader a Backup instead, because a Backup isn't in that protected folder. To read the Vault folder itself, first quit any AI tool running in Terminal, then allow it when macOS asks. `Operation not permitted` means macOS said no: quit Terminal, open it again and run the command again. If it still doesn't ask, look for Terminal in System Settings → Privacy & Security. macOS should keep a yes only until Terminal quits, and every tool you run in Terminal meanwhile gets it too ([AI tools on this computer](#ai-tools-on-this-computer)), so quit Terminal with Cmd+Q when you finish. These macOS steps have not been checked by hand.

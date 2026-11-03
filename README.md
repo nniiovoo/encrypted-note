@@ -4,7 +4,7 @@
 
 # encrypted-note
 
-An offline, encrypted Vault for Seed Phrases, Private Keys, Logins and API Keys, agent native by design: the app gives AI agents no way into your Vault, only an optional Agent Companion on Mac that lets one approved agent use one fixed OpenAI text tool with a separate Agent Key.
+An offline, encrypted Vault for Seed Phrases, Private Keys, Logins and API Keys, agent native by design: the app itself gives AI agents no way into your Vault, only an optional Agent Companion on Mac that lets one approved agent use one fixed OpenAI text tool with a separate Agent Key.
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-2f6f5e)](LICENSE)
 ![Platforms: macOS and Windows](https://img.shields.io/badge/platform-macOS%20%7C%20Windows-2f6f5e)
@@ -27,6 +27,9 @@ An offline, encrypted Vault for Seed Phrases, Private Keys, Logins and API Keys,
 > [!WARNING]
 > v1 personal project, not independently audited. The Windows build has not been run on a real Windows PC yet ([#11](https://github.com/nniiovoo/encrypted-note/issues/11)), so it may not work. Don't keep real secrets in it until that's done. Keep a paper or metal backup of any seed phrase that holds real funds.
 <!-- Take out the Windows sentences when the #11 results are recorded in docs/security-model.md. -->
+
+> [!IMPORTANT]
+> An AI tool that runs in your own account on this computer, such as Claude Code, Codex or Cursor, works as you. It may be able to copy your Backups and Vault files, read what you copy and, on a Mac, read the Agent Key file and ask for Touch ID. Run AI tools in a separate standard account, not an administrator, or see [AI tools on this computer](docs/guide.md#ai-tools-on-this-computer) for habits that lower the risk.
 
 ## Build
 
@@ -60,10 +63,12 @@ AI coding agents are instructed to follow [AGENTS.md](AGENTS.md):
 
 Agents should test with fictional data in a separate development Vault using `ENOTE_DEV_DATA_DIR` and run the checks described above before a pull request.
 
+These are instructions, not a lock: an agent that ignores them can do whatever your account can ([AI tools on this computer](docs/guide.md#ai-tools-on-this-computer)).
+
 ## Docs
 
 - [Security model](docs/security-model.md): what it protects against, how it works, what has been tested
-- [User guide](docs/guide.md): where your keys are stored, keyboard shortcuts, and reading your Vault if the app won't open
+- [User guide](docs/guide.md): where your keys are stored, AI tools on this computer, keyboard shortcuts, and reading your Vault if the app won't open
 - [Agent Companion](docs/agent-companion.md): the optional helper for one approved agent, setup and limits
 - [File format](docs/FORMAT.md) · [Design decisions](docs/adr/) · [Glossary](CONTEXT.md)
 

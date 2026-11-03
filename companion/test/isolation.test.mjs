@@ -171,6 +171,9 @@ test('each fixed broker failure reaches the agent through the bridge with its ow
   let active = true;
   const main = guardGenerate(createGenerator({ apiKey: KEY, now: () => 0, transport: () => respond() }), () => active);
   const timingOut = createGenerator({ apiKey: KEY, timeoutMs: 20, transport: () => new Promise(() => {}) });
+  const cuttingOff = createGenerator({ apiKey: KEY, transport: async () => ({ status: 200, json: {
+    model: POLICY.model, status: 'incomplete', incomplete_details: { reason: 'max_output_tokens' },
+    output: [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'FAKE_PRIVATE_MARKER cut off mid' }] }] } }) });
   let selected = main;
   const server = await startHttpServer({ generate: (...args) => selected(...args), bearerToken: TOKEN_ONE, port: 0 });
   const client = await connectLocalBroker(TOKEN_ONE, server.address().port);
@@ -192,6 +195,8 @@ test('each fixed broker failure reaches the agent through the bridge with its ow
     await expectFailure('provider_unavailable', /Try once more at most\./);
     respond = async () => ({ status: 200, json: { model: 'FAKE_PRIVATE_MARKER' } });
     await expectFailure('invalid_response', /Try once more at most\./);
+    selected = cuttingOff;
+    await expectFailure('output_limit', /Ask for a shorter answer or split the request\. The same text will likely fail again\./);
     selected = timingOut;
     await expectFailure('timeout', /Try once more at most\./);
     selected = main;
@@ -225,6 +230,7 @@ test('every fixed error says what to do next, and helper_off never says why the 
     ['provider_limit', /Tell the owner\. Do not retry\.$/],
     ['provider_unavailable', /Try once more at most\.$/],
     ['invalid_response', /Try once more at most\.$/],
+    ['output_limit', /Ask for a shorter answer or split the request\. The same text will likely fail again\.$/],
     ['grant_expired', askOwner],
     ['helper_off', askOwner],
   ]) {
@@ -257,6 +263,7 @@ test('the bridge passes only an exact fixed text; anything else from a broker be
     assert.equal(errorFromPublicText(text).code, 'provider_unavailable');
   }
   assert.equal(errorFromPublicText(fixedText('helper_off')).code, 'helper_off');
+  assert.equal(errorFromPublicText(fixedText('output_limit')).code, 'output_limit');
   // Cancellation by the caller stays cancellation, with no broker text involved.
   const controller = new AbortController();
   controller.abort();

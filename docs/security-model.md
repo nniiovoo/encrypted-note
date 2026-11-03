@@ -6,7 +6,7 @@
 
 | Protects | Doesn't protect |
 |---|---|
-| A stolen laptop or USB stick (Argon2id + XChaCha20-Poly1305, strong password required) | Malware already running on your computer (keyloggers, memory readers) |
+| A stolen laptop or USB stick (Argon2id + XChaCha20-Poly1305, strong password required) | Malware already running on your computer (keyloggers, memory readers), and AI tools or other software running in your account, which work as you ([AI tools](guide.md#ai-tools-on-this-computer)) |
 | Someone at your unlocked computer (Auto-lock, re-entering the password for wallets, hold-to-show for Wallet values) | A phone camera pointed at your screen, or someone watching it while you choose to show what you typed |
 | Accidentally showing Hidden Fields while screen sharing (layered, see below) | A hacked operating system, or being forced to unlock |
 | Clipboard history and Universal/cloud clipboard (copies are marked private, which clipboard tools, including OS history, aren't obliged to honor, and cleared after 30 s, or 60 s if you choose; Wallet Kinds always 30 s). A password you paste from another app gets none of this protection: this app can't mark it or clear it | Old copies of your Vault: they still open with the old password |
