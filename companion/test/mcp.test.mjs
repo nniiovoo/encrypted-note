@@ -316,3 +316,88 @@ test('HTTP shutdown cancels an admitted operation and closes active connections 
     await pending;
   }
 });
+
+test('protected HTTP close waits for one cleanup, rejects late admissions and preserves close callbacks', { timeout: 10_000 }, async () => {
+  let begin; let resume; let admitted;
+  const cleaning = new Promise(resolve => { begin = resolve; });
+  const released = new Promise(resolve => { resume = resolve; });
+  const started = new Promise(resolve => { admitted = resolve; });
+  let hooks = 0; let calls = 0; let capturedSignal;
+  const generate = createGenerator({ apiKey: KEY, transport: async ({ signal }) => {
+    calls++;
+    capturedSignal = signal;
+    admitted();
+    return new Promise(() => {});
+  } });
+  const server = await startHttpServer({ generate, bearerToken: TOKEN, port: 0,
+    beforeClose: async () => { hooks++; begin(); await released; } });
+  const address = 'http://127.0.0.1:' + server.address().port + '/mcp';
+  const headers = { authorization: 'Bearer ' + TOKEN, 'content-type': 'application/json',
+    accept: 'application/json, text/event-stream' };
+  const body = JSON.stringify({ jsonrpc: '2.0', id: 'fictional-close', method: 'tools/call',
+    params: { name: 'generate_text', arguments: { text: 'Fiction.' } } });
+  const pending = fetch(address, { method: 'POST', headers, body })
+    .then(response => response.arrayBuffer(), error => error);
+  let slowRequest;
+  let slowOutcome;
+  const callbacks = [];
+  try {
+    await started;
+    // A real request is already parsing its body when close begins.
+    const parsing = new Promise(resolve => server.once('request', resolve));
+    slowOutcome = new Promise(resolve => {
+      slowRequest = http.request(address, { method: 'POST', headers }, response => {
+        response.resume();
+        response.once('end', () => resolve(response.statusCode));
+        response.once('error', resolve);
+      });
+      slowRequest.once('error', resolve);
+      slowRequest.write(body.slice(0, 20));
+    });
+    await parsing;
+    const first = new Promise(resolve => assert.equal(server.close(error => {
+      callbacks.push(error?.code); resolve(error);
+    }), server));
+    const repeated = new Promise(resolve => assert.equal(server.close(error => {
+      callbacks.push(error?.code); resolve(error);
+    }), server));
+    await cleaning;
+    assert.equal(capturedSignal.aborted, true);
+    assert.equal(server.listening, true);
+    assert.deepEqual(callbacks, []);
+    slowRequest.end(body.slice(20));
+    const late = await fetch(address, { method: 'POST', headers, body });
+    assert.equal(late.status, 503);
+    assert.deepEqual(await late.json(), { error: 'Request rejected.' });
+    assert.equal(calls, 1);
+    resume();
+    assert.equal(await first, undefined);
+    assert.equal((await repeated)?.code, 'ERR_SERVER_NOT_RUNNING');
+    assert.deepEqual(callbacks, [undefined, 'ERR_SERVER_NOT_RUNNING']);
+    assert.equal(server.listening, false);
+    assert.equal((await new Promise(resolve => server.close(resolve)))?.code, 'ERR_SERVER_NOT_RUNNING');
+    assert.equal(hooks, 1);
+    await pending;
+    await slowOutcome;
+    assert.equal(calls, 1);
+    assert.equal(await new Promise((resolve, reject) => server.getConnections((error, count) =>
+      error ? reject(error) : resolve(count))), 0);
+  } finally {
+    resume();
+    slowRequest?.destroy();
+    await new Promise(resolve => server.close(resolve));
+    server.closeAllConnections();
+    await pending;
+    await slowOutcome;
+  }
+});
+
+test('protected HTTP cleanup rejection still releases the listener without repeating cleanup', async () => {
+  let hooks = 0;
+  const server = await startHttpServer({ generate: generator(), bearerToken: TOKEN, port: 0,
+    beforeClose: async () => { hooks++; throw new Error('FAKE_PRIVATE_CLEANUP_ERROR'); } });
+  await new Promise(resolve => server.close(resolve));
+  assert.equal(server.listening, false);
+  assert.equal((await new Promise(resolve => server.close(resolve)))?.code, 'ERR_SERVER_NOT_RUNNING');
+  assert.equal(hooks, 1);
+});

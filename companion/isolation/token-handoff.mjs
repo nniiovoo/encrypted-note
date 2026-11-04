@@ -27,7 +27,7 @@ export async function checkHandoffDirectory(plan, { stat = lstat, aclCheck = che
 
 // Call only after successfully binding this launch's listener. Retain the open handle until
 // cleanup, so an unlinked publication's inode cannot be recycled into a successor's lease.
-export async function writeAgentToken(plan, token, io = tokenIo) {
+export async function writeAgentToken(plan, token, io = tokenIo, { cleanupFailure = removeAgentToken } = {}) {
   const file = plan.bearerTokenFile;
   try {
     const stale = await io.stat(file);
@@ -39,7 +39,7 @@ export async function writeAgentToken(plan, token, io = tokenIo) {
   try {
     const info = await handle.stat();
     lease = Object.freeze({ file, dev: info.dev, ino: info.ino });
-    publications.set(lease, handle);
+    publications.set(lease, { handle, stat: io.stat });
     await handle.writeFile(token + '\n');
     await handle.sync();
     await io.addReadAcl(file, plan.agentShortName);
@@ -47,20 +47,22 @@ export async function writeAgentToken(plan, token, io = tokenIo) {
     if (!matches(await lstat(file), lease)) unavailable();
     return lease;
   } catch (error) {
-    if (lease) await removeAgentToken(lease);
+    if (lease) await cleanupFailure(lease);
     else await handle.close();
     throw error;
   }
 }
 
 // A pathname is never cleanup authority. Only a lease issued by this module can remove the
-// exact publication it owns. There is no same-owner malicious rename protection in Node's unlink.
+// exact publication it owns. Protected callers keep the listener reserved throughout this
+// check and unlink, serializing legitimate launches. Malicious owner renames remain out of scope.
 export async function removeAgentToken(lease) {
-  const handle = lease && publications.get(lease);
-  if (!handle) return;
+  const publication = lease && publications.get(lease);
+  if (!publication) return;
+  const { handle, stat } = publication;
   publications.delete(lease);
   try {
-    if (matches(await lstat(lease.file), lease)) await unlink(lease.file);
+    if (matches(await stat(lease.file), lease)) await unlink(lease.file);
   } catch { /* gone, replaced, or no longer removable */ }
   finally { await handle.close(); }
 }

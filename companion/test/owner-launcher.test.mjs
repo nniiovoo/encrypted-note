@@ -175,3 +175,154 @@ test('token cleanup accepts only its inode/dev lease and cannot delete a success
     await assert.rejects(fs.lstat(fx.tokenFile), { code: 'ENOENT' });
   } finally { await removeAgentToken(first); await removeAgentToken(second); await fx.cleanup(); }
 });
+
+test('standalone close reserves the listener until checked token cleanup completes', { timeout: 10_000 }, async () => {
+  const fx = await fixture();
+  let armed = false;
+  let announcePaused; let resume;
+  const paused = new Promise(resolve => { announcePaused = resolve; });
+  const released = new Promise(resolve => { resume = resolve; });
+  fx.io.stat = async file => {
+    const info = await fs.lstat(file);
+    if (armed && file === fx.tokenFile) {
+      armed = false;
+      announcePaused();
+      await released;
+    }
+    return info;
+  };
+  let server; let attempted; let successor; let closed;
+  try {
+    server = await launchOwnerBroker(fx.plan, fx.options);
+    const port = server.address().port;
+    armed = true;
+    closed = once(server, 'close');
+    assert.equal(server.close(), server);
+    await paused;
+    let bindError;
+    try { attempted = await launchOwnerBroker(fx.plan, { ...fx.options, io: { ...fx.io, stat: fs.lstat }, port }); }
+    catch (error) { bindError = error; }
+    assert.equal(bindError?.code, 'EADDRINUSE');
+    assert.equal(server.listening, true);
+    resume();
+    await closed;
+    successor = await launchOwnerBroker(fx.plan, { ...fx.options, port });
+    const token = (await fs.readFile(fx.tokenFile, 'utf8')).trim();
+    assert.match(token, /^[A-Za-z0-9_-]{43}$/);
+    assert.equal(await authStatus(successor, token), 200);
+  } finally {
+    resume();
+    await closed;
+    await close(attempted);
+    await close(successor);
+    await close(server);
+    await fx.cleanup();
+  }
+});
+
+test('standalone post-publication expiry reserves the listener through token cleanup', { timeout: 10_000 }, async () => {
+  const fx = await fixture();
+  const port = await availablePort();
+  let wall = Date.now();
+  const deadline = wall + 60_000;
+  fx.plan.grantExpiresAt = new Date(deadline).toISOString();
+  let armed = false;
+  let announcePaused; let resume;
+  const paused = new Promise(resolve => { announcePaused = resolve; });
+  const released = new Promise(resolve => { resume = resolve; });
+  fx.io.aclCheck = async file => {
+    if (file === fx.tokenFile) {
+      wall = deadline;
+      armed = true;
+    }
+  };
+  fx.io.stat = async file => {
+    const info = await fs.lstat(file);
+    if (armed && file === fx.tokenFile) {
+      armed = false; announcePaused(); await released;
+    }
+    return info;
+  };
+  const failedStartup = launchOwnerBroker(fx.plan, { ...fx.options, port, now: () => wall }).then(() => undefined, error => error);
+  let attempted; let successor;
+  const freshIo = { ...fx.io, stat: fs.lstat, aclCheck: async () => {} };
+  try {
+    await paused;
+    const successorPlan = { ...fx.plan, grantExpiresAt: new Date(Date.now() + 60_000).toISOString() };
+    let bindError;
+    try { attempted = await launchOwnerBroker(successorPlan, { ...fx.options, io: freshIo, port }); }
+    catch (error) { bindError = error; }
+    assert.equal(bindError?.code, 'EADDRINUSE');
+    resume();
+    assert.match((await failedStartup)?.message, /approved agent grant/);
+    await assert.rejects(fs.lstat(fx.tokenFile), { code: 'ENOENT' });
+    successor = await launchOwnerBroker(successorPlan, { ...fx.options, io: freshIo, port });
+    const token = (await fs.readFile(fx.tokenFile, 'utf8')).trim();
+    assert.equal(await authStatus(successor, token), 200);
+  } finally {
+    resume(); await failedStartup;
+    await close(attempted); await close(successor); await fx.cleanup();
+  }
+});
+
+for (const failure of [false, true]) {
+  test('standalone publication validation gates provider admissions' + (failure ? ' on failure' : ' before ready'), { timeout: 10_000 }, async () => {
+    const fx = await fixture();
+    const port = await availablePort();
+    let checking; let finishCheck; let cleaning; let finishCleanup;
+    const validation = new Promise(resolve => { checking = resolve; });
+    const checked = new Promise(resolve => { finishCheck = resolve; });
+    const cleanup = new Promise(resolve => { cleaning = resolve; });
+    const cleaned = new Promise(resolve => { finishCleanup = resolve; });
+    let armCleanup = false; let calls = 0;
+    fx.io.aclCheck = async file => {
+      if (file === fx.tokenFile) {
+        checking(); await checked;
+        if (failure) { armCleanup = true; throw new Error('FAKE_FINAL_ACL_FAILURE'); }
+      }
+    };
+    fx.io.stat = async file => {
+      const info = await fs.lstat(file);
+      if (armCleanup && file === fx.tokenFile) { armCleanup = false; cleaning(); await cleaned; }
+      return info;
+    };
+    const startup = launchOwnerBroker(fx.plan, { ...fx.options, port,
+      transport: async () => { calls++; throw new Error('FAKE_UNEXPECTED_PROVIDER_CALL'); },
+    }).then(server => ({ server }), error => ({ error }));
+    let server; let attempted; let successor;
+    try {
+      await validation;
+      const token = (await fs.readFile(fx.tokenFile, 'utf8')).trim();
+      const url = 'http://127.0.0.1:' + port + '/mcp';
+      const response = await fetch(url, { method: 'POST', headers: { authorization: 'Bearer ' + token,
+        'content-type': 'application/json', accept: 'application/json, text/event-stream' },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call',
+          params: { name: 'generate_text', arguments: { text: 'Fiction.' } } }) });
+      assert.equal((await response.json()).result.isError, true);
+      assert.equal(calls, 0);
+      assert.equal(fx.output.length, 0);
+      finishCheck();
+      if (failure) {
+        await cleanup;
+        assert.equal((await fetch(url, { method: 'POST' })).status, 503);
+        let bindError;
+        const freshIo = { ...fx.io, stat: fs.lstat, aclCheck: async () => {} };
+        try { attempted = await launchOwnerBroker(fx.plan, { ...fx.options, io: freshIo, port }); }
+        catch (error) { bindError = error; }
+        assert.equal(bindError?.code, 'EADDRINUSE');
+        finishCleanup();
+        assert.match((await startup).error?.message, /FAKE_FINAL_ACL_FAILURE/);
+        successor = await launchOwnerBroker(fx.plan, { ...fx.options, io: freshIo, port });
+        assert.equal(await authStatus(successor, (await fs.readFile(fx.tokenFile, 'utf8')).trim()), 200);
+      } else {
+        server = (await startup).server;
+        assert.equal(fx.output.length, 1);
+        assert.equal(await authStatus(server, token), 200);
+      }
+    } finally {
+      finishCheck(); finishCleanup();
+      server ??= (await startup).server;
+      await close(server); await close(attempted); await close(successor); await fx.cleanup();
+    }
+  });
+}

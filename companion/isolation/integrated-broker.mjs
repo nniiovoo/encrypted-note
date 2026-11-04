@@ -147,8 +147,9 @@ export async function startIntegratedBroker({
   try { await io.verifyCode(plan.ownerUid); } catch { fail('code_unprotected'); }
   try { await checkHandoffDirectory(plan, io); } catch { fail('handoff_unavailable'); }
   // Delay SDK imports until the protected-tree checks pass, as owner-launcher.mjs does.
-  const { createGenerator, guardGenerate } = await import('../src/generate.mjs');
+  const { createGenerator, guardGenerate, CompanionError } = await import('../src/generate.mjs');
   const { startHttpServer, stopHttpServer } = await import('../src/http.mjs');
+  let ready = false;
   const isActive = grantGuard(expiresAt, { now, mono });
   if (!isActive()) fail('grant_inactive');
   let apiKey;
@@ -158,17 +159,28 @@ export async function startIntegratedBroker({
   if (!/^[A-Za-z0-9_-]{32,256}$/.test(token) || token === apiKey) { apiKey = ''; fail('internal'); }
   let generate;
   try {
-    generate = guardGenerate(createGenerator({ apiKey, ...(transport ? { transport } : {}) }), isActive);
+    const generator = createGenerator({ apiKey, ...(transport ? { transport } : {}) });
+    generate = guardGenerate(async (args, options) => {
+      if (!ready) throw new CompanionError('helper_off');
+      return generator(args, options);
+    }, isActive);
   } catch { apiKey = ''; fail('credential_invalid'); }
   apiKey = ''; // Best effort only; JavaScript strings cannot be guaranteed erased.
   if (!isActive()) fail('grant_inactive');
-  let server;
-  try { server = await startHttpServer({ generate, bearerToken: token, port: port ?? plan.brokerPort }); }
-  catch { fail('port_unavailable'); }
   let publication;
-  try { publication = await writeAgentToken(plan, token, io); }
-  catch { stopHttpServer(server); fail('handoff_unavailable'); }
-  if (!isActive()) { stopHttpServer(server); await removeAgentToken(publication); fail('grant_inactive'); }
+  let server;
+  try { server = await startHttpServer({ generate, bearerToken: token, port: port ?? plan.brokerPort,
+    beforeClose: () => { ready = false; return removeAgentToken(publication); } }); }
+  catch { fail('port_unavailable'); }
+  const closed = new Promise(resolve => server.once('close', resolve));
+  const closeServer = () => { stopHttpServer(server); return closed; };
+  try {
+    publication = await writeAgentToken(plan, token, io, {
+      cleanupFailure: async lease => { publication = lease; await closeServer(); },
+    });
+  }
+  catch { await closeServer(); fail('handoff_unavailable'); }
+  if (!isActive()) { await closeServer(); fail('grant_inactive'); }
 
   let stopped = false;
   let resolveDone;
@@ -197,8 +209,7 @@ export async function startIntegratedBroker({
     // called from the data handler, the stream starts reading again once the handler returns.
     input.destroy?.();
     for (const event of ['SIGTERM', 'SIGINT']) signals.removeListener?.(event, onSignal);
-    stopHttpServer(server);
-    await removeAgentToken(publication);
+    await closeServer();
     emit(encodeEvent({ event: 'stopped', reason }));
     resolveDone(reason);
     return done;
@@ -206,6 +217,7 @@ export async function startIntegratedBroker({
   input.on('data', onData); input.once('end', onEnd); input.once('close', onEnd);
   for (const event of ['SIGTERM', 'SIGINT']) signals.once?.(event, onSignal);
   input.resume?.();
+  ready = true;
   emit(encodeEvent({ event: 'ready', expiresAt: Math.floor(expiresAt / 1000) }));
   return { stop, done, server, expiresAt };
 }
