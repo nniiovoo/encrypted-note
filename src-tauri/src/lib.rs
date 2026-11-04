@@ -52,8 +52,8 @@ use crate::commands::{CoreState, DIALOG_OPEN, STATUS_EVENT};
 use crate::core::{AppCore, AppStatus, Clock, Config};
 
 /// Whether the window is in front, by the latest focus event. Set on the thread that reports
-/// the event, before the core hears of it on a thread of its own. Those threads reach the core
-/// in no set order, so each then gives the core this latest value (`commands::os_event`).
+/// the event, before its worker reaches the core. Every core access refreshes from this value
+/// under the mutex before a command can Show or Copy (`commands::core`).
 static WINDOW_FOCUSED: AtomicBool = AtomicBool::new(true);
 
 fn note_focus(event: OsEvent) {

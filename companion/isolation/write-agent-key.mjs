@@ -7,11 +7,12 @@
 // written, so a password or Seed Phrase left on the clipboard can't land in the file. Anthropic
 // (sk-ant-) and OpenRouter (sk-or-) keys are refused too, but an OpenAI key copied from the Vault
 // would still pass. No message ever includes the value.
-import { open } from 'node:fs/promises';
+import { lstat, open, rename, unlink } from 'node:fs/promises';
 import { constants, realpathSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { run, parseConfirmedCredential, checkAcl } from './common.mjs';
+import { run, parseConfirmedCredential, checkAcl, assertProtectedPath } from './common.mjs';
 
 const MAX_INPUT_BYTES = 4096;
 export const KEY_REFUSED = "That doesn't look like an OpenAI API key (one line starting with sk-, no spaces), " +
@@ -48,25 +49,54 @@ export async function writeAgentKey(file, input, { exclude = excludeFromBackup, 
   const contents = Buffer.from('OPENAI_AGENT_API_KEY=' + value + '\n', 'utf8');
   try {
     parseConfirmedCredential(contents.toString('utf8')); // the same check Start makes
-    const handle = await open(file, constants.O_WRONLY | constants.O_CREAT | constants.O_NOFOLLOW, 0o600)
+    file = path.resolve(file);
+    const parent = path.dirname(file);
+    const protectParent = () => assertProtectedPath(parent, process.getuid())
       .catch(() => { throw new Error(FILE_REFUSED); });
+    const inspectDestination = async () => {
+      let info;
+      try { info = await lstat(file); }
+      catch (error) { if (error.code === 'ENOENT') return null; throw new Error(FILE_REFUSED); }
+      if (!info.isFile() || info.uid !== process.getuid() || info.nlink !== 1) throw new Error(FILE_REFUSED);
+      await aclCheck(file).catch(() => { throw new Error(FILE_REFUSED); });
+      return info;
+    };
+    await protectParent();
+    const before = await inspectDestination();
+    const temporary = path.join(parent, '.enote-agent-key-' + randomUUID());
+    const handle = await open(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600)
+      .catch(() => { throw new Error(FILE_REFUSED); });
+    let published = false;
     try {
       const info = await handle.stat();
       if (!info.isFile() || info.uid !== process.getuid() || info.nlink !== 1) throw new Error(FILE_REFUSED);
       // An allow entry, set on the file or inherited from its folder, lets another account read it
       // whatever its mode.
-      await aclCheck(file).catch(() => { throw new Error(FILE_REFUSED); });
+      await aclCheck(temporary).catch(() => { throw new Error(FILE_REFUSED); });
       await handle.chmod(0o600);
-      await handle.truncate(0);
-      await handle.write(contents, 0, contents.length, 0);
+      await handle.writeFile(contents);
       await handle.sync();
       // Checked again before success is reported; if one appeared, the key is taken out again.
-      await aclCheck(file).catch(async () => {
+      await aclCheck(temporary).catch(async () => {
         await handle.truncate(0);
         await handle.sync();
         throw new Error(ACL_APPEARED);
       });
-    } finally { await handle.close(); }
+      await protectParent();
+      const after = await inspectDestination();
+      if (before?.dev !== after?.dev || before?.ino !== after?.ino ||
+          before?.mtimeMs !== after?.mtimeMs || before?.ctimeMs !== after?.ctimeMs) throw new Error(FILE_REFUSED);
+      // A fresh inode keeps an earlier reader's open descriptor away from the new key.
+      await rename(temporary, file);
+      published = true;
+    } finally {
+      if (!published) {
+        await handle.truncate(0).catch(() => {});
+        await handle.sync().catch(() => {});
+      }
+      try { await handle.close(); }
+      finally { if (!published) await unlink(temporary).catch(() => {}); }
+    }
   } finally { contents.fill(0); }
   return { excluded: await exclude(file) };
 }

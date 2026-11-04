@@ -34,6 +34,7 @@ done
 need() { command -v "$1" >/dev/null 2>&1 || { echo "$1 not found: $2" >&2; exit 1; }; }
 need git "install Git (on Mac, run 'xcode-select --install')"
 need cargo "install rustup, which reads the version from rust-toolchain.toml"
+need node "install Node.js 24 or newer, as for the app build"
 sha256() {
   if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | cut -d' ' -f1; else sha256sum "$1" | cut -d' ' -f1; fi
 }
@@ -63,7 +64,7 @@ outside "$EXISTING"
 mkdir -p "$OUT"
 OUT=$(cd "$OUT" && pwd -P)
 outside "$OUT"
-[[ ! -e "$OUT/enote-reader" && ! -e "$OUT/enote-reader.exe" ]] || { echo "$OUT already has an enote-reader. Choose an empty folder, or move the old one yourself." >&2; exit 1; }
+[[ ! -e "$OUT/enote-reader" && ! -L "$OUT/enote-reader" && ! -e "$OUT/enote-reader.exe" && ! -L "$OUT/enote-reader.exe" ]] || { echo "$OUT already has an enote-reader. Choose an empty folder, or move the old one yourself." >&2; exit 1; }
 
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/enote-reader-build.XXXXXX")
 trap '/bin/rm -rf "$WORK"' EXIT
@@ -89,8 +90,13 @@ done
 BIN="$WORK/target/release/enote-reader"
 [[ -f "$BIN" ]] || BIN="$BIN.exe"
 [[ -f "$BIN" ]] || { echo "No enote-reader binary was produced." >&2; exit 1; }
-cp "$BIN" "$OUT/"
 SAVED="$OUT/$(basename "$BIN")"
+# Exclusive creation also refuses special files another build put here while this compiled.
+( umask 077; node -e '
+  const fs = require("node:fs");
+  try { fs.copyFileSync(process.argv[1], process.argv[2], fs.constants.COPYFILE_EXCL); }
+  catch { process.exit(1); }
+' "$BIN" "$SAVED" ) || { echo "Could not save $SAVED without replacing an existing file. Choose an empty folder." >&2; exit 1; }
 chmod 755 "$SAVED"
 
 echo "Reader:  $SAVED"
