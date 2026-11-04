@@ -73,12 +73,12 @@ function provider(calls, response) {
       output: [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Fictional output.' }] }] } };
   };
 }
-async function start(fx, { calls = [], response, io, now, mono, setTimer } = {}) {
+async function start(fx, { calls = [], response, io, now, mono, setTimer, port = 0 } = {}) {
   const lines = [];
   const input = new PassThrough();
   const broker = await startIntegratedBroker({
     home: fx.home, uid, transport: provider(calls, response), io: io ?? fakeIo().io, input,
-    emit: line => lines.push(line), createToken: () => TOKEN, port: 0, signals: { once() {}, removeListener() {} },
+    emit: line => lines.push(line), createToken: () => TOKEN, port, signals: { once() {}, removeListener() {} },
     ...(now ? { now } : {}), ...(mono ? { mono } : {}), ...(setTimer ? { setTimer, clearTimer: () => {} } : {}),
   });
   return { broker, lines, input, calls, url: 'http://127.0.0.1:' + broker.server.address().port + '/mcp' };
@@ -137,6 +137,77 @@ test('start issues one fresh grant, hands off a private token and serves exactly
     await assert.rejects(fs.stat(fx.plan.bearerTokenFile), { code: 'ENOENT' });
     await assert.rejects(fetch(url, { method: 'POST' }));
     assert.ok(noMarkers(lines.join('')));
+  } finally { await fx.cleanup(); }
+});
+
+test('integrated token read access is published only while the real listener owns the port', async () => {
+  const fx = await fixture();
+  const reservation = net.createServer();
+  await new Promise(resolve => reservation.listen(0, '127.0.0.1', resolve));
+  const port = reservation.address().port;
+  await new Promise(resolve => reservation.close(resolve));
+  let publicationSawBoundListener = false;
+  let running;
+  try {
+    const { io } = fakeIo({ addReadAcl: async () => {
+      const contender = net.createServer();
+      publicationSawBoundListener = await new Promise(resolve => {
+        contender.once('error', error => resolve(error.code === 'EADDRINUSE'));
+        contender.listen(port, '127.0.0.1', () => contender.close(() => resolve(false)));
+      });
+    } });
+    running = await start(fx, { io, port });
+    assert.equal(publicationSawBoundListener, true);
+  } finally { await running?.broker.stop('owner'); await fx.cleanup(); }
+});
+
+test('integrated stop cannot unlink a successor token publication', async () => {
+  const fx = await fixture();
+  let running;
+  try {
+    running = await start(fx);
+    const successor = path.join(fx.handoff, 'successor');
+    const successorToken = 'FAKE_SUCCESSOR_TOKEN_FOR_TESTS_ONLY_0123456789';
+    await fs.writeFile(successor, successorToken + '\n', { mode: 0o600 });
+    await fs.rename(successor, fx.plan.bearerTokenFile);
+    await running.broker.stop('owner');
+    assert.equal(await fs.readFile(fx.plan.bearerTokenFile, 'utf8'), successorToken + '\n');
+  } finally { await running?.broker.stop('owner'); await fx.cleanup(); }
+});
+
+test('failed integrated publication cleans only its own file and closes the listener', async () => {
+  const fx = await fixture();
+  const reservation = net.createServer();
+  await new Promise(resolve => reservation.listen(0, '127.0.0.1', resolve));
+  const port = reservation.address().port;
+  await new Promise(resolve => reservation.close(resolve));
+  const successorToken = 'FAKE_SUCCESSOR_TOKEN_FOR_TESTS_ONLY_0123456789';
+  try {
+    const { io } = fakeIo({ addReadAcl: async file => {
+      const successor = path.join(fx.handoff, 'successor');
+      await fs.writeFile(successor, successorToken + '\n', { mode: 0o600 });
+      await fs.rename(successor, file);
+      throw new Error('FAKE_ACL_FAILURE');
+    } });
+    await assert.rejects(start(fx, { io, port }), { code: 'handoff_unavailable' });
+    assert.equal(await fs.readFile(fx.plan.bearerTokenFile, 'utf8'), successorToken + '\n');
+    await assert.rejects(fetch('http://127.0.0.1:' + port + '/mcp'));
+  } finally { await fx.cleanup(); }
+});
+
+test('integrated expiry during startup refuses before listener or token publication', async () => {
+  const fx = await fixture();
+  let wall = Date.now();
+  let publications = 0;
+  try {
+    await assert.rejects(startIntegratedBroker({
+      home: fx.home, uid, now: () => wall, port: 0, transport: provider([]),
+      io: fakeIo({ addReadAcl: async () => { publications++; } }).io,
+      input: new PassThrough(), emit: () => {}, signals: { once() {}, removeListener() {} },
+      createToken: () => { wall += MAX_GRANT_MS; return TOKEN; },
+    }), { code: 'grant_inactive' });
+    assert.equal(publications, 0);
+    await assert.rejects(fs.stat(fx.plan.bearerTokenFile), { code: 'ENOENT' });
   } finally { await fx.cleanup(); }
 });
 
@@ -438,16 +509,21 @@ test('every refusal path returns one fixed code and leaves no token behind', asy
   assert.ok(ERROR_CODES.includes('port_unavailable'));
 });
 
-test('a busy reviewed port fails closed and removes the handed-off token', async () => {
+test('a busy reviewed port never publishes or removes existing launch authority', async () => {
   const fx = await fixture();
   const blocker = net.createServer();
   await new Promise(resolve => blocker.listen(0, '127.0.0.1', resolve));
+  const existingToken = 'FAKE_EXISTING_TOKEN_FOR_TESTS_ONLY_0123456789';
+  await fs.writeFile(fx.plan.bearerTokenFile, existingToken + '\n', { mode: 0o600 });
+  let publications = 0;
   try {
     const lines = [];
-    await assert.rejects(startIntegratedBroker({ home: fx.home, uid, transport: provider([]), io: fakeIo().io,
+    await assert.rejects(startIntegratedBroker({ home: fx.home, uid, transport: provider([]), io: fakeIo({ addReadAcl: async () => { publications++; } }).io,
       input: new PassThrough(), emit: line => lines.push(line), createToken: () => TOKEN,
       port: blocker.address().port, signals: { once() {}, removeListener() {} } }), error => error.code === 'port_unavailable');
-    await assert.rejects(fs.stat(fx.plan.bearerTokenFile), { code: 'ENOENT' });
+    assert.equal(publications, 0);
+    assert.equal(await fs.readFile(fx.plan.bearerTokenFile, 'utf8'), existingToken + '\n');
+    assert.equal(lines.length, 0);
   } finally { blocker.close(); await fx.cleanup(); }
 });
 
