@@ -8,10 +8,11 @@
 // provider or MCP traffic is ever written to stdout or stderr.
 import path from 'node:path';
 import { constants } from 'node:fs';
-import { open, lstat, unlink, realpath } from 'node:fs/promises';
+import { open, lstat, realpath } from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { performance } from 'node:perf_hooks';
+import { checkHandoffDirectory, writeAgentToken, removeAgentToken, tokenIo } from './token-handoff.mjs';
 import {
   loadPlan, requireRole, assertProtectedPath, verifyCodeTree, readConfirmedCredential,
   assertGrantActive, grantGuard, MAX_GRANT_MS, checkAcl, run,
@@ -101,41 +102,9 @@ async function verifyCode(ownerUid) {
   }
 }
 
-// The handoff directory is owner-prepared: owner-owned 0700 with exactly one agent search ACL.
-export async function checkHandoffDirectory(plan, { stat = lstat, aclCheck = checkAcl } = {}) {
-  const dir = path.dirname(plan.bearerTokenFile);
-  const info = await stat(dir);
-  if (!info.isDirectory() || info.isSymbolicLink() || info.uid !== plan.ownerUid || (info.mode & 0o777) !== 0o700) {
-    fail('handoff_unavailable');
-  }
-  await assertProtectedPath(dir, plan.ownerUid, stat, {
-    tokenAgent: plan.agentShortName,
-    aclCheck: (file, permitted) => aclCheck(file, file === dir ? 'user:' + plan.agentShortName + ' allow search' : permitted),
-  });
-}
-
-const defaultIo = {
-  stat: lstat,
-  aclCheck: checkAcl,
-  addReadAcl: (file, agent) => run('/bin/chmod', ['+a', 'user:' + agent + ' allow read', file], { maxBuffer: 1024, timeout: 5000 }),
-  verifyCode,
-  assertAgentNotAdmin,
-};
-
-export async function writeAgentToken(plan, token, io) {
-  const file = plan.bearerTokenFile;
-  // A token left by an abnormal exit is removed only if it is our own plain file.
-  try {
-    const stale = await io.stat(file);
-    if (!stale.isFile() || stale.isSymbolicLink() || stale.uid !== plan.ownerUid || stale.nlink !== 1) fail('handoff_unavailable');
-    await unlink(file);
-  } catch (error) { if (error instanceof ControlError) throw error; if (error?.code !== 'ENOENT') fail('handoff_unavailable'); }
-  const handle = await open(file, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
-  try { await handle.writeFile(token + '\n'); await handle.sync(); } finally { await handle.close(); }
-  await io.addReadAcl(file, plan.agentShortName);
-  await assertProtectedPath(file, plan.ownerUid, io.stat, { aclCheck: io.aclCheck, tokenAgent: plan.agentShortName });
-}
-async function removeAgentToken(file) { try { await unlink(file); } catch { /* already gone */ } }
+// Keep the existing token helpers importable from this entry point.
+export { checkHandoffDirectory, writeAgentToken } from './token-handoff.mjs';
+const defaultIo = { ...tokenIo, verifyCode, assertAgentNotAdmin };
 
 // Metadata-only readiness. The credential's contents are not read here.
 export async function checkReadiness({ home, uid = process.getuid(), io = defaultIo } = {}) {
@@ -178,8 +147,9 @@ export async function startIntegratedBroker({
   try { await io.verifyCode(plan.ownerUid); } catch { fail('code_unprotected'); }
   try { await checkHandoffDirectory(plan, io); } catch { fail('handoff_unavailable'); }
   // Delay SDK imports until the protected-tree checks pass, as owner-launcher.mjs does.
-  const { createGenerator, guardGenerate } = await import('../src/generate.mjs');
+  const { createGenerator, guardGenerate, CompanionError } = await import('../src/generate.mjs');
   const { startHttpServer, stopHttpServer } = await import('../src/http.mjs');
+  let ready = false;
   const isActive = grantGuard(expiresAt, { now, mono });
   if (!isActive()) fail('grant_inactive');
   let apiKey;
@@ -189,15 +159,28 @@ export async function startIntegratedBroker({
   if (!/^[A-Za-z0-9_-]{32,256}$/.test(token) || token === apiKey) { apiKey = ''; fail('internal'); }
   let generate;
   try {
-    generate = guardGenerate(createGenerator({ apiKey, ...(transport ? { transport } : {}) }), isActive);
+    const generator = createGenerator({ apiKey, ...(transport ? { transport } : {}) });
+    generate = guardGenerate(async (args, options) => {
+      if (!ready) throw new CompanionError('helper_off');
+      return generator(args, options);
+    }, isActive);
   } catch { apiKey = ''; fail('credential_invalid'); }
   apiKey = ''; // Best effort only; JavaScript strings cannot be guaranteed erased.
-  try { await writeAgentToken(plan, token, io); }
-  catch { await removeAgentToken(plan.bearerTokenFile); fail('handoff_unavailable'); }
-  if (!isActive()) { await removeAgentToken(plan.bearerTokenFile); fail('grant_inactive'); }
+  if (!isActive()) fail('grant_inactive');
+  let publication;
   let server;
-  try { server = await startHttpServer({ generate, bearerToken: token, port: port ?? plan.brokerPort }); }
-  catch { await removeAgentToken(plan.bearerTokenFile); fail('port_unavailable'); }
+  try { server = await startHttpServer({ generate, bearerToken: token, port: port ?? plan.brokerPort,
+    beforeClose: () => { ready = false; return removeAgentToken(publication); } }); }
+  catch { fail('port_unavailable'); }
+  const closed = new Promise(resolve => server.once('close', resolve));
+  const closeServer = () => { stopHttpServer(server); return closed; };
+  try {
+    publication = await writeAgentToken(plan, token, io, {
+      cleanupFailure: async lease => { publication = lease; await closeServer(); },
+    });
+  }
+  catch { await closeServer(); fail('handoff_unavailable'); }
+  if (!isActive()) { await closeServer(); fail('grant_inactive'); }
 
   let stopped = false;
   let resolveDone;
@@ -226,8 +209,7 @@ export async function startIntegratedBroker({
     // called from the data handler, the stream starts reading again once the handler returns.
     input.destroy?.();
     for (const event of ['SIGTERM', 'SIGINT']) signals.removeListener?.(event, onSignal);
-    stopHttpServer(server);
-    await removeAgentToken(plan.bearerTokenFile);
+    await closeServer();
     emit(encodeEvent({ event: 'stopped', reason }));
     resolveDone(reason);
     return done;
@@ -235,6 +217,7 @@ export async function startIntegratedBroker({
   input.on('data', onData); input.once('end', onEnd); input.once('close', onEnd);
   for (const event of ['SIGTERM', 'SIGINT']) signals.once?.(event, onSignal);
   input.resume?.();
+  ready = true;
   emit(encodeEvent({ event: 'ready', expiresAt: Math.floor(expiresAt / 1000) }));
   return { stop, done, server, expiresAt };
 }

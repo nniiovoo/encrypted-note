@@ -59,10 +59,25 @@ test('writes an owner-only file that Start accepts, and asks Time Machine to ski
   assert.deepEqual(excluded, FAKE_KEYS.map(() => file));
   // A failed exclusion still leaves the written file, and the owner is told.
   assert.deepEqual(await writeAgentKey(file, Buffer.from(FAKE_KEYS[0]), { exclude: async () => false }), { excluded: false });
-  // An existing file with looser permissions is tightened before the key goes in.
+  // An existing file with looser permissions is replaced by a fresh owner-only file.
   await fs.chmod(file, 0o644);
   await writeAgentKey(file, Buffer.from(FAKE_KEYS[1]), { exclude: async () => true });
   assert.equal((await fs.stat(file)).mode & 0o777, 0o600);
+});
+
+test('replacing a readable file never gives its existing readers the new key', async t => {
+  const directory = await scratch(t);
+  const file = path.join(directory, 'agent-key.env');
+  const earlier = 'FAKE_EARLIER_CONTENT\n';
+  await fs.writeFile(file, earlier, { mode: 0o644 });
+  const reader = await fs.open(file, 'r');
+  t.after(() => reader.close());
+  const before = await reader.stat();
+  await writeAgentKey(file, Buffer.from(FAKE_KEYS[0]), { exclude: async () => true });
+  assert.equal(await reader.readFile('utf8'), earlier);
+  assert.notEqual((await fs.stat(file)).ino, before.ino);
+  assert.equal(await readConfirmedCredential(file, process.getuid()), FAKE_KEYS[0]);
+  assert.deepEqual(await fs.readdir(directory), ['agent-key.env']);
 });
 
 test('refuses a value or a file before writing anything', async t => {
@@ -105,18 +120,55 @@ test('refuses a file an ACL opens to another account, set on it or inherited fro
   assert.equal(spawnSync('/bin/chmod', ['+a', 'user:nobody allow read,file_inherit', folder]).status, 0);
   const fresh = path.join(folder, 'agent-key.env');
   await assert.rejects(writeAgentKey(fresh, Buffer.from(FAKE_KEYS[0]), { exclude }), { message: FILE_REFUSED });
-  assert.equal((await fs.stat(fresh)).size, 0);
+  await assert.rejects(fs.stat(fresh), { code: 'ENOENT' });
+  assert.deepEqual(await fs.readdir(folder), []);
 });
 
-test('an ACL found after writing takes the key out again, and nothing is reported as written', async t => {
+test('an ACL found after writing removes the temporary key and keeps the earlier file', async t => {
   const directory = await scratch(t);
   const file = path.join(directory, 'agent-key.env');
+  await fs.writeFile(file, 'FAKE_EARLIER_CONTENT\n', { mode: 0o600 });
   let checks = 0;
-  const aclCheck = async () => { if (++checks === 2) throw new Error('FAKE ACL allow entry'); };
+  const aclCheck = async checked => {
+    if (checked !== file && ++checks === 2) throw new Error('FAKE ACL allow entry');
+  };
   await assert.rejects(writeAgentKey(file, Buffer.from(FAKE_KEYS[0]), { exclude: async () => true, aclCheck }),
     { message: ACL_APPEARED });
   assert.equal(checks, 2);
-  assert.equal((await fs.stat(file)).size, 0);
+  assert.equal(await fs.readFile(file, 'utf8'), 'FAKE_EARLIER_CONTENT\n');
+  assert.deepEqual(await fs.readdir(directory), ['agent-key.env']);
+});
+
+test('a destination changed while preparing the key is never overwritten', async t => {
+  const directory = await scratch(t);
+  const file = path.join(directory, 'agent-key.env');
+  await fs.writeFile(file, 'FAKE_EARLIER_CONTENT\n', { mode: 0o600 });
+  let checks = 0;
+  const aclCheck = async checked => {
+    if (checked !== file && ++checks === 2) {
+      await fs.rename(file, path.join(directory, 'earlier.env'));
+      await fs.writeFile(file, 'FAKE_REPLACEMENT_CONTENT\n', { mode: 0o600 });
+    }
+  };
+  await assert.rejects(writeAgentKey(file, Buffer.from(FAKE_KEYS[0]), { exclude: async () => true, aclCheck }),
+    { message: FILE_REFUSED });
+  assert.equal(await fs.readFile(file, 'utf8'), 'FAKE_REPLACEMENT_CONTENT\n');
+  assert.equal(await fs.readFile(path.join(directory, 'earlier.env'), 'utf8'), 'FAKE_EARLIER_CONTENT\n');
+  assert.deepEqual((await fs.readdir(directory)).sort(), ['agent-key.env', 'earlier.env']);
+});
+
+test('unprotected or linked parent folders are refused before a key file is created', async t => {
+  const directory = await scratch(t);
+  const writable = path.join(directory, 'writable');
+  await fs.mkdir(writable);
+  await fs.chmod(writable, 0o777);
+  const linked = path.join(directory, 'linked');
+  await fs.symlink(writable, linked);
+  for (const parent of [writable, linked]) {
+    await assert.rejects(writeAgentKey(path.join(parent, 'agent-key.env'), Buffer.from(FAKE_KEYS[0]),
+      { exclude: async () => true }), { message: FILE_REFUSED });
+  }
+  assert.deepEqual(await fs.readdir(writable), []);
 });
 
 test('input past the bound is refused as too long, even when the first read alone is key-shaped', async t => {

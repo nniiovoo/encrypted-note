@@ -73,12 +73,12 @@ function provider(calls, response) {
       output: [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Fictional output.' }] }] } };
   };
 }
-async function start(fx, { calls = [], response, io, now, mono, setTimer } = {}) {
+async function start(fx, { calls = [], response, io, now, mono, setTimer, port = 0 } = {}) {
   const lines = [];
   const input = new PassThrough();
   const broker = await startIntegratedBroker({
     home: fx.home, uid, transport: provider(calls, response), io: io ?? fakeIo().io, input,
-    emit: line => lines.push(line), createToken: () => TOKEN, port: 0, signals: { once() {}, removeListener() {} },
+    emit: line => lines.push(line), createToken: () => TOKEN, port, signals: { once() {}, removeListener() {} },
     ...(now ? { now } : {}), ...(mono ? { mono } : {}), ...(setTimer ? { setTimer, clearTimer: () => {} } : {}),
   });
   return { broker, lines, input, calls, url: 'http://127.0.0.1:' + broker.server.address().port + '/mcp' };
@@ -139,6 +139,223 @@ test('start issues one fresh grant, hands off a private token and serves exactly
     assert.ok(noMarkers(lines.join('')));
   } finally { await fx.cleanup(); }
 });
+
+test('integrated token read access is published only while the real listener owns the port', async () => {
+  const fx = await fixture();
+  const reservation = net.createServer();
+  await new Promise(resolve => reservation.listen(0, '127.0.0.1', resolve));
+  const port = reservation.address().port;
+  await new Promise(resolve => reservation.close(resolve));
+  let publicationSawBoundListener = false;
+  let running;
+  try {
+    const { io } = fakeIo({ addReadAcl: async () => {
+      const contender = net.createServer();
+      publicationSawBoundListener = await new Promise(resolve => {
+        contender.once('error', error => resolve(error.code === 'EADDRINUSE'));
+        contender.listen(port, '127.0.0.1', () => contender.close(() => resolve(false)));
+      });
+    } });
+    running = await start(fx, { io, port });
+    assert.equal(publicationSawBoundListener, true);
+  } finally { await running?.broker.stop('owner'); await fx.cleanup(); }
+});
+
+test('integrated stop cannot unlink a successor token publication', async () => {
+  const fx = await fixture();
+  let running;
+  try {
+    running = await start(fx);
+    const successor = path.join(fx.handoff, 'successor');
+    const successorToken = 'FAKE_SUCCESSOR_TOKEN_FOR_TESTS_ONLY_0123456789';
+    await fs.writeFile(successor, successorToken + '\n', { mode: 0o600 });
+    await fs.rename(successor, fx.plan.bearerTokenFile);
+    await running.broker.stop('owner');
+    assert.equal(await fs.readFile(fx.plan.bearerTokenFile, 'utf8'), successorToken + '\n');
+  } finally { await running?.broker.stop('owner'); await fx.cleanup(); }
+});
+
+test('failed integrated publication cleans only its own file and closes the listener', async () => {
+  const fx = await fixture();
+  const reservation = net.createServer();
+  await new Promise(resolve => reservation.listen(0, '127.0.0.1', resolve));
+  const port = reservation.address().port;
+  await new Promise(resolve => reservation.close(resolve));
+  const successorToken = 'FAKE_SUCCESSOR_TOKEN_FOR_TESTS_ONLY_0123456789';
+  try {
+    const { io } = fakeIo({ addReadAcl: async file => {
+      const successor = path.join(fx.handoff, 'successor');
+      await fs.writeFile(successor, successorToken + '\n', { mode: 0o600 });
+      await fs.rename(successor, file);
+      throw new Error('FAKE_ACL_FAILURE');
+    } });
+    await assert.rejects(start(fx, { io, port }), { code: 'handoff_unavailable' });
+    assert.equal(await fs.readFile(fx.plan.bearerTokenFile, 'utf8'), successorToken + '\n');
+    await assert.rejects(fetch('http://127.0.0.1:' + port + '/mcp'));
+  } finally { await fx.cleanup(); }
+});
+
+test('integrated expiry during startup refuses before listener or token publication', async () => {
+  const fx = await fixture();
+  let wall = Date.now();
+  let publications = 0;
+  try {
+    await assert.rejects(startIntegratedBroker({
+      home: fx.home, uid, now: () => wall, port: 0, transport: provider([]),
+      io: fakeIo({ addReadAcl: async () => { publications++; } }).io,
+      input: new PassThrough(), emit: () => {}, signals: { once() {}, removeListener() {} },
+      createToken: () => { wall += MAX_GRANT_MS; return TOKEN; },
+    }), { code: 'grant_inactive' });
+    assert.equal(publications, 0);
+    await assert.rejects(fs.stat(fx.plan.bearerTokenFile), { code: 'ENOENT' });
+  } finally { await fx.cleanup(); }
+});
+
+test('integrated shutdown reserves the listener until checked token cleanup completes', { timeout: 10_000 }, async () => {
+  const fx = await fixture();
+  let armed = false;
+  let announcePaused; let resume;
+  const paused = new Promise(resolve => { announcePaused = resolve; });
+  const released = new Promise(resolve => { resume = resolve; });
+  const { io } = fakeIo({ stat: async file => {
+    const info = await fs.lstat(file);
+    if (armed && file === fx.plan.bearerTokenFile) {
+      armed = false;
+      announcePaused();
+      await released;
+    }
+    return info;
+  } });
+  let running; let attempted; let successor; let stopping;
+  try {
+    running = await start(fx, { io });
+    const port = running.broker.server.address().port;
+    armed = true;
+    stopping = running.broker.stop('owner');
+    await paused;
+    let bindError;
+    try { attempted = await start(fx, { port }); } catch (error) { bindError = error; }
+    assert.equal(bindError?.code, 'port_unavailable');
+    assert.equal(running.broker.server.listening, true);
+    // No new provider admission while shutdown is waiting on the filesystem.
+    await assert.rejects(callTool(running.url, TOKEN));
+    assert.deepEqual(running.calls, []);
+    resume();
+    await stopping;
+    successor = await start(fx, { port });
+    assert.equal(await fs.readFile(fx.plan.bearerTokenFile, 'utf8'), TOKEN + '\n');
+    assert.equal((await callTool(successor.url, TOKEN)).isError, undefined);
+  } finally {
+    resume();
+    await stopping;
+    await attempted?.broker.stop('owner');
+    await successor?.broker.stop('owner');
+    await running?.broker.stop('owner');
+    await fx.cleanup();
+  }
+});
+
+test('integrated post-publication expiry keeps the listener reserved through token cleanup', { timeout: 10_000 }, async () => {
+  const fx = await fixture();
+  const reservation = net.createServer();
+  await new Promise(resolve => reservation.listen(0, '127.0.0.1', resolve));
+  const port = reservation.address().port;
+  await new Promise(resolve => reservation.close(resolve));
+  let wall = Date.now(); let armed = false;
+  let announcePaused; let resume;
+  const paused = new Promise(resolve => { announcePaused = resolve; });
+  const released = new Promise(resolve => { resume = resolve; });
+  const { io } = fakeIo({
+    aclCheck: async file => {
+      if (file === fx.plan.bearerTokenFile) { wall += MAX_GRANT_MS; armed = true; }
+    },
+    stat: async file => {
+      const info = await fs.lstat(file);
+      if (armed && file === fx.plan.bearerTokenFile) {
+        armed = false; announcePaused(); await released;
+      }
+      return info;
+    },
+  });
+  const failedStartup = start(fx, { io, port, now: () => wall }).then(() => undefined, error => error);
+  let attempted; let successor;
+  try {
+    await paused;
+    let bindError;
+    try { attempted = await start(fx, { port }); } catch (error) { bindError = error; }
+    assert.equal(bindError?.code, 'port_unavailable');
+    resume();
+    assert.equal((await failedStartup)?.code, 'grant_inactive');
+    await assert.rejects(fs.lstat(fx.plan.bearerTokenFile), { code: 'ENOENT' });
+    successor = await start(fx, { port });
+    assert.equal(await fs.readFile(fx.plan.bearerTokenFile, 'utf8'), TOKEN + '\n');
+  } finally {
+    resume(); await failedStartup;
+    await attempted?.broker.stop('owner'); await successor?.broker.stop('owner'); await fx.cleanup();
+  }
+});
+
+for (const failure of [false, true]) {
+  test('integrated publication validation gates provider admissions' + (failure ? ' on failure' : ' before ready'), { timeout: 10_000 }, async () => {
+    const fx = await fixture();
+    const reservation = net.createServer();
+    await new Promise(resolve => reservation.listen(0, '127.0.0.1', resolve));
+    const port = reservation.address().port;
+    await new Promise(resolve => reservation.close(resolve));
+    let checking; let finishCheck; let cleaning; let finishCleanup;
+    const validation = new Promise(resolve => { checking = resolve; });
+    const checked = new Promise(resolve => { finishCheck = resolve; });
+    const cleanup = new Promise(resolve => { cleaning = resolve; });
+    const cleaned = new Promise(resolve => { finishCleanup = resolve; });
+    let armCleanup = false;
+    const { io } = fakeIo({
+      aclCheck: async file => {
+        if (file === fx.plan.bearerTokenFile) {
+          checking(); await checked;
+          if (failure) { armCleanup = true; throw new Error('FAKE_FINAL_ACL_FAILURE'); }
+        }
+      },
+      stat: async file => {
+        const info = await fs.lstat(file);
+        if (armCleanup && file === fx.plan.bearerTokenFile) {
+          armCleanup = false; cleaning(); await cleaned;
+        }
+        return info;
+      },
+    });
+    const calls = [];
+    const startup = start(fx, { io, port, calls }).then(running => ({ running }), error => ({ error }));
+    let running; let attempted; let successor;
+    try {
+      await validation;
+      const url = 'http://127.0.0.1:' + port + '/mcp';
+      assert.equal((await fs.readFile(fx.plan.bearerTokenFile, 'utf8')).trim(), TOKEN);
+      assert.equal((await callTool(url, TOKEN)).isError, true);
+      assert.deepEqual(calls, []);
+      finishCheck();
+      if (failure) {
+        await cleanup;
+        assert.equal((await fetch(url, { method: 'POST' })).status, 503);
+        let bindError;
+        try { attempted = await start(fx, { port }); } catch (error) { bindError = error; }
+        assert.equal(bindError?.code, 'port_unavailable');
+        finishCleanup();
+        assert.equal((await startup).error?.code, 'handoff_unavailable');
+        successor = await start(fx, { port });
+        assert.equal(await fs.readFile(fx.plan.bearerTokenFile, 'utf8'), TOKEN + '\n');
+      } else {
+        running = (await startup).running;
+        assert.equal((await callTool(running.url, TOKEN)).isError, undefined);
+        assert.deepEqual(calls, [true]);
+      }
+    } finally {
+      finishCheck(); finishCleanup();
+      running ??= (await startup).running;
+      await running?.broker.stop('owner'); await attempted?.broker.stop('owner');
+      await successor?.broker.stop('owner'); await fx.cleanup();
+    }
+  });
+}
 
 test('control pipe EOF, malformed control and oversized control all stop the broker', async () => {
   for (const [send, reason] of [[null, 'parent'], ['{"v":1,"op":"restart"}\n', 'error'], ['x'.repeat(1024), 'error']]) {
@@ -438,16 +655,21 @@ test('every refusal path returns one fixed code and leaves no token behind', asy
   assert.ok(ERROR_CODES.includes('port_unavailable'));
 });
 
-test('a busy reviewed port fails closed and removes the handed-off token', async () => {
+test('a busy reviewed port never publishes or removes existing launch authority', async () => {
   const fx = await fixture();
   const blocker = net.createServer();
   await new Promise(resolve => blocker.listen(0, '127.0.0.1', resolve));
+  const existingToken = 'FAKE_EXISTING_TOKEN_FOR_TESTS_ONLY_0123456789';
+  await fs.writeFile(fx.plan.bearerTokenFile, existingToken + '\n', { mode: 0o600 });
+  let publications = 0;
   try {
     const lines = [];
-    await assert.rejects(startIntegratedBroker({ home: fx.home, uid, transport: provider([]), io: fakeIo().io,
+    await assert.rejects(startIntegratedBroker({ home: fx.home, uid, transport: provider([]), io: fakeIo({ addReadAcl: async () => { publications++; } }).io,
       input: new PassThrough(), emit: line => lines.push(line), createToken: () => TOKEN,
       port: blocker.address().port, signals: { once() {}, removeListener() {} } }), error => error.code === 'port_unavailable');
-    await assert.rejects(fs.stat(fx.plan.bearerTokenFile), { code: 'ENOENT' });
+    assert.equal(publications, 0);
+    assert.equal(await fs.readFile(fx.plan.bearerTokenFile, 'utf8'), existingToken + '\n');
+    assert.equal(lines.length, 0);
   } finally { blocker.close(); await fx.cleanup(); }
 });
 

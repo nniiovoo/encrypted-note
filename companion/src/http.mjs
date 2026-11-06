@@ -36,17 +36,20 @@ async function readBody(request) {
   }
   return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks)));
 }
-export async function startHttpServer({ generate, bearerToken, port = 8789 }) {
+export async function startHttpServer({ generate, bearerToken, port = 8789, beforeClose }) {
   if (typeof bearerToken !== 'string' || !/^[A-Za-z0-9_-]{32,256}$/.test(bearerToken) ||
-      !Number.isInteger(port) || port < 0 || port > 65535) {
+      !Number.isInteger(port) || port < 0 || port > 65535 ||
+      (beforeClose !== undefined && typeof beforeClose !== 'function')) {
     throw new Error('Invalid HTTP configuration.');
   }
   // Stateless HTTP transports still share cancellation state for the one scoped client.
   const activeCalls = new Map();
+  let shuttingDown = false;
   const server = http.createServer(async (request, response) => {
     let mcp;
     let transport;
     try {
+      if (shuttingDown) { reply(response, 503); return; }
       const actualPort = server.address().port;
       const hosts = ['127.0.0.1:' + actualPort, 'localhost:' + actualPort];
       const origins = hosts.map(host => 'http://' + host);
@@ -63,6 +66,7 @@ export async function startHttpServer({ generate, bearerToken, port = 8789 }) {
         reply(response, 415); return;
       }
       const body = await readBody(request);
+      if (shuttingDown) { reply(response, 503); return; }
       // A single bounded JSON-RPC message; batch calls are deliberately unsupported.
       if (!body || typeof body !== 'object' || Array.isArray(body)) { reply(response, 400); return; }
       if (body.method === 'notifications/cancelled') {
@@ -72,6 +76,7 @@ export async function startHttpServer({ generate, bearerToken, port = 8789 }) {
         response.writeHead(202, { 'cache-control': 'no-store' }); response.end(); return;
       }
       const scopedGenerate = async (args, { signal } = {}) => {
+        if (shuttingDown) throw new CompanionError('grant_expired');
         const id = body.id;
         if (activeCalls.has(id)) throw new CompanionError('busy');
         const controller = new AbortController();
@@ -105,6 +110,32 @@ export async function startHttpServer({ generate, bearerToken, port = 8789 }) {
   server.on('clientError', (_error, socket) => {
     socket.end('HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n');
   });
+  if (beforeClose) {
+    // Only protected callers install this per-instance barrier. Keep the real listener bound
+    // until its publication cleanup finishes; a successor process must still fail its bind.
+    const close = server.close.bind(server);
+    const pendingCloses = [];
+    let released = false;
+    const release = () => {
+      released = true;
+      // Calling the native close once for each queued call preserves its callback behavior:
+      // the first completes normally, repeated calls report ERR_SERVER_NOT_RUNNING.
+      for (const args of pendingCloses.splice(0)) close(...args);
+      server.closeAllConnections();
+    };
+    server.close = (...args) => {
+      if (released) return close(...args);
+      pendingCloses.push(args);
+      if (!shuttingDown) {
+        shuttingDown = true;
+        for (const controller of activeCalls.values()) controller.abort();
+        server.closeAllConnections();
+        // Cleanup failures must still finish shutdown; their text never leaves this boundary.
+        void Promise.resolve().then(beforeClose).then(release, release);
+      }
+      return server;
+    };
+  }
   await new Promise((resolve, reject) => {
     server.once('error', reject);
     server.listen(port, '127.0.0.1', resolve);

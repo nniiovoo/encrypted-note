@@ -79,8 +79,14 @@ Keys in your Vault are for you. The app gives agents no way to use them, and an 
 3. Keep it in a private file outside any repository, in the account where the agent runs. Never put it in a project's `.env` file, on a shared drive or an exFAT drive (exFAT has no owner-only permissions), or in a chat. On a Mac, copy the new key at the service, run this, then copy something else so the key leaves the clipboard. It leaves nothing in shell history:
 
    ```bash
-   ( umask 077; printf 'SERVICE_API_KEY=%s\n' "$(pbpaste)" > ~/agent-job-key.env )
+   (
+     umask 077
+     key_file=$(mktemp "$HOME/agent-job-key.XXXXXX") || exit 1
+     printf 'SERVICE_API_KEY=%s\n' "$(pbpaste)" > "$key_file" && printf 'Saved key file: %s\n' "$key_file"
+   )
    ```
+
+   This creates a fresh private file with a different name each time; it never overwrites an earlier key file or follows an existing link. Use the file name it prints when setting up your agent tool.
 
    If the agent runs in a separate account, how to get the key into that account is still open ([Order and account use](agent-companion.md#order-and-account-use)).
 
@@ -166,7 +172,7 @@ git fetch origin
 scripts/build-reader.sh --out <folder>
 ```
 
-It needs Rust, like the app build. Choose a folder outside the project, for example next to your Backups; the script refuses one inside it, or one that already holds a Reader. It builds the Reader from a fresh copy of `origin/main` as of that `git fetch`, not from your working folder, and prints the commit and the SHA-256 of the `enote-reader` it saved. Write both on paper, and copy this guide next to the Reader. Before you use it, run `shasum -a 256 enote-reader` in that folder and check that the result matches your paper. Another build of the same commit may give a different SHA-256, so check the copy you saved. Make a new one after updating the app, because a newer Vault may need a newer Reader. `--commit` builds an older commit on `main`, and `--offline` builds only from what Cargo has already downloaded. The script hasn't been tried on Windows.
+It needs Rust and Node.js 24 or newer, like the app build. Choose a folder outside the project, for example next to your Backups; the script refuses one inside it, or one that already holds a Reader. It builds the Reader from a fresh copy of `origin/main` as of that `git fetch`, not from your working folder, and prints the commit and the SHA-256 of the `enote-reader` it saved. Write both on paper, and copy this guide next to the Reader. Before you use it, run `shasum -a 256 enote-reader` in that folder and check that the result matches your paper. Another build of the same commit may give a different SHA-256, so check the copy you saved. Make a new one after updating the app, because a newer Vault may need a newer Reader. `--commit` builds an older commit on `main`, and `--offline` builds only from what Cargo has already downloaded. The script hasn't been tried on Windows.
 
 Why not just `cargo run`? It compiles whatever the project folder holds at the moment you type your Master Password, including unfinished or unreviewed changes an AI coding tool made there. A saved Reader built from merged `main` doesn't change afterwards.
 

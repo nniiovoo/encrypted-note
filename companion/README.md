@@ -10,6 +10,10 @@ The selected deployment is: agent/code → stdio bridge → local owner broker �
 
 The bridge lists the tool even while the broker is off and reads the token again on each call, so a new Start needs no restart of the agent's MCP client. With no token or no listener, a call returns one fixed error telling the agent to ask the owner.
 
+Both protected launchers bind the real loopback listener before publishing a fresh random 32-byte base64url token with the agent's read ACL. A failed bind leaves any existing launch's token untouched. The standalone launcher also rotates the token on every launch, without extending the reviewed plan's grant deadline. Cleanup uses the created file's inode/device lease, retains its open handle until cleanup, and removes only that publication; stale cleanup cannot remove a successor already published in the owner-controlled handoff directory. During startup, provider admissions remain disabled until publication protection fully validates and the grant is rechecked. Shutdown disables admissions and cancels active calls first, then keeps the listener bound through owned token cleanup before releasing the port. The same ordering covers failed publication and startup expiry, so a cooperating restart cannot publish a successor during the old cleanup. Standard close callbacks and repeated close calls retain their behavior.
+
+This closes the demonstrated capture-before-bind and later-token-reuse path. The bearer transport does not authenticate the server to the client; it is not complete endpoint authentication or protection against malicious software running as the owner.
+
 [The keyless code example](docs/keyless-code.md) shows the client call and its prerequisites. This is one restricted operation, not a drop-in OpenAI SDK endpoint. The Mac identity boundary, provider controls and live connection remain unverified. The planned credential file format is plaintext with owner-only permissions, not encrypted Vault storage; no real credential file has been provisioned. OpenAI receives the key over HTTPS for authentication. Owner Vault and wallet keys are never part of this route.
 
 ## Fixed operation
@@ -104,7 +108,7 @@ The integrated entry point runs the same fixed broker with:
 
 - fixed data paths inside the helper's own container (`$HOME/Library/Application Support/encrypted-note-companion/plan.json` and `credential.env`), never chosen by a caller;
 - one new grant of at most one hour for each owner Start, enforced before the credential read, before listening and before every admission, including direct loopback calls;
-- a fresh delegated agent token for each Start, written owner-only (0600, plus the single agent read ACL) into the owner-prepared handoff folder, and removed on every stop;
+- a fresh delegated agent token for each Start, written only after binding loopback, owner-only (0600, plus the single agent read ACL) into the owner-prepared handoff folder; each stop removes only the publication owned by that launch;
 - a bounded owner-control protocol on stdin/stdout, separate from the agent MCP channel: one `{"v":1,"op":"stop"}` command in; `ready`, `stopped`, `error` and `check` events with fixed codes out. Control EOF, a malformed command, a signal or the grant deadline stops the broker, and the process then exits without waiting for the helper to close the pipe. Nothing from the plan, credential, token, provider or MCP traffic is printed.
 
 Its `--check` mode reports readiness booleans and never reads the credential's contents. Code and runtime ancestors may be admin-group-writable (an app in /Applications) only after the agent account is confirmed not to be an administrator.

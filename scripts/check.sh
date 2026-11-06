@@ -40,6 +40,9 @@ node -e '
   }
 '
 
+echo "==> Reader publication safety"
+node --test scripts/build-reader.test.mjs
+
 # build.rs compiles only the client; service.swift is otherwise built by package-companion.sh alone.
 if [[ $(uname -s) == Darwin ]]; then
   echo "==> companion helper typecheck"

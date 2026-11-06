@@ -33,6 +33,15 @@ pub const STATUS_EVENT: &str = "status-changed";
 /// Managed state: the one `AppCore`.
 pub struct CoreState(pub Mutex<AppCore>);
 
+impl CoreState {
+    fn lock(&self, focused: &AtomicBool) -> MutexGuard<'_, AppCore> {
+        let mut core = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        // A queued Show or Copy can run before the focus-event worker.
+        core.set_window_in_front(focused.load(Ordering::SeqCst));
+        core
+    }
+}
+
 /// True while a Backup file dialog is open. The dialog takes focus from our window, which must
 /// not count as switching to another app (that could lock the Vault mid-backup).
 pub static DIALOG_OPEN: AtomicBool = AtomicBool::new(false);
@@ -49,9 +58,7 @@ pub fn status(core: &AppCore) -> AppStatus {
 pub fn core(app: &AppHandle) -> MutexGuard<'_, AppCore> {
     app.state::<CoreState>()
         .inner()
-        .0
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
+        .lock(&crate::WINDOW_FOCUSED)
 }
 
 /// Run `f` on the core, then tell the screens the new status.
@@ -744,9 +751,111 @@ fn open_chosen(path: &std::path::Path) -> Result<std::fs::File, ApiError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        COMPANION_START, SettingsRequest, backup_file_name, companion_start_confirmed,
+        COMPANION_START, CoreState, SettingsRequest, backup_file_name, companion_start_confirmed,
         companion_start_text,
     };
+    use crate::core::native::NativeAction;
+    use crate::core::{ApiError, AppCore, Clipboard, Config};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::{Arc, Mutex};
+    use zeroize::Zeroizing;
+
+    struct CountingClipboard(Arc<AtomicU64>);
+
+    impl Clipboard for CountingClipboard {
+        fn write(&mut self, _text: &str) -> Result<u64, ApiError> {
+            Ok(self.0.fetch_add(1, Ordering::SeqCst) + 1)
+        }
+
+        fn clear_if(&mut self, _change_count: u64) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn show_and_copy_use_focus_before_the_event_worker_runs() {
+        let temp = tempfile::tempdir().unwrap();
+        let copies = Arc::new(AtomicU64::new(0));
+        let mut core = AppCore::new(Config {
+            data_dir: temp.path().join("fictional-vault"),
+            home_dir: temp.path().join("fictional-home"),
+            limits: vault_format::Limits::TESTING,
+            clock: Box::new(crate::SystemClock::start()),
+            clipboard: Box::new(CountingClipboard(copies.clone())),
+            activity_anywhere_supported: false,
+        })
+        .unwrap();
+        let recovery = core
+            .create_vault(
+                Zeroizing::new("fake-lantern-quartz-mosaic-velvet-orbit".to_owned()),
+                vault_format::KdfParams::TESTING,
+            )
+            .unwrap()
+            .recovery_key
+            .unwrap();
+        core.confirm_recovery_kit(&recovery[recovery.len() - 9..])
+            .unwrap();
+        let id = core
+            .create_note(
+                serde_json::from_value(serde_json::json!({
+                    "kind": "api_key", "title": "Fictional focus test",
+                    "visible": {"service": "Fictional provider", "env_var": "FAKE_AGENT_KEY"},
+                    "hidden": {"key": "FAKE_KEY_FOR_FOCUS_TESTS_ONLY"}
+                }))
+                .unwrap(),
+                None,
+            )
+            .unwrap();
+        let state = CoreState(Mutex::new(core));
+        let focused = AtomicBool::new(true);
+        {
+            let mut core = state.lock(&focused);
+            core.show_field(&id, "key").unwrap();
+            core.hide_field();
+        }
+
+        // The OS recorded the loss, but its worker has not yet acquired CoreState.
+        focused.store(false, Ordering::SeqCst);
+        {
+            let mut core = state.lock(&focused);
+            let error = core.show_field(&id, "key").unwrap_err();
+            assert_eq!(error.code, "invalid_input");
+            assert!(error.message.contains("window is in front"));
+            for result in [
+                core.copy_field(&id, "key", None),
+                core.copy_field_line(&id, "key", 0),
+                core.copy_field_env(&id),
+                core.copy_visible_field(&id, "service"),
+            ] {
+                assert_eq!(result.unwrap_err().code, "invalid_input");
+            }
+            assert_eq!(
+                core.begin_native(NativeAction::CopyField {
+                    id: id.clone(),
+                    field: "key".to_owned(),
+                })
+                .err()
+                .unwrap()
+                .code,
+                "invalid_input"
+            );
+            assert_eq!(core.native_pending_id(), None);
+            assert_eq!(core.app_status().reveal, None);
+        }
+        assert_eq!(copies.load(Ordering::SeqCst), 0);
+
+        // The gain can also be newer than the last focus event applied to the core.
+        state
+            .0
+            .lock()
+            .unwrap()
+            .os_event(session::OsEvent::FocusLost);
+        focused.store(true, Ordering::SeqCst);
+        let mut core = state.lock(&focused);
+        core.show_field(&id, "key").unwrap();
+        core.copy_field(&id, "key", None).unwrap();
+        assert_eq!(copies.load(Ordering::SeqCst), 1);
+    }
 
     #[test]
     fn only_the_start_button_starts_the_companion() {
