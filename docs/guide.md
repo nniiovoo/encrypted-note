@@ -38,7 +38,7 @@ Time Machine or other full-computer backups may also copy these folders. Your Va
 
 ## AI tools on this computer
 
-encrypted-note gives AI agents no interface to your Vault. That limits the app, not your computer. Apart from the optional [Agent Companion](agent-companion.md), it has no tool, server or file for them, and the Companion's one text tool can't open your Vault. That doesn't stop an AI tool that runs in your own account on this computer, such as Claude Code, Codex or Cursor. It works as you, so it may be able to:
+encrypted-note gives AI agents no interface to your Vault. (Chat Wallets, accepted in [ADR-0011](adr/0011-chat-wallets.md), will add one narrow route for separate keys holding small amounts. They aren't built yet.) That limits the app, not your computer. Apart from the optional [Agent Companion](agent-companion.md), it has no tool, server or file for them, and the Companion's one text tool can't open your Vault. That doesn't stop an AI tool that runs in your own account on this computer, such as Claude Code, Codex or Cursor. It works as you, so it may be able to:
 
 - **Copy your Backups.** They stay encrypted, but whoever has a copy can keep guessing passwords on it for as long as they like, and it keeps opening with the Master Password and Recovery Key it was saved with.
 - **Copy your Vault folder.** The copy is encrypted, like a Backup. For the built Mac app on macOS 14 or later, macOS should ask before Terminal or another app opens that folder. If you allow Terminal, every tool you run in it gets that access until Terminal quits, and an app with Full Disk Access is never asked. On macOS 13, and for a release build that isn't sandboxed or a test run (Vault in `~/Library/Application Support`), nothing asks.

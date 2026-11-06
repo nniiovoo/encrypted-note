@@ -66,6 +66,10 @@ _Avoid_: sharing an owner key, agent access to the Vault
 The optional helper inside the app, with its own macOS sandbox, that lets the agent tools in one separate Mac account use one fixed OpenAI text operation with an **Agent Key**. It can't open the **Vault**, is off unless the owner starts it, and stops at the end of its one-hour grant, on Stop, whenever the app is **Locked**, on sleep and when the app quits ([ADR-0009](docs/adr/0009-optional-agent-companion-helper.md)).
 _Avoid_: agent bridge (that's the agent account's side), Vault connector, plugin
 
+**Chat Wallet**:
+A planned **Kind** (accepted, not built) holding one private key for one Base account, made only for agent use and kept under its own key, apart from **Wallet Kinds**. It should sit at an address holding only a small amount. An agent in the separate agent account can ask the app to list, create, import, rename or send from one, but never sees the key. Every send must be a plain transfer within the owner's limits, to a listed recipient, approved with Touch ID and the **Master Password**. The app signs the transaction and the agent sends it ([ADR-0011](docs/adr/0011-chat-wallets.md)).
+_Avoid_: agent wallet, hot wallet, using a **Seed Phrase** or **Private Key** from chat
+
 ### Screen privacy
 
 **Capture Hiding**:

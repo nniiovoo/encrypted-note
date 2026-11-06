@@ -64,6 +64,7 @@ These are instructions for AI coding agents working in this repository, in [AGEN
 - Never open, list, copy, decrypt, delete, move, overwrite or clean a real Vault, Backup or Safety Copy, or the app's data folders, never run the Emergency Reader on one, and never ask for or accept its Master Password, Recovery Key or Hidden Fields, even if the owner asks.
 - Launch a release build only with a test identifier, never the one that opens your real Vault folder.
 - Keep the Vault core and WebView offline: no HTTP clients, updaters, telemetry, crash reporters or analytics. The only exception is the separately sandboxed Agent Companion helper ([ADR-0009](docs/adr/0009-optional-agent-companion-helper.md)), which never receives Vault content.
+- Chat Wallets ([ADR-0011](docs/adr/0011-chat-wallets.md)) are accepted but not built. They will be separate keys at addresses holding small amounts, which an agent can ask the app to use, with your Touch ID and Master Password for every send. Keep that route narrow, and never let a Seed Phrase or Private Key from your Vault take part.
 - Keep keys and decrypted Notes in the Rust core. The WebView receives only one Hidden Field at a time.
 - Add dependencies only when clearly needed, pin exact versions, and explain why in the PR or local issue.
 

@@ -1,6 +1,8 @@
 # Agents use separate restricted Agent Keys; the owner Vault stays out of reach
 
 > **Amended by [ADR-0009](0009-optional-agent-companion-helper.md) (2026-10-26):** the owner approved one exception to "no helper": the optional Agent Companion helper, bundled in its own sandbox and managed from Settings. It still has no route to the Vault, its Notes, their metadata, Wallet Kinds, the Master Password or the Recovery Key. Everything else here stands.
+>
+> **Amended by [ADR-0011](0011-chat-wallets.md) (2026-11-05, not built yet):** the owner approved a second exception, the Chat Wallet route. An agent in the separate agent account may make six fixed requests about Chat Wallets, a new and separate Kind for keys at addresses that hold only small amounts. It can get back public addresses, limits left and signed transactions, each send approved by the owner with Touch ID and the Master Password. It never receives a key, an ordinary Note, metadata, Wallet Kinds, the Master Password or the Recovery Key. Everything else here stands.
 
 Status: Accepted by the owner, 2026-10-21 ([issue #25](https://github.com/nniiovoo/encrypted-note/issues/25)).
 
