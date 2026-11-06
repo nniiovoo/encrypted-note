@@ -66,8 +66,12 @@ _Avoid_: sharing an owner key, agent access to the Vault
 The optional helper inside the app, with its own macOS sandbox, that lets the agent tools in one separate Mac account use one fixed OpenAI text operation with an **Agent Key**. It can't open the **Vault**, is off unless the owner starts it, and stops at the end of its one-hour grant, on Stop, whenever the app is **Locked**, on sleep and when the app quits ([ADR-0009](docs/adr/0009-optional-agent-companion-helper.md)).
 _Avoid_: agent bridge (that's the agent account's side), Vault connector, plugin
 
+**Agent-added Note**:
+A **Note** an AI agent asked the app to store, marked "added by an agent" (accepted, not built). The owner typed its value into the app's own window; the agent never saw it. The agent can list it, edit its details and ask to replace or delete it, but never read or use its value, and it can't see or touch any other **Note**. Removing the mark takes it out of the agent's reach ([ADR-0012](docs/adr/0012-agents-store-and-manage-keys.md)).
+_Avoid_: agent key (that's an **Agent Key**), agent Note, managed key
+
 **Chat Wallet**:
-A planned **Kind** (accepted, not built) holding one private key for one Base account, made only for agent use and kept under its own key, apart from **Wallet Kinds**. It should sit at an address holding only a small amount. An agent in the separate agent account can ask the app to list, create, import, rename or send from one, but never sees the key. Every send must be a plain transfer within the owner's limits, to a listed recipient, approved with Touch ID and the **Master Password**. The app signs the transaction and the agent sends it ([ADR-0011](docs/adr/0011-chat-wallets.md)).
+Deferred (ADR-0011, not built): a key apart from the **Notes**, holding one private key for one Base account, made only for agent use and kept under its own key, apart from **Wallet Kinds**. It should sit at an address holding only a small amount. An agent in the separate agent account can ask the app to list, create, import, rename or send from one, but never sees the key. Every send must be a plain transfer within the owner's limits, to a listed recipient, approved with Touch ID and the **Master Password**. The app signs the transaction and the agent sends it ([ADR-0011](docs/adr/0011-chat-wallets.md)).
 _Avoid_: agent wallet, hot wallet, using a **Seed Phrase** or **Private Key** from chat
 
 ### Screen privacy
@@ -132,7 +136,7 @@ _Avoid_: pinned, bookmarked, starred item
 ## Relationships
 
 - The owner has one **Vault**; it moves between computers only when the owner copies the file by hand.
-- The app gives AI agents no interface to the **Vault**, its **Notes**, their metadata, **Backups**, **Safety Copies** or the **Emergency Reader**, and agents are told never to use them. That limits the app, not the computer: what keeps an agent running in the owner's own Mac account away from these files is the owner's setup. The **Master Password**, **Recovery Key** and **Wallet Kinds** never take part in agent work.
+- The app gives AI agents no interface to the **Vault**, its **Notes**, their metadata, **Backups**, **Safety Copies** or the **Emergency Reader**, and agents are told never to use them. (Once ADR-0012 is built, the one exception is **Agent-added Notes**: their names and visible details, never their values.) That limits the app, not the computer: what keeps an agent running in the owner's own Mac account away from these files is the owner's setup. The **Master Password**, **Recovery Key** and **Wallet Kinds** never take part in agent work.
 - The **Agent Companion** is the only **Agent Key** integration inside the app; it runs apart from the **Vault** in its own sandbox and never receives Vault content. Any other **Agent Key** integration is separate from this app. Hiding the key still lets an agent perform every operation its provider scope permits, within its enforced limits; only the owner can independently approve scope or limit changes ([ADR-0007](docs/adr/0007-agents-use-separate-restricted-keys.md)).
 - Results from an external agent's allowed service actions may leave this computer, including for a cloud model provider; no Vault content or metadata may enter that route.
 - Moving a **Vault** to the other computer means opening a **Backup** there. There is no separate "export" or "sync" concept.

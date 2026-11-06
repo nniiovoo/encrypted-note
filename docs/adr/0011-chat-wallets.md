@@ -1,6 +1,6 @@
 # Chat Wallets: separate keys an agent can ask the app to use, with the owner's approval
 
-Status: Accepted by the owner, 2026-11-05. **Not built yet.** Until it is, the app still gives agents no interface to the **Vault**, and the README, guide and security model describe the app as it is today.
+Status: **Deferred by the owner, 2026-11-05**, the day it was accepted. The goal is now for agents to store and manage keys without using them ([ADR-0012](0012-agents-store-and-manage-keys.md)), so nothing here is built. It is kept as a record of the design, should signing come back. The owner's later answers (Touch ID with the Master Password, an encrypted send history, every EVM and Solana wallet rather than Base alone) would need folding in then.
 
 Amends [ADR-0007](0007-agents-use-separate-restricted-keys.md). Leaves [ADR-0004](0004-wallet-kinds-under-a-separate-key.md) and [ADR-0009](0009-optional-agent-companion-helper.md) as written.
 
