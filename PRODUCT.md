@@ -10,7 +10,7 @@ An individual owner keeping personal secrets on their own Mac or Windows compute
 
 The optional Agent Companion serves a separate workflow: an owner gives tools in a distinct standard Mac account one restricted OpenAI text operation using a separately created Agent Key. An agent has no app interface to the Vault. The first private Agent Key entry flow is Mac only.
 
-Planned, accepted, not built: Chat Wallets ([ADR-0011](docs/adr/0011-chat-wallets.md)). The owner stores and manages separate small-amount keys by chatting with an agent. The agent asks, the app shows what will happen in its own native panel, and the owner approves every send with Touch ID and the Master Password. The agent never sees a key.
+Planned, accepted, not built: agents that store and manage keys ([ADR-0012](docs/adr/0012-agents-store-and-manage-keys.md)). From Claude or Codex, the owner asks for a key to be stored; the app opens its own native window, and the owner types the value there. The agent gets back only "saved", can list and edit the details of only the keys it added, and never sees or uses a value. Replacing a value or deleting a key happens in the app's own window too.
 
 ## Product Purpose
 
