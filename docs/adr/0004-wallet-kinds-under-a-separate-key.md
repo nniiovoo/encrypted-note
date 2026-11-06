@@ -1,5 +1,7 @@
 # Wallet Kinds are encrypted under a separate key that unlocking doesn't open
 
+> **Related: [ADR-0011](0011-chat-wallets.md) (2026-11-05, not built yet).** The app will sign transactions for one new Kind, the Chat Wallet, under its own key, separate from the Wallet Key. **Seed Phrases** and **Private Keys** are unchanged: they never sign, and never become Chat Wallets.
+
 Showing a **Seed Phrase** or **Private Key** requires the **Master Password** again. If the whole **Vault** were already decrypted in memory, that prompt would be only a UI check in front of exposed data. So the **Hidden Fields** of **Wallet Kinds** are encrypted a second time under a separate random Wallet Key, and a normal unlock does not open it. Only the **Master Password** (a fresh Argon2id derivation, about 0.5 s) or the **Recovery Key** can unwrap the Wallet Key. It is held just long enough to show, add or edit one **Note** and is then wiped. Someone at an **Unlocked** computer, or anything reading the app's memory while it's merely **Unlocked**, can see Wallet Kind titles, chains and addresses, but not the words or keys.
 
 ## Consequences
