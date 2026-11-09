@@ -4,7 +4,8 @@ use std::collections::BTreeMap;
 
 use common::*;
 use notes::{
-    BASE_SCHEMA_VERSION, Document, Filter, Kind, NewNote, NoteEdit, NotesError, SCHEMA_VERSION,
+    AGENT_MARK_SCHEMA_VERSION, BASE_SCHEMA_VERSION, Document, Filter, Kind,
+    NOTE_FIELDS_SCHEMA_VERSION, NewNote, NoteEdit, NotesError, SCHEMA_VERSION,
     TRASH_RETENTION_SECS, field,
 };
 use serde_json::json;
@@ -2263,7 +2264,11 @@ fn using_a_new_field_writes_schema_2_and_clearing_the_last_one_returns_to_schema
 
         d.update(&id, set_field(kind, name, value), None, T0 + 1)
             .unwrap();
-        assert_eq!(d.schema_version(), SCHEMA_VERSION, "{kind:?} {name}");
+        assert_eq!(
+            d.schema_version(),
+            NOTE_FIELDS_SCHEMA_VERSION,
+            "{kind:?} {name}"
+        );
         assert_eq!(written_schema(&d), 2, "{kind:?} {name}");
         // It reads back with the field, and is still schema 2.
         let back = Document::from_json(&d.to_json()).unwrap();
@@ -2395,17 +2400,26 @@ fn a_schema_2_body_that_uses_no_new_field_is_read_and_written_back_as_schema_1()
 }
 
 #[test]
-fn only_schema_1_and_2_are_read_and_anything_else_is_unsupported_not_damaged() {
+fn only_schemas_1_2_and_3_are_read_and_anything_else_is_unsupported_not_damaged() {
     let body = |version: u64| {
         serde_json::to_vec(&json!({
             "schema_version": version, "changed_at": T0, "change_counter": 0, "notes": []
         }))
         .unwrap()
     };
-    assert_eq!((BASE_SCHEMA_VERSION, SCHEMA_VERSION), (1, 2));
+    assert_eq!(
+        (
+            BASE_SCHEMA_VERSION,
+            NOTE_FIELDS_SCHEMA_VERSION,
+            AGENT_MARK_SCHEMA_VERSION,
+            SCHEMA_VERSION
+        ),
+        (1, 2, 3, 3)
+    );
     assert!(Document::from_json(&body(1)).is_ok());
     assert!(Document::from_json(&body(2)).is_ok());
-    for version in [0u32, 3, 4, 1000, u32::MAX] {
+    assert!(Document::from_json(&body(3)).is_ok());
+    for version in [0u32, 4, 5, 1000, u32::MAX] {
         assert_eq!(
             Document::from_json(&body(u64::from(version))).err(),
             Some(NotesError::UnsupportedSchema(version))
@@ -2413,8 +2427,8 @@ fn only_schema_1_and_2_are_read_and_anything_else_is_unsupported_not_damaged() {
     }
     // Whatever shape a later schema gives the rest of the body.
     assert_eq!(
-        Document::from_json(br#"{"schema_version":3,"entries":{"fake":true}}"#).err(),
-        Some(NotesError::UnsupportedSchema(3))
+        Document::from_json(br#"{"schema_version":4,"entries":{"fake":true}}"#).err(),
+        Some(NotesError::UnsupportedSchema(4))
     );
     // A version that isn't a u32 at all is damage.
     for odd in [

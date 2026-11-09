@@ -41,6 +41,9 @@ export interface NoteSummary {
   /** Whether the Kind's first Hidden Field has a value, so a row knows whether there is
    *  anything to copy. Rust always sends it. */
   has_hidden?: boolean;
+  /** Stored at an agent's request, and so within that agent's reach (ADR-0012). Rust always
+   *  sends it. */
+  added_by_agent?: boolean;
 }
 
 export interface NoteView {
@@ -55,6 +58,8 @@ export interface NoteView {
   created_at: number;
   updated_at: number;
   deleted_at: number | null;
+  /** As in NoteSummary. Rust always sends it. */
+  added_by_agent?: boolean;
 }
 
 export type Phase =
@@ -213,6 +218,34 @@ export interface SafetyCopy {
 
 export type CredentialKind = "password" | "recovery";
 
+/** An edit an agent asked for, field by field. `field` is "title" for the title, else a
+ *  visible field's name. Both values are visible details, never a Hidden Field. */
+export interface AgentChange {
+  field: string;
+  from: string;
+  to: string;
+}
+
+/** The one agent request waiting for the owner (ADR-0012). Visible parts only: never a value,
+ *  and never whether a Hidden Field has one. */
+export interface AgentPendingView {
+  request_id: string;
+  request: "store" | "edit" | "replace" | "delete";
+  kind: Kind;
+  /** The Note the request is about; null for a store. */
+  note_id: string | null;
+  /** The suggested title (store), or the Note's title now. Written by the agent: plain text. */
+  title: string;
+  /** The suggested visible details (store), or the Note's visible details now. */
+  visible: Record<string, string>;
+  /** An edit's changes. Empty for the other requests. */
+  changes: AgentChange[];
+  /** Whether completing it opens the Master Password panel. */
+  needs_password: boolean;
+  /** How long the agent waits before the request ends by itself. */
+  expires_in_ms: number;
+}
+
 /** Errors come back as { code, message }; message is already plain, owner-facing English. */
 export interface ApiError {
   code:
@@ -290,6 +323,36 @@ export const setFavorite = (id: string, favorite: boolean) => invoke<void>("set_
  *  body and saves, and nothing comes back, so the Note need not be shown first. Text Notes
  *  only; an empty text is refused. */
 export const appendText = (id: string, text: string) => invoke<void>("append_text", { id, text });
+
+// ---------- an agent's request (ADR-0012) ----------
+// The owner's side only. The agent's own requests reach Rust through the local route, never
+// through these calls. Each completion is checked again in Rust against the pending request, and
+// the Master Password panel opens where the request needs it: always for a delete, and for every
+// Seed Phrase and Private Key.
+
+/** Rust emits this when an agent's request starts waiting for the owner. No payload: ask
+ *  agentPending what it is. */
+export const onAgentRequest = (handler: () => void): Promise<UnlistenFn> => listen("agent-request", () => handler());
+/** null when nothing is waiting (or the grant ended). Read-only. */
+export const agentPending = () => invoke<AgentPendingView | null>("agent_pending");
+/** The owner typed the value and chose Save. `input.kind` must be the Kind the agent asked for.
+ *  Returns the new Note's id; the Note carries the "added by an agent" mark. */
+export const agentCompleteStore = (requestId: string, input: NoteInput) =>
+  invoke<string>("agent_complete_store", { requestId, input });
+/** The owner allowed the edit shown in the confirm. */
+export const agentConfirmEdit = (requestId: string) => invoke<void>("agent_confirm_edit", { requestId });
+/** The owner typed a new value. Hidden Fields only: the title and visible details must be the
+ *  Note's own, or Rust refuses it. */
+export const agentCompleteReplace = (requestId: string, input: Omit<NoteInput, "kind">) =>
+  invoke<void>("agent_complete_replace", { requestId, input });
+/** The owner allowed the delete. The Master Password panel follows for every Kind; the Note goes
+ *  to Trash. */
+export const agentConfirmDelete = (requestId: string) => invoke<void>("agent_confirm_delete", { requestId });
+/** The owner's Cancel: the agent hears "cancelled". An id that isn't waiting changes nothing. */
+export const agentCancelRequest = (requestId: string) => invoke<void>("agent_cancel_request", { requestId });
+/** Takes a Note out of the agent's reach for good. One way only: nothing in the screens can put
+ *  the mark on a Note. */
+export const removeAgentMark = (id: string) => invoke<void>("remove_agent_mark", { id });
 
 // ---------- showing & copying ----------
 
@@ -459,3 +522,25 @@ export const companionStop = () => invoke<CompanionView>("companion_stop");
 /** Opens OS file panels for the reviewed plan and the separate Agent Key file. Rust passes the
  *  chosen files to the helper unread; nothing about them comes back here. */
 export const companionSetup = () => invoke<CompanionView>("companion_setup");
+
+// ---------- agents storing keys (ADR-0012) ----------
+// Separate from the Agent Companion. Start takes no argument: Rust asks in its own dialog, which
+// names the account it lets in, for at most one hour. The screens can only name the account.
+
+export type AgentRouteState = "off" | "running" | "ended_by_lock" | "expired";
+
+export interface AgentRouteView {
+  state: AgentRouteState;
+  /** While running: how long until the hour ends. */
+  expires_in_ms: number | null;
+  /** The Mac account named for the agent, if any. Not a secret. */
+  account: string | null;
+}
+
+export const agentRouteStatus = () => invoke<AgentRouteView>("agent_route_status");
+/** Refused while Locked, or when the account or its folder isn't set up. Rejects with
+ *  "cancelled" when the owner doesn't confirm. */
+export const agentRouteStart = () => invoke<AgentRouteView>("agent_route_start");
+export const agentRouteStop = () => invoke<AgentRouteView>("agent_route_stop");
+/** null or "" clears it. A running grant ends: a new name needs a new Start. */
+export const setAgentAccount = (account: string | null) => invoke<AgentRouteView>("set_agent_account", { account });

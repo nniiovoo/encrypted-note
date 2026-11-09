@@ -2,6 +2,8 @@
 
 import { Fragment, useEffect, useId, useRef, useState, type ClipboardEvent as PasteEvent, type FormEvent, type KeyboardEvent as KeyEvent } from "react";
 import {
+  agentCompleteReplace,
+  agentCompleteStore,
   appendText,
   cancelNativeOperation,
   checkPrivateKey,
@@ -17,6 +19,7 @@ import {
   isApiError,
   isWalletKind,
   markSeedExplainerSeen,
+  removeAgentMark,
   seedWordlist,
   setFavorite,
   showAndCopyWalletField,
@@ -81,8 +84,8 @@ const CHAIN_NAMES = new Map<string, Chain>([
 ]);
 /** A stored chain as shown. Only one of the listed keys is looked up, never the raw text: a
  *  chain the owner named "constructor" shows as that word. */
-const chainLabel = (chain: string) => (Object.hasOwn(s.chains, chain) ? s.chains[chain as Chain] : chain);
-const label = (kind: Kind, field: string) => s.fields[kind][field] ?? field;
+export const chainLabel = (chain: string) => (Object.hasOwn(s.chains, chain) ? s.chains[chain as Chain] : chain);
+export const label = (kind: Kind, field: string) => s.fields[kind][field] ?? field;
 
 /** Lines in a pasted text. A single line break at the very end is not another line. */
 const lineCount = (text: string) => text.replace(/(\r\n|\r|\n)$/, "").split(/\r\n|\r|\n/).length;
@@ -263,7 +266,7 @@ export function Detail(
   const { id, status } = props;
   const [note, setNote] = useState<NoteView | null>(null);
   const { shown, keep, hide, version } = useShown(id, status);
-  const [modal, setModal] = useState<{ field: string; step: "show" | "confirm-copy" | "copy" | "trash" } | null>(null);
+  const [modal, setModal] = useState<{ field: string; step: "show" | "confirm-copy" | "copy" | "trash" | "unmark" } | null>(null);
   const { error, run } = useAction();
   // One Show request at a time: the answer to an earlier one would hide what a later one shows.
   // The field it is for, while it is on its way.
@@ -347,6 +350,13 @@ export function Detail(
       setNote({ ...note, favorite: !note.favorite });
       live?.onChanged();
     });
+  // One way only (ADR-0012): the screens can take the mark off, never put it on.
+  const stopAgentManaging = () =>
+    run(async () => {
+      await removeAgentMark(id);
+      setNote({ ...note, added_by_agent: false });
+      live?.onChanged();
+    });
 
   return (
     <article className="stack">
@@ -358,6 +368,8 @@ export function Detail(
             {s.kindNames[note.kind]} · {s.created(formatDate(note.created_at))} ·{" "}
             {note.deleted_at != null ? s.deletedOn(formatDate(note.deleted_at)) : s.updated(formatDate(note.updated_at))}
           </p>
+          {/* A line of its own, so a long date can't push it out of sight. */}
+          {note.added_by_agent && <p className="hint">{s.addedByAgent}</p>}
         </div>
         {live && (
           <>
@@ -501,7 +513,20 @@ export function Detail(
             <Icon name="trash" />
             {s.moveToTrash}
           </button>
+          {note.added_by_agent && <button onClick={() => setModal({ field: "", step: "unmark" })}>{s.stopAgentManaging}</button>}
         </div>
+      )}
+      {modal?.step === "unmark" && (
+        <Confirm
+          title={s.noteAction(s.stopAgentManaging, note.title)}
+          text={s.stopAgentManagingText}
+          confirmLabel={s.stopAgentManaging}
+          onConfirm={() => {
+            setModal(null);
+            stopAgentManaging();
+          }}
+          onClose={() => setModal(null)}
+        />
       )}
       {modal?.step === "show" && (
         <WalletShow id={id} title={note.title} field={modal.field} name={label(note.kind, modal.field)} status={status} onClose={() => setModal(null)} />
@@ -606,9 +631,18 @@ export function Editor(props: {
   onDraft: (draft: Draft) => void;
   /** The Sharing Guard shield covered this Editor: the draft it comes back with. */
   draft?: Draft | undefined;
+  /** Opened for an agent's request (ADR-0012). "store": a new Note, started from the agent's
+   *  suggestion (`seed`), saved with the mark. "replace": `note`'s Hidden Fields only, nothing
+   *  else can be changed. `ended`: the request is no longer waiting, so Save is off. */
+  agent?: { requestId: string; mode: "store" | "replace"; ended: boolean } | undefined;
 }) {
-  const { kind, note, seed, draft } = props;
+  const { kind, note, seed, draft, agent } = props;
   const wallet = isWalletKind(kind);
+  // Only the value can change: no title, visible field, removal or adding to a Text.
+  const valueOnly = agent?.mode === "replace";
+  // The box that takes the keyboard instead of the title. A replacement has no title box: its
+  // first Hidden Field takes it.
+  const focusField = props.focusField ?? (valueOnly ? FORM[kind].find((f) => HIDDEN.includes(f)) : undefined);
   const [title, setTitle] = useState(draft?.title ?? note?.title ?? seed?.title ?? "");
   // The chain as stored: a listed one, or any text. A new Note starts as EVM. A Note stored
   // without a chain is shown as Other, and saved as that.
@@ -656,7 +690,7 @@ export function Editor(props: {
   // That is how it starts, because nothing can be lost that way, unless Replace on the text is
   // what opened the Editor.
   const canAdd = kind === "text" && filled("body");
-  const [adding, setAdding] = useState(draft ? draft.adding : canAdd && props.focusField !== "body");
+  const [adding, setAdding] = useState(draft ? draft.adding : canAdd && focusField !== "body" && !valueOnly);
   const add = canAdd && adding;
   const newer = NEWER[kind];
   const phrase = words.every((w) => w.trim()) ? words.map((w) => w.trim()).join(" ") : "";
@@ -679,29 +713,36 @@ export function Editor(props: {
   // The title a save sends: a blank Title takes its name from the Service or Website.
   const finalTitle = title.trim() || titleSource();
   const titleField = note ? undefined : TITLE_FROM[kind];
+  // Whether a Hidden Field holds something typed.
+  const typed = (f: string) => (f === "words" ? words.some(Boolean) : !!hidden[f]);
   const missing = !finalTitle
     ? titleField && !(visible[titleField] ?? "").trim()
       ? s.addTitleOr(label(kind, titleField))
       : s.addTitle
-    : wordsOk
-      ? null
-      : s.fillWords(words.length, !!note);
-  const canSave = !busy && !missing && !pasteOverflow;
+    : !wordsOk
+      ? s.fillWords(words.length, !!note)
+      : valueOnly && !FORM[kind].some((f) => HIDDEN.includes(f) && typed(f))
+        ? s.agentTypeValue
+        : null;
+  // Not while a save is under way: the request stops waiting the moment that save succeeds.
+  const ended = !!agent?.ended && !busy && step === null;
+  const canSave = !busy && !missing && !pasteOverflow && !ended;
   const main = note ? undefined : MAIN[kind];
-  // Whether a Hidden Field holds something typed.
-  const typed = (f: string) => (f === "words" ? words.some(Boolean) : !!hidden[f]);
   // Hidden Fields of a Wallet Kind that the draft came back without and that are still blank.
   const again = (draft?.again ?? []).filter((f) => !typed(f) && !clear[f]);
-  const more = MORE[kind] ?? [];
+  // A replacement shows the Hidden Fields alone, and a Seed Phrase's number of words with them.
+  const shownFields = (fields: string[]) => (valueOnly ? fields.filter((f) => HIDDEN.includes(f) || f === "word_count") : fields);
+  const more = shownFields(MORE[kind] ?? []);
   // The fold can't close over something Save will write or remove, or the box that has the keyboard.
-  const mustOpen = more.some((f) => visible[f]?.trim() || typed(f) || filled(f) || clear[f] || again.includes(f) || f === props.focusField || f === clearedField);
+  const mustOpen = more.some((f) => visible[f]?.trim() || typed(f) || filled(f) || clear[f] || again.includes(f) || f === focusField || f === clearedField);
   // Only text typed here, on one line, in a box not ticked for removal. Never a stored value.
   const peekable =(f: string) => !!SHOWN_WHILE_TYPING[kind]?.includes(f) && !!hidden[f] && !clear[f] && lineCount(hidden[f]) < 2;
 
   useEffect(() => {
     // A duplicate, or a draft that came back, holds something unsaved from the start, so leaving
     // it asks first.
-    if (seed || draft) props.onDirty();
+    // So does one opened for an agent: leaving it cancels the agent's request.
+    if (seed || draft || agent) props.onDirty();
     setAnnounced(true);
     seedWordlist().then(setList, () => {});
   }, []);
@@ -812,8 +853,13 @@ export function Editor(props: {
       else if (f === "expires") input.visible[f] = fixExpiry(visible[f] ?? "");
       else if (f !== "word_count") input.visible[f] = visible[f] ?? "";
     }
+    if (agent?.mode === "replace" && note) {
+      // The Note's own title and no visible field: Rust refuses anything else here.
+      await agentCompleteReplace(agent.requestId, { title: note.title, visible: {}, hidden: input.hidden });
+      return props.onSaved(note.id);
+    }
     if (note) await updateNote(note.id, input);
-    const id = note ? note.id : await createNote({ kind, ...input });
+    const id = note ? note.id : agent ? await agentCompleteStore(agent.requestId, { kind, ...input }) : await createNote({ kind, ...input });
     // The explainer counts as seen once a Seed Phrase is actually saved.
     if (kind === "seed_phrase" && !props.status.settings.seed_explainer_seen) markSeedExplainerSeen().catch(() => {});
     if (another.current && props.onSavedAndNew) props.onSavedAndNew();
@@ -963,7 +1009,7 @@ export function Editor(props: {
           </button>
         </div>
       );
-    if (f === "words") return <SeedGrid key={f} list={list} words={words} setWords={setWords} editing={!!note} autoFocus={props.focusField === f} onDirty={props.onDirty} onOverflow={() => setPasteOverflow(true)} onAccepted={() => setPasteOverflow(false)} />;
+    if (f === "words") return <SeedGrid key={f} list={list} words={words} setWords={setWords} editing={!!note} autoFocus={focusField === f} onDirty={props.onDirty} onOverflow={() => setPasteOverflow(true)} onAccepted={() => setPasteOverflow(false)} />;
     if (f === "chain")
       return (
         <Fragment key={f}>
@@ -1039,13 +1085,13 @@ export function Editor(props: {
       placeholder: adds ? s.typeToAdd : had && !clear[f] ? s.leaveBlankToKeep : "",
       disabled: !!clear[f] && !adds,
       onChange: (e: { target: { value: string } }) => setHidden({ ...hidden, [f]: e.target.value }),
-      autoFocus: f === props.focusField || f === clearedField,
+      autoFocus: f === focusField || f === clearedField,
     };
     const peeking = peek === f && peekable(f);
     return (
       // Field is a label, and so is the checkbox: they sit one under the other in a plain box.
       <div key={f} className="field">
-        {f === "body" && canAdd && (
+        {f === "body" && canAdd && !valueOnly && (
           <Choice
             label={s.textMode}
             options={TEXT_MODES}
@@ -1122,7 +1168,7 @@ export function Editor(props: {
           </button>
         )}
         {peeking && <Value value={value} />}
-        {had && !adds && (
+        {had && !adds && !valueOnly && (
           <label className="check">
             <input
               type="checkbox"
@@ -1146,7 +1192,7 @@ export function Editor(props: {
         <header className="detail-head">
           <KindBadge kind={kind} size="large" />
           <div>
-            <h1>{note ? s.editTitle(s.kindNames[kind]) : s.newTitle(s.kindNames[kind])}</h1>
+            <h1>{valueOnly && note ? s.agentReplaceTitle(note.title) : note ? s.editTitle(s.kindNames[kind]) : s.newTitle(s.kindNames[kind])}</h1>
             {props.savedBefore && (
               <p className="ok" role="status">
                 {announced && s.savedAnother(s.kindNames[kind])}
@@ -1154,9 +1200,21 @@ export function Editor(props: {
             )}
           </div>
         </header>
+        {/* Who asked, and what the agent will and won't see of what is typed. */}
+        {agent && (
+          <>
+            <p className="warn">{valueOnly ? s.agentAskedReplace : s.agentAskedStore}</p>
+            <p className="hint">{valueOnly ? s.agentNeverSees : s.agentNeverSeesValue}</p>
+          </>
+        )}
+        {ended && (
+          <p className="error" role="alert">
+            {s.agentRequestEnded}
+          </p>
+        )}
         <p className="hint">
           {s.draftLossHint(props.status.settings.idle_minutes, !!props.status.settings.count_activity_anywhere, props.status.settings.lock_on_app_switch, !wallet)}
-          {wallet && ` ${s.draftLossWallet(FORM[kind].filter((f) => HIDDEN.includes(f)).map((f) => label(kind, f)))}`}
+          {wallet && !agent && ` ${s.draftLossWallet(FORM[kind].filter((f) => HIDDEN.includes(f)).map((f) => label(kind, f)))}`}
         </p>
         {/* Filled in after the first render, like "Saved" above, so that it is read out. */}
         {again.length > 0 && (
@@ -1165,7 +1223,7 @@ export function Editor(props: {
           </p>
         )}
         <div className="card stack">
-          <div className="field">
+          {!valueOnly && <div className="field">
             <Field label={s.title} hint={note ? undefined : s.titleHint[kind]} check={titleSlip && <span className="warn">{titleSlip.text}</span>}>
               {/* Not when a draft comes back from under the Sharing Guard shield: the owner may have
                   been typing in a Hidden Field, and would carry on in this box, in plain sight. */}
@@ -1178,13 +1236,13 @@ export function Editor(props: {
                   setTitle(e.target.value);
                   if (moved?.from === "title") setMoved(null);
                 }}
-                autoFocus={!props.focusField && !draft}
+                autoFocus={!focusField && !draft}
                 {...noAssist}
               />
             </Field>
             {moveLine("title", title, titleSlip)}
-          </div>
-          {FORM[kind].filter((f) => !more.includes(f)).map(fieldBox)}
+          </div>}
+          {shownFields(FORM[kind]).filter((f) => !more.includes(f)).map(fieldBox)}
           {more.length > 0 && (
             <details className="more-details" open={mustOpen || moreOpen}>
               {/* The state decides, not the browser, so the fold can't close over what mustOpen names. */}
@@ -1240,7 +1298,7 @@ export function Editor(props: {
       )}
       {step === "password" && (
         <NativeActionModal
-          title={s.noteAction(note ? s.edit : s.add, note?.title ?? finalTitle)}
+          title={s.noteAction(valueOnly ? s.replace : note ? s.edit : s.add, note?.title ?? finalTitle)}
           text={s.savePasswordText}
           onSubmit={save}
           onClose={() => setStep(null)}

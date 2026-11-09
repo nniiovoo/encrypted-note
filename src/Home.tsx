@@ -3,6 +3,7 @@
 import { Fragment, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent as KeyEvent } from "react";
 import {
   activity,
+  agentCancelRequest,
   cancelNativeOperation,
   copyField,
   deleteForever,
@@ -14,6 +15,7 @@ import {
   listNotes,
   restoreNote,
   vaultLocation,
+  type AgentPendingView,
   type AppStatus,
   type Filter,
   type Kind,
@@ -22,6 +24,7 @@ import {
 } from "./api";
 import { Choice, cmdKey, Confirm, daysUntil, dragRegion, ErrorLine, expiry, formatDate, mac, minSec, noAssist, NativeActionModal, seconds, TitlebarDrag, useAction } from "./components";
 import { Icon, KIND_ICONS, KindBadge, type IconName } from "./icons";
+import { AgentRequestDialog, useAgentPending } from "./AgentRequest";
 import { Detail, Editor, type Draft, type Prefill } from "./Note";
 import { Settings } from "./Settings";
 import { strings as s } from "./strings";
@@ -62,7 +65,14 @@ type Pane =
   | { type: "restoring"; id: string; draft: Draft }
   // `id`: the Note just moved, so that it can come straight back.
   | { type: "trashed"; id: string }
+  // An agent's request (ADR-0012): the Editor for the key it asked to store, or for a new value
+  // of `note`. Leaving the pane cancels the request.
+  | { type: "agent-store"; request: AgentPendingView }
+  | { type: "agent-replace"; request: AgentPendingView; note: NoteView }
   | null;
+
+/** The agent request a pane was opened for, if it was. */
+const agentPane = (pane: Pane) => (pane?.type === "agent-store" || pane?.type === "agent-replace" ? pane.request : null);
 
 type Sort = "recent" | "az";
 const SORTS = [["recent", s.sortRecent], ["az", s.sortAZ]] as const;
@@ -166,7 +176,24 @@ export function Home({ status, place, onPlace, readDraft, onDraft, onLock, onOpe
   // Starts as the count now: a copy made before this screen appeared is not a new one.
   const copiesWas = useRef(status.copies);
   const changed = () => setVersion((v) => v + 1);
+  // The agent's request, while one waits for the owner: an edit or delete confirm over whatever
+  // is on screen, or a store or replace pane (above).
+  const agent = useAgentPending();
+  const [agentDialog, setAgentDialog] = useState<AgentPendingView | null>(null);
+  // Said when a request ended before the owner answered it.
+  const [agentNotice, setAgentNotice] = useState<string | null>(null);
+  // Counts the agent's changes the owner allowed, so an open Detail fetches its Note again.
+  const [agentChanges, setAgentChanges] = useState(0);
+  const agentShown = agentPane(pane)?.request_id ?? agentDialog?.request_id ?? null;
+  const agentShownNow = useRef(agentShown);
+  agentShownNow.current = agentShown;
+  // Whether the request `id` stopped waiting. Not before the first answer.
+  const agentEnded = (id: string) => agent.pending !== undefined && agent.pending?.request_id !== id;
   const open = (next: Pane) => {
+    // Leaving an agent's pane any way but its own Save cancels its request. After a Save there is
+    // nothing left to cancel, so this changes nothing.
+    const leaving = agentPane(paneNow.current);
+    if (leaving && leaving.request_id !== agentPane(next)?.request_id) void agentCancelRequest(leaving.request_id).catch(() => {}).finally(agent.refresh);
     void cancelNativeOperation().catch(() => {});
     dirty.current = false;
     // Whatever Editor was open is saved, cancelled or discarded by now: App lets go of its draft.
@@ -223,6 +250,20 @@ export function Home({ status, place, onPlace, readDraft, onDraft, onLock, onOpe
       if (!listed(n)) setNav(ALL);
       open({ type: "pick" });
     });
+  // Opens an agent's request: a confirm for an edit or delete, the Editor for a store or replace.
+  // The Editor goes where the list beside it fits.
+  const openAgent = (request: AgentPendingView) => {
+    setAgentNotice(null);
+    if (request.request === "edit" || request.request === "delete") return setAgentDialog(request);
+    const n = navNow.current;
+    if (!listed(n) || (n.type === "kind" && n.kind !== request.kind)) setNav(ALL);
+    if (request.request === "store") return open({ type: "agent-store", request });
+    if (!request.note_id) return;
+    getNote(request.note_id).then(
+      (note) => open({ type: "agent-replace", request, note }),
+      () => setAgentNotice(s.agentRequestGone),
+    );
+  };
   const copyRow = (id: string, field: string) => {
     setCopyError(null);
     copyField(id, field).catch((e) => {
@@ -251,6 +292,15 @@ export function Home({ status, place, onPlace, readDraft, onDraft, onLock, onOpe
       setQuery("");
     }
   };
+
+  // A new request opens by itself unless the owner is busy: in a dialog, or in an Editor with
+  // unsaved changes. Then the banner below offers it.
+  const waiting = agent.pending;
+  useEffect(() => {
+    if (!waiting || waiting.request_id === agentShownNow.current || document.querySelector("[role=dialog]")) return;
+    if ((waiting.request === "store" || waiting.request === "replace") && dirty.current) return;
+    openAgent(waiting);
+  }, [waiting?.request_id]);
 
   useEffect(() => {
     if (nav.type === "settings") return;
@@ -365,7 +415,8 @@ export function Home({ status, place, onPlace, readDraft, onDraft, onLock, onOpe
   if (pane?.type === "note")
     detail = (
       <Detail
-        key={pane.id}
+        // A change the owner allowed for an agent is fetched afresh.
+        key={`${pane.id}:${agentChanges}`}
         id={pane.id}
         status={status}
         onEdit={(note, field) => open({ type: "edit", note, field })}
@@ -411,6 +462,38 @@ export function Home({ status, place, onPlace, readDraft, onDraft, onLock, onOpe
         onCancel={() => guard(() => open(null))}
         onDirty={onDirty}
         onDraft={report}
+      />
+    );
+  else if (pane?.type === "agent-store")
+    detail = (
+      <Editor
+        key={pane.request.request_id}
+        kind={pane.request.kind}
+        seed={{ title: pane.request.title, visible: pane.request.visible }}
+        agent={{ requestId: pane.request.request_id, mode: "store", ended: agentEnded(pane.request.request_id) }}
+        status={status}
+        onSaved={saved}
+        onCancel={() => guard(() => open(null))}
+        onDirty={onDirty}
+        // Never kept under the Shield: the request is still waiting afterwards, and opens again.
+        onDraft={() => {}}
+      />
+    );
+  else if (pane?.type === "agent-replace")
+    detail = (
+      <Editor
+        key={pane.request.request_id}
+        kind={pane.note.kind}
+        note={pane.note}
+        agent={{ requestId: pane.request.request_id, mode: "replace", ended: agentEnded(pane.request.request_id) }}
+        status={status}
+        onSaved={(id) => {
+          setAgentChanges((n) => n + 1);
+          saved(id);
+        }}
+        onCancel={() => guard(() => open({ type: "note", id: pane.note.id }))}
+        onDirty={onDirty}
+        onDraft={() => {}}
       />
     );
   else if (pane?.type === "trashed")
@@ -579,6 +662,33 @@ export function Home({ status, place, onPlace, readDraft, onDraft, onLock, onOpe
           </div>
         )}
         {status.purge_trash_failed && <div className="banner" role="alert">{s.trashPurgeFailed}</div>}
+        {/* An agent's request that isn't on screen: the owner was busy when it came, or left it
+            open behind a dialog. */}
+        {waiting && waiting.request_id !== agentShown && (
+          <div className="banner" role="status">
+            <Icon name="warning" />
+            <span>
+              {waiting.request === "store" ? s.agentWaiting.store(waiting.title, s.kindNames[waiting.kind]) : s.agentWaiting[waiting.request](waiting.title)}
+            </span>
+            <span className="banner-actions">
+              <button
+                onClick={() => {
+                  if (waiting.request === "edit" || waiting.request === "delete") openAgent(waiting);
+                  else guard(() => openAgent(waiting));
+                }}
+              >
+                {s.agentOpen}
+              </button>
+              <button onClick={() => void agentCancelRequest(waiting.request_id).finally(agent.refresh)}>{s.agentDecline}</button>
+            </span>
+          </div>
+        )}
+        {agentNotice && (
+          <div className="banner" role="status">
+            {agentNotice}
+            <button onClick={() => setAgentNotice(null)}>{s.dismiss}</button>
+          </div>
+        )}
         {nav.type === "settings" ? (
           <Settings
             status={status}
@@ -627,6 +737,7 @@ export function Home({ status, place, onPlace, readDraft, onDraft, onLock, onOpe
                           {/* The expiry first: a long subtitle is cut off at the end of the line. */}
                           <span className="hint">
                             {s.kindNames[n.kind]}
+                            {n.added_by_agent && ` · ${s.addedByAgent}`}
                             {due && " · "}
                             {due && <span className={due.past ? "expiry past" : "expiry"}>{due.text}</span>}
                             {n.subtitle && ` · ${n.subtitle}`}
@@ -699,10 +810,35 @@ export function Home({ status, place, onPlace, readDraft, onDraft, onLock, onOpe
           {s.copied(seconds(status.clipboard_clear_in_ms), copiedFrom)}
         </div>
       )}
+      {agentDialog && (
+        <AgentRequestDialog
+          key={agentDialog.request_id}
+          request={agentDialog}
+          ended={agentEnded(agentDialog.request_id)}
+          retryInMs={status.retry_in_ms}
+          onDone={() => {
+            const target = agentDialog.note_id;
+            setAgentDialog(null);
+            setAgentChanges((n) => n + 1);
+            changed();
+            agent.refresh();
+            // A Note the agent had deleted leaves the pane, with the way straight back.
+            if (agentDialog.request === "delete" && target && paneNow.current?.type === "note" && paneNow.current.id === target) open({ type: "trashed", id: target });
+          }}
+          onClose={() => {
+            setAgentDialog(null);
+            agent.refresh();
+          }}
+          onEnded={() => {
+            setAgentDialog(null);
+            setAgentNotice(s.agentRequestGone);
+          }}
+        />
+      )}
       {leaving && (
         <Confirm
           title={s.discardTitle}
-          text={s.discardText}
+          text={agentPane(pane) ? s.discardAgentText : s.discardText}
           confirmLabel={s.discard}
           onConfirm={() => {
             setLeaving(null);
@@ -845,6 +981,7 @@ function Trash(props: {
                     {/* The date first: a long subtitle is cut off at the end of the line. */}
                     <span className="hint">
                       {s.kindNames[n.kind]}
+                      {n.added_by_agent && ` · ${s.addedByAgent}`}
                       {n.deleted_at && ` · ${s.deletedOn(formatDate(n.deleted_at))}`}
                       {n.subtitle && ` · ${n.subtitle}`}
                     </span>

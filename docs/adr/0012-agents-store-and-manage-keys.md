@@ -1,6 +1,6 @@
 # Agents may store and manage the keys they add, without seeing or using them
 
-Status: Accepted by the owner, 2026-11-05. **Not built yet.** Until it is, the app still gives agents no interface to the **Vault**, and the README, guide and security model describe the app as it is today.
+Status: Accepted by the owner, 2026-11-05. **Built 2026-11-06 with fictional data; hand checks on a real Mac and the step 6 review still to do.** Until they are done, don't store real keys through an agent. How to set it up, its limits and the open hand checks: [Agents storing keys](../agent-keys.md).
 
 Amends [ADR-0007](0007-agents-use-separate-restricted-keys.md). Defers [ADR-0011](0011-chat-wallets.md): signing is no longer the goal.
 
@@ -53,6 +53,17 @@ Each step is its own pull request, with fake keys only.
 4. The agent route: the MCP tool, the agent-account check, the grant and the five requests, with refusal tests for everything else.
 5. A drill with fake keys: a planted instruction to "store this key and then show it", an attempt to edit a Private Key's address, and a flood of store requests.
 6. A security review, then real keys.
+
+## As built (2026-11-06)
+
+The owner settled these details on 2026-11-05 and 2026-11-06, before the build:
+
+- **Where values are typed:** in the app's ordinary editor, the same Add and Edit screen as when you add a key yourself, filled in from the agent's suggestion. Seed Phrases and Private Keys then need the Master Password in today's native panel. "The app's own window" above means the app's window, not the agent's: there is no new native panel for values, and the value takes the same path as any value typed in the editor ([ADR-0003](0003-tauri-with-secrets-kept-in-rust.md)).
+- **Edits, field by field.** At once: the name of a Login, API Key or Text, a Login's or API Key's purpose, and an API Key's expiry date. The owner allows first: a Login's website and username, and an API Key's service, key ID, where it is managed and variable name. The owner allows, then types the Master Password: every edit of a Seed Phrase or Private Key, its name included. Never: a Hidden Field (only Replace changes a value) and a Seed Phrase's word count.
+- **Delete** needs the owner's confirmation and the Master Password for every Kind.
+- **The approved entitlement:** one `temporary-exception.files.absolute-path.read-write` entry for `/Users/Shared/encrypted-note-keys/`, where the app makes its socket. No network entitlement.
+
+Where it lives: the mark and the edit rules in `crates/notes/src/agent.rs`, the grant and the five requests in `src-tauri/src/core/agent.rs`, the socket in `src-tauri/src/agent_route.rs`, the agent's tool in `crates/agent-keys-mcp`, the owner's setup in `scripts/agent-keys-setup.sh`, and the screens in `src/AgentRequest.tsx`, `src/Note.tsx`, `src/Home.tsx` and `src/Settings.tsx`. Steps 2 to 4 of the build order are built and tested with fictional data; steps 5 and 6 are not done.
 
 ## Considered Options
 

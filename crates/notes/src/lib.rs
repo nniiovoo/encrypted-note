@@ -15,9 +15,13 @@
 //!   edit that changes nothing is not a mutation.
 //! * A trashed Note stays in the document until 30 days after `deleted_at`, then
 //!   [`Document::purge_expired`] removes it.
-//! * The document is written as the oldest schema that can hold it: schema 2 only while some
-//!   Note uses a field schema 2 added ([`Kind::schema_2_fields`]), so a Vault that doesn't use
-//!   them stays readable by older builds and older Emergency Readers.
+//! * The document is written as the oldest schema that can hold it: schema 3 only while some
+//!   Note carries the "added by an agent" mark, otherwise schema 2 only while some Note uses a
+//!   field schema 2 added ([`Kind::schema_2_fields`]), otherwise schema 1. A Vault that doesn't
+//!   use what a newer schema added stays readable by older builds and older Emergency Readers.
+//! * The "added by an agent" mark (ADR-0012) is set only by [`Document::create_by_agent`],
+//!   never on an existing Note, and the agent's view of the Vault ([`Document::agent_notes`])
+//!   holds only marked Notes outside Trash, without any Hidden Field or sign of one.
 //!
 //! Serialisation (`to_json` / `from_json`) is the body format documented in FORMAT.md. Wallet
 //! field ciphertexts are stored as lowercase hex strings.
@@ -30,6 +34,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
+mod agent;
 pub mod keys;
 mod note;
 mod rules;
@@ -37,6 +42,7 @@ pub mod seed;
 
 use note::{Body, ParsedBody, StoredNote};
 
+pub use agent::{AgentEditRule, AgentNote, agent_edit_needs, agent_edit_rule};
 pub use rules::{MAX_ENV_VAR_CHARS, MAX_PURPOSE_CHARS};
 
 /// Seconds since the Unix epoch. Passed in by callers (no clock inside this crate).
@@ -47,8 +53,14 @@ pub type NoteId = String;
 /// How long a Note stays in Trash.
 pub const TRASH_RETENTION_SECS: i64 = 30 * 24 * 60 * 60;
 /// The newest document schema this build reads and writes.
-pub const SCHEMA_VERSION: u32 = 2;
-/// The oldest document schema, and the one written while no Note uses a field that schema 2
+pub const SCHEMA_VERSION: u32 = 3;
+/// The schema that added the "added by an agent" mark (ADR-0012), written while at least one
+/// Note (Trash included) carries it.
+pub const AGENT_MARK_SCHEMA_VERSION: u32 = 3;
+/// The schema that added the optional Note fields ([`Kind::schema_2_fields`]), written while at
+/// least one Note has a value in one of them and no Note carries the agent mark.
+pub const NOTE_FIELDS_SCHEMA_VERSION: u32 = 2;
+/// The oldest document schema, and the one written while no Note uses anything a newer schema
 /// added.
 pub const BASE_SCHEMA_VERSION: u32 = 1;
 /// The largest `change_counter` a body may carry. No real Vault gets near it (one count per
@@ -247,6 +259,9 @@ pub struct NoteSummary {
     /// True if the Kind's first Hidden Field has a value, so a row knows whether there is
     /// anything to copy.
     pub has_hidden: bool,
+    /// True if the Note was added through the agent route (ADR-0012), so the owner's list can
+    /// show it.
+    pub added_by_agent: bool,
 }
 
 /// What the detail view may show before anything is revealed.
@@ -262,6 +277,8 @@ pub struct NoteView {
     pub created_at: Timestamp,
     pub updated_at: Timestamp,
     pub deleted_at: Option<Timestamp>,
+    /// True if the Note was added through the agent route (ADR-0012).
+    pub added_by_agent: bool,
 }
 
 /// The whole Vault content. Implementers choose the private representation, but it must
@@ -281,11 +298,12 @@ impl Document {
         }
     }
 
-    /// Parse a decrypted body. Schema 1 and 2 are read; any other version is
+    /// Parse a decrypted body. Schema 1, 2 and 3 are read; any other version is
     /// `UnsupportedSchema`. Rejects Kind/field mismatches, values that break the original
-    /// stored rules for their field, and a body that says schema 1 but uses a field schema 2
-    /// added. Legacy Unicode line and paragraph separators in visible values are preserved;
-    /// new or changed values must exclude them.
+    /// stored rules for their field, and a body that says an older schema than it needs: schema
+    /// 1 with a field schema 2 added, or schema 1 or 2 with a Note added by an agent. Legacy
+    /// Unicode line and paragraph separators in visible values are preserved; new or changed
+    /// values must exclude them.
     pub fn from_json(bytes: &[u8]) -> Result<Document, NotesError> {
         // The version is read on its own first, so a body from another schema gets a clear
         // "unsupported schema" error instead of failing somewhere inside the Notes.
@@ -317,11 +335,12 @@ impl Document {
             change_counter: parsed.change_counter,
             notes: parsed.notes,
         };
-        // An older build refuses schema 2 as a whole. A body that claims the older schema while
-        // using a newer field was not written by any build, so it is not trusted.
+        // An older build refuses a newer schema as a whole. A body that claims an older schema
+        // while using something a newer one added was not written by any build, so it is not
+        // trusted.
         if parsed.schema_version < body.schema_version() {
             return Err(NotesError::Corrupt(format!(
-                "the document says schema {} but a Note uses a field added in schema {}",
+                "the document says schema {} but a Note uses something added in schema {}",
                 parsed.schema_version,
                 body.schema_version()
             )));
@@ -345,10 +364,11 @@ impl Document {
         out
     }
 
-    /// The schema version [`Document::to_json`] writes right now: 2 while at least one Note
-    /// (Trash included) has a value in a field schema 2 added, otherwise 1. It is worked out
-    /// from the Notes each time, never remembered, so it follows every change: clearing the
-    /// last such field, or removing the last Note that had one, brings it back to 1.
+    /// The schema version [`Document::to_json`] writes right now: 3 while at least one Note
+    /// (Trash included) carries the "added by an agent" mark, otherwise 2 while at least one
+    /// has a value in a field schema 2 added, otherwise 1. It is worked out from the Notes each
+    /// time, never remembered, so it follows every change: removing the last mark, clearing the
+    /// last such field, or removing the last Note that had one, brings it back down.
     pub fn schema_version(&self) -> u32 {
         self.body.schema_version()
     }
@@ -384,11 +404,26 @@ impl Document {
     /// Visible values are trimmed, and a value that breaks the rule for its field is refused
     /// (`InvalidValue`). A pasted key loses stray whitespace around it, and one that is only
     /// whitespace is left out (see `checked_hidden`).
+    ///
+    /// The new Note never carries the "added by an agent" mark: only
+    /// [`Document::create_by_agent`] sets it.
     pub fn create(
         &mut self,
         new: NewNote,
         cipher: Option<&dyn WalletCipher>,
         now: Timestamp,
+    ) -> Result<NoteId, NotesError> {
+        self.create_marked(new, cipher, now, false)
+    }
+
+    /// [`Document::create`], with the "added by an agent" mark set to `added_by_agent` before
+    /// the Note joins the document, so the mark is part of the Note's first save.
+    fn create_marked(
+        &mut self,
+        new: NewNote,
+        cipher: Option<&dyn WalletCipher>,
+        now: Timestamp,
+        added_by_agent: bool,
     ) -> Result<NoteId, NotesError> {
         let kind = new.kind;
         let title = checked_title(&new.title)?;
@@ -404,6 +439,7 @@ impl Document {
         let mut note = StoredNote::new(id.clone(), kind, title, now);
         let changes = seal_changes(&note, hidden, cipher)?;
         note.apply(visible, word_count, changes);
+        note.added_by_agent = added_by_agent;
         self.body.notes.push(note);
         self.touch(now);
         Ok(id)

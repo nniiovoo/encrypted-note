@@ -1,7 +1,8 @@
 //! Turning the Vault document into the text the Emergency Reader prints.
 //!
-//! Every Note is listed with its number, Trash included and marked: Kind, title, visible
-//! fields, then each Hidden Field as [`MASK`] unless revealing. When one Note is chosen by its
+//! Every Note is listed with its number, Trash included and marked: Kind, title (followed by
+//! "(added by an agent)" for a Note added through the agent route, ADR-0012), visible fields,
+//! then each Hidden Field as [`MASK`] unless revealing. When one Note is chosen by its
 //! number, only that Note is printed, and only its Hidden Fields are opened. The whole text is
 //! built in one wiping buffer before anything is printed.
 
@@ -128,6 +129,9 @@ pub fn render(
         out.push_str(kind_name(view.kind));
         out.push_str(": ");
         out.push_clean(&view.title);
+        if view.added_by_agent {
+            out.push_str(" (added by an agent)");
+        }
         if view.favorite {
             out.push_str(" (Favorite)");
         }
@@ -761,6 +765,55 @@ mod tests {
         }
         let (masked, _) = render(&doc, &one(&all, 2), false, no_cipher());
         assert!(masked.contains(&format!("    Key: {MASK}\n    Secret: {MASK}\n")));
+    }
+
+    #[test]
+    fn a_note_added_by_an_agent_says_so_after_its_title() {
+        let mut doc = Document::new(NOW);
+        let marked = doc
+            .create_by_agent(
+                new_note(
+                    Kind::Text,
+                    "Fake agent text",
+                    &[],
+                    &[(field::BODY, "fake-body")],
+                ),
+                None,
+                NOW,
+            )
+            .unwrap();
+        doc.create(
+            new_note(
+                Kind::Text,
+                "Fake owner text",
+                &[],
+                &[(field::BODY, "fake-body")],
+            ),
+            None,
+            NOW + 1,
+        )
+        .unwrap();
+        doc.set_favorite(&marked, true, NOW + 2).unwrap();
+        assert_eq!(doc.schema_version(), 3);
+        let all = numbered(&doc);
+        let (text, _) = render(&doc, &Selection::All(&all), false, no_cipher());
+        assert!(
+            text.contains("1. Text: Fake agent text (added by an agent) (Favorite)\n"),
+            "{}",
+            *text
+        );
+        assert!(text.contains("2. Text: Fake owner text\n"), "{}", *text);
+        assert_eq!(text.matches("added by an agent").count(), 1, "{}", *text);
+
+        // In Trash, the mark is still shown.
+        doc.trash(&marked, NOW + 3).unwrap();
+        let all = numbered(&doc);
+        let (text, _) = render(&doc, &one(&all, 2), false, no_cipher());
+        assert!(
+            text.contains("2. [In Trash] Text: Fake agent text (added by an agent) (Favorite)\n"),
+            "{}",
+            *text
+        );
     }
 
     #[test]

@@ -8,9 +8,9 @@ product
 
 An individual owner keeping personal secrets on their own Mac or Windows computer. The owner needs to find a Note, deliberately reveal a Hidden Field, save changes, make a Backup, or recover access without a server account. Use the established names in [CONTEXT.md](CONTEXT.md) and explain actions in plain language.
 
-The optional Agent Companion serves a separate workflow: an owner gives tools in a distinct standard Mac account one restricted OpenAI text operation using a separately created Agent Key. An agent has no app interface to the Vault. The first private Agent Key entry flow is Mac only.
+The optional Agent Companion serves a separate workflow: an owner gives tools in a distinct standard Mac account one restricted OpenAI text operation using a separately created Agent Key. An agent's only app interface to the Vault is the optional local route of ADR-0012, for the Notes an agent added and never their values. The first private Agent Key entry flow is Mac only.
 
-Planned, accepted, not built: agents that store and manage keys ([ADR-0012](docs/adr/0012-agents-store-and-manage-keys.md)). From Claude or Codex, the owner asks for a key to be stored; the app opens its own native window, and the owner types the value there. The agent gets back only "saved", can list and edit the details of only the keys it added, and never sees or uses a value. Replacing a value or deleting a key happens in the app's own window too.
+Built 2026-11-06, checked with fictional data only: agents that store and manage keys ([ADR-0012](docs/adr/0012-agents-store-and-manage-keys.md), [Agents storing keys](docs/agent-keys.md)). From Claude Code, Codex or the Claude app in the separate agent account, while the owner's grant runs, an agent asks for a key to be stored; the app comes to the front with its ordinary editor filled in from the agent's suggestion, and the owner types the value there. The agent gets back only "saved" and an id, can list and edit the details of only the keys it added, and never sees or uses a value. Replacing a value happens in the same editor, and edits that say where a key is used and deletes wait for the owner's confirm in the app. The screens say "An agent", because the app can't tell which program asked.
 
 ## Product Purpose
 

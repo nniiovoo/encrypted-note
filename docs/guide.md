@@ -19,12 +19,13 @@ Your Vault is saved in one folder in your user account on this computer (table b
 | Master Password | Not in any file | Only you know it. |
 | Recovery Key | Not in any file | Only on the paper where you wrote it. |
 | Touch ID (Mac, if you turn it on) | `quick-unlock.sealed` in the Vault folder | Yes. It holds a protected copy of the key that opens your Logins, API Keys and Text. It works only on this Mac, with a fingerprint saved on this Mac. It can't open the secret parts of Seed Phrases or Private Keys. |
-| Settings | `settings.json` in the Vault folder | No. Choices, dates, the count of wrong password tries, your Vault's id and a count of its changes (so the app can warn if an older copy opens) and, on a Mac, a check value for Touch ID; no Notes, titles or keys. Other programs in your account can change this file, so the Backup reminder is a nudge, not proof that a Backup exists, and the older-copy warning catches mistakes, not someone who changes this file too. |
+| Settings | `settings.json` in the Vault folder | No. Choices, dates, the count of wrong password tries, your Vault's id and a count of its changes (so the app can warn if an older copy opens), the agent's Mac user name if you set up agents storing keys and, on a Mac, a check value for Touch ID; no Notes, titles or keys. Other programs in your account can change this file, so the Backup reminder is a nudge, not proof that a Backup exists, and the older-copy warning catches mistakes, not someone who changes this file too. |
 | Backups | Wherever you saved them. The app suggests the name `encrypted-note-backup-YYYY-MM-DD-HHMM.enote`, with the date and time in UTC | Yes. Each opens with the Master Password and Recovery Key it had when saved. The app doesn't remember where. A Note you deleted or changed stays inside an old Backup for as long as you keep it. |
 | Copied values | Clipboard for 30 or 60 seconds (Seed Phrases and Private Keys always 30), then cleared | No. Other apps could read it during that time. If the app crashes, it can stay until you copy something else. |
 | Open Notes | App memory while Unlocked | Cleared on lock and quit, as far as the computer allows. The key that opens your Notes, unsaved typing and shown values are in memory too, and the computer may write memory to disk. |
 | Agent Key (only if you set up the Agent Companion) | `credential.env` in the helper's folder: `~/Library/Containers/com.encryptednote.app.companion/Data/Library/Application Support/encrypted-note-companion/` | **No. Plain text.** Other non-admin Mac accounts can't read it, but other software running under your account may be able to. While the Agent Companion runs, the key is also in the helper's memory. The file you made for setup also holds the key until you delete it. Deleting a file doesn't cancel the key: cancel it at OpenAI. |
 | Agent token (only while the Agent Companion runs) | `/Users/Shared/encrypted-note-companion/agent-token` | No. Made only for the agent account. Removed when the Agent Companion stops normally; each Start makes a new one. Not your Agent Key. |
+| Agents storing keys (only if you set it up) | `/Users/Shared/encrypted-note-keys/agent.sock`, only while a grant runs | Nothing is stored there: it's the app's socket, which only the agent account you named can use. The keys an agent asked to store are Notes in `vault.enote`, encrypted like any other. Removed when the grant ends normally. |
 
 Nothing is kept in Apple Keychain or on any server.
 
@@ -38,7 +39,7 @@ Time Machine or other full-computer backups may also copy these folders. Your Va
 
 ## AI tools on this computer
 
-encrypted-note gives AI agents no interface to your Vault. (A narrow route for agents to store keys you type into the app's own window, and to manage only the keys they added, without ever seeing a value, is accepted in [ADR-0012](adr/0012-agents-store-and-manage-keys.md). It isn't built yet.) That limits the app, not your computer. Apart from the optional [Agent Companion](agent-companion.md), it has no tool, server or file for them, and the Companion's one text tool can't open your Vault. That doesn't stop an AI tool that runs in your own account on this computer, such as Claude Code, Codex or Cursor. It works as you, so it may be able to:
+encrypted-note gives AI agents no interface to your Vault, apart from one narrow, optional route: while you let it, an agent in a separate Mac account can ask the app to store a key you type into the app yourself, and manage only the keys it added, without ever seeing a value ([Agents storing keys](agent-keys.md); built, but checked with fictional data only). That limits the app, not your computer. Apart from that route and the optional [Agent Companion](agent-companion.md), it has no tool, server or file for them, and the Companion's one text tool can't open your Vault. That doesn't stop an AI tool that runs in your own account on this computer, such as Claude Code, Codex or Cursor. It works as you, so it may be able to:
 
 - **Copy your Backups.** They stay encrypted, but whoever has a copy can keep guessing passwords on it for as long as they like, and it keeps opening with the Master Password and Recovery Key it was saved with.
 - **Copy your Vault folder.** The copy is encrypted, like a Backup. For the built Mac app on macOS 14 or later, macOS should ask before Terminal or another app opens that folder. If you allow Terminal, every tool you run in it gets that access until Terminal quits, and an app with Full Disk Access is never asked. On macOS 13, and for a release build that isn't sandboxed or a test run (Vault in `~/Library/Application Support`), nothing asks.
@@ -72,7 +73,11 @@ These lower the risk without removing it: a tool's file rules can miss a script 
 
 ## When an agent needs a key
 
-Keys in your Vault are for you. The app gives agents no way to use them, and an Agent Key is never a value stored in the Vault ([ADR-0007](adr/0007-agents-use-separate-restricted-keys.md)). The [Agent Companion](agent-companion.md) has its own Agent Key for its one tool. When an agent needs a key for anything else, such as GitHub or a cloud service:
+Keys in your Vault are for you. The app gives agents no way to use them, and an Agent Key is never a value stored in the Vault ([ADR-0007](adr/0007-agents-use-separate-restricted-keys.md)). The [Agent Companion](agent-companion.md) has its own Agent Key for its one tool.
+
+**If you want an agent to put a key in your Vault for you,** for example while it sets something up, see [Agents storing keys](agent-keys.md): the agent asks, the app opens its editor, and you type the value there. The agent can then manage that key's name and details, but it never sees the value and can't use it. It isn't a way to give an agent a key to use. That route is built but has been checked with fictional data only, so don't use it for real keys yet.
+
+When an agent needs a key for anything else, such as GitHub or a cloud service:
 
 1. Your main key stays in the Vault.
 2. At the service's website, make a new key for this one job, with the fewest permissions, the shortest expiry and any spending cap the service offers. Don't give it permission to make other keys.
@@ -151,7 +156,7 @@ Restoring an older copy also brings back the Master Password and Recovery Key it
 
 ## Deleting the app
 
-Deleting the Mac app leaves the Vault folder in place, so your Vault stays on this computer. If you set up the Agent Companion, its Agent Key file stays too: see [Stop, revoke, clean up](agent-companion.md#stop-revoke-clean-up).
+Deleting the Mac app leaves the Vault folder in place, so your Vault stays on this computer. If you set up the Agent Companion, its Agent Key file stays too: see [Stop, revoke, clean up](agent-companion.md#stop-revoke-clean-up). If you set up agents storing keys, its folder and the agent's tool stay: see [Stop and clean up](agent-keys.md#stop-and-clean-up).
 
 On Windows, what the uninstaller does to the Vault folder has not been checked. Make a Backup first and keep it outside that folder. If the uninstaller offers to delete the app's data, that could remove your Vault and Safety Copies.
 

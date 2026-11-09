@@ -12,7 +12,8 @@ const NEW_PASSWORD_MS: u64 = 10 * 60_000;
 /// 28 characters copied from paper.
 const RECOVERY_ENTRY_MS: u64 = 5 * 60_000;
 const MSG_COPY_UNREADABLE: &str = "That file isn't a complete, readable Vault, so it can't be opened. This computer's Vault wasn't touched. Try another Backup or Safety Copy.";
-type ActionDescription = (&'static str, Option<String>, Option<Kind>, bool);
+/// The label, target, Kind and whether the Master Password is needed.
+pub(super) type ActionDescription = (&'static str, Option<String>, Option<Kind>, bool);
 
 pub enum NativeAction {
     CreateVault {
@@ -60,6 +61,28 @@ pub enum NativeAction {
     },
     SetSettings(SettingsInput),
     EnrollQuickUnlock,
+    /// The owner saves the key an agent asked to store (ADR-0012). The new Note carries the
+    /// "added by an agent" mark. Wallet Kinds need the Master Password, as for `CreateNote`.
+    AgentStore {
+        request_id: String,
+        input: NoteInput,
+    },
+    /// The owner allows an agent's pending edit. The Master Password is needed for a Wallet
+    /// Kind; the edit itself is the one the agent asked for, held in the core.
+    AgentEdit {
+        request_id: String,
+    },
+    /// The owner types the new value an agent asked for: Hidden Fields only. Wallet Kinds need
+    /// the Master Password.
+    AgentReplace {
+        request_id: String,
+        input: NoteEditInput,
+    },
+    /// The owner allows an agent's delete: always with the Master Password, for every Kind,
+    /// then the Note goes to Trash.
+    AgentTrash {
+        request_id: String,
+    },
 }
 
 /// Rust-native text only. No Debug, Serialize or Clone implementation.
@@ -191,6 +214,12 @@ impl AppCore {
             return Err(not_now());
         }
         self.guard_check()?;
+        // An agent request that ended, or input that doesn't fit it, is refused before any
+        // panel opens.
+        let agent_action = agent::is_agent_action(&action);
+        if agent_action {
+            self.agent_check_native(&action)?;
+        }
         // A press from the background is refused before any panel opens.
         if matches!(
             action,
@@ -281,6 +310,9 @@ impl AppCore {
             action: Some(action),
             requires_credentials,
         });
+        if agent_action {
+            self.agent_native_opened(id);
+        }
         Ok(NativeOperation {
             id,
             action: label,
@@ -661,6 +693,10 @@ impl AppCore {
                 }
                 ("set_settings", None, None, weaker)
             }
+            NativeAction::AgentStore { .. }
+            | NativeAction::AgentEdit { .. }
+            | NativeAction::AgentReplace { .. }
+            | NativeAction::AgentTrash { .. } => self.agent_description(action)?,
         })
     }
 
@@ -804,6 +840,15 @@ impl AppCore {
                     expires_at: self.clock.now_ms().saturating_add(keep_ms),
                 });
                 Ok(NativeResult::Preview(preview))
+            }
+            (action, prepared @ (Prepared::Plain | Prepared::Wallet(_)))
+                if agent::is_agent_action(&action) =>
+            {
+                let authenticated = matches!(prepared, Prepared::Wallet(_));
+                if let Prepared::Wallet(wallet) = prepared {
+                    self.native_wallet = Some(wallet);
+                }
+                self.agent_commit(action, authenticated)
             }
             (action, prepared @ (Prepared::Plain | Prepared::Wallet(_))) => {
                 if let Prepared::Wallet(wallet) = prepared {

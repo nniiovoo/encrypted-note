@@ -11,5 +11,11 @@
     <!-- Backups: only files the owner picks in a save/open panel -->
     <key>com.apple.security.files.user-selected.read-write</key>
     <true/>
+    <!-- ADR-0012: the agents' local route binds its Unix socket in this owner-made folder, and
+         nowhere else. A file path, not a network entitlement. -->
+    <key>com.apple.security.temporary-exception.files.absolute-path.read-write</key>
+    <array>
+        <string>/Users/Shared/encrypted-note-keys/</string>
+    </array>
 </dict>
 </plist>

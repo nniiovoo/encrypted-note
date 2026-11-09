@@ -1,8 +1,12 @@
 // Settings: where the keys are stored, Backups (saving one, opening one, Safety Copies), Auto-lock,
-// Touch ID, Change Master Password, help, the optional Agent Companion (ADR-0009).
+// Touch ID, Change Master Password, help, the optional Agent Companion (ADR-0009) and the optional
+// route for agents storing keys (ADR-0012), which shares nothing with the Companion.
 
 import { useEffect, useId, useRef, useState, type ReactNode, type Ref } from "react";
 import {
+  agentRouteStart,
+  agentRouteStatus,
+  agentRouteStop,
   appStatus,
   changePassword,
   cancelNativeOperation,
@@ -21,9 +25,11 @@ import {
   replaceWithBackup,
   restoreSafetyCopy,
   revealVaultFolder,
+  setAgentAccount,
   setSettings,
   vaultLocation,
   writeBackup,
+  type AgentRouteView,
   type AppStatus,
   type BackupWritten,
   type CloudProvider,
@@ -32,7 +38,7 @@ import {
   type Settings as SettingsView,
   type VaultPreview,
 } from "./api";
-import { Choice, ErrorLine, formatDate, Modal, SafetyCopiesNote, seconds, useAction, useSafetyCopies } from "./components";
+import { Choice, ErrorLine, Field, formatDate, Modal, noAssist, SafetyCopiesNote, seconds, useAction, useSafetyCopies } from "./components";
 import { strings as s } from "./strings";
 
 const MINUTES = [1, 2, 5, 10, 15, 30, 60].map((m) => [m, s.minutes(m)] as const);
@@ -190,6 +196,8 @@ export function Settings({ status, onOperationOutcome, afterKit, scrollTo, onScr
       </details>
 
       <AgentCompanion companion={companion} />
+
+      <AgentKeys />
 
       {flow === "password" && <ChangePassword retryInMs={status.retry_in_ms} afterKit={afterKit} onClose={closeFlow} onOperationOutcome={onOperationOutcome} />}
       {flow === "open" && <ReplaceVault retryInMs={status.retry_in_ms} onClose={closeFlow} onOperationOutcome={onOperationOutcome} />}
@@ -548,6 +556,128 @@ function AgentCompanion({ companion }: { companion: ReturnType<typeof useCompani
         <details className="card more-details" open={open} onToggle={(e) => setOpen(e.currentTarget.open)}>
           <summary>
             <span role="status">{s.companionSummary(view ? companionStateName(view) : s.checking)}</span>
+          </summary>
+          <div className="stack">
+            {body}
+            <ErrorLine error={error} />
+          </div>
+        </details>
+      )}
+    </section>
+  );
+}
+
+/** Agents storing keys (ADR-0012): the agent's Mac user, Start for at most an hour, Stop, and
+ *  what is true now. Fixed fields from Rust only: a state, the time left and the account name.
+ *  None of the Agent Companion's code or state. */
+function AgentKeys() {
+  const [view, setView] = useState<AgentRouteView | null>(null);
+  // What the account box holds, once the owner has typed in it; null: as saved.
+  const [typed, setTyped] = useState<string | null>(null);
+  const [saved, setSaved] = useState(false);
+  const [open, setOpen] = useState(false);
+  const acting = useRef(false);
+  const { busy, error, run } = useAction();
+  useEffect(() => {
+    let alive = true;
+    const refresh = () => {
+      if (acting.current) return;
+      agentRouteStatus().then((next) => alive && !acting.current && setView(next), () => {});
+    };
+    refresh();
+    const timer = window.setInterval(refresh, 5000);
+    return () => {
+      alive = false;
+      window.clearInterval(timer);
+    };
+  }, []);
+  const act = (call: () => Promise<AgentRouteView>) => {
+    setSaved(false);
+    acting.current = true;
+    return run(async () => setView(await call())).finally(() => (acting.current = false));
+  };
+  const account = typed ?? view?.account ?? "";
+  const changedAccount = (account.trim() || null) !== (view?.account ?? null);
+  const saveAccount = () =>
+    act(() => setAgentAccount(account.trim() || null)).then((ok) => {
+      if (!ok) return;
+      setTyped(null);
+      setSaved(true);
+    });
+  const on = view?.state === "running";
+  // On, and anything that went wrong, is never folded away.
+  const mustShow = on || !!error;
+  useEffect(() => {
+    if (mustShow) setOpen(true);
+  }, [mustShow]);
+  const state = view ? s.agentKeysStates[view.state] : s.agentKeysChecking;
+  const left = on && view.expires_in_ms != null ? Math.max(1, Math.ceil(view.expires_in_ms / 60_000)) : null;
+
+  const body = (
+    <>
+      <p>{s.agentKeysIntro}</p>
+      <p className="hint">{s.agentKeysLeaves}</p>
+      {/* When folded, the summary line says this. */}
+      {mustShow && (
+        <p role="status" aria-live="polite">
+          <strong className="status-word">{state}</strong>
+          {left !== null && ` · ${s.agentKeysTimeLeft(left)}`}
+        </p>
+      )}
+      <form
+        className="setting"
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (changedAccount && !busy) saveAccount();
+        }}
+      >
+        <Field label={s.agentAccount} hint={s.agentAccountHint} check={saved && !changedAccount && <span className="ok" role="status">{s.agentAccountSaved}</span>}>
+          <input
+            value={account}
+            maxLength={31}
+            placeholder="enote-agent"
+            disabled={!view}
+            onChange={(e) => {
+              setSaved(false);
+              setTyped(e.target.value);
+            }}
+            {...noAssist}
+          />
+        </Field>
+        <div className="actions">
+          <button disabled={busy || !view || !changedAccount}>{s.agentAccountSave}</button>
+        </div>
+      </form>
+      <p className="hint">{s.agentKeysSetup}</p>
+      {!on && <p className="hint">{s.agentKeysStartLocks}</p>}
+      <div className="actions">
+        {on ? (
+          <button disabled={busy} onClick={() => act(agentRouteStop)}>
+            {s.agentKeysStop}
+          </button>
+        ) : (
+          <button className="primary" disabled={busy || !view || changedAccount} onClick={() => act(agentRouteStart)}>
+            {s.agentKeysStart}
+          </button>
+        )}
+      </div>
+    </>
+  );
+
+  return (
+    <section className="section">
+      {mustShow ? (
+        <>
+          <h2>{s.agentKeysTitle}</h2>
+          <div className="card stack">
+            {body}
+            <ErrorLine error={error} />
+          </div>
+        </>
+      ) : (
+        <details className="card more-details" open={open} onToggle={(e) => setOpen(e.currentTarget.open)}>
+          <summary>
+            <span role="status">{s.agentKeysSummary(state)}</span>
           </summary>
           <div className="stack">
             {body}

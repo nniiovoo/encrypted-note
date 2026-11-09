@@ -1,0 +1,33 @@
+[package]
+name = "agent-keys-mcp"
+version = "0.1.0"
+description = "enote-agent-keys: the agent's MCP tool for asking the encrypted-note app to store and manage keys it never sees (ADR-0012)."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "enote-agent-keys"
+path = "src/main.rs"
+
+# Only crates the workspace already pins. No network crate, no Vault crate: the tool knows the
+# route's protocol and nothing else.
+[dependencies]
+serde_json.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc = "=0.2.189"
+
+[dev-dependencies]
+tempfile.workspace = true
+
+# Workspace lints, except that the one reviewed module asking the kernel who runs the app
+# (`peer.rs`, getpeereid) may opt in to unsafe FFI.
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+dbg_macro = "deny"
+print_stdout = "deny"
+todo = "warn"
