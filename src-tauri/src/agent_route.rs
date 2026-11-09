@@ -744,8 +744,11 @@ mod other {
         Err(RouteError::Unavailable)
     }
 
+    /// No listener here. Like the Mac route, it is built only through `Default`.
     #[derive(Default)]
-    pub struct AgentRoute;
+    pub struct AgentRoute {
+        _private: (),
+    }
 
     impl AgentRoute {
         pub fn start<H: Host>(

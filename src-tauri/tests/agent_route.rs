@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use encrypted_note_app::agent_route::{
-    self, Host, Limits, Request, RouteError, check_account, error_reply, handle, parse_request,
+    Host, Limits, Request, RouteError, check_account, error_reply, handle, parse_request,
 };
 use encrypted_note_app::core::agent::{AgentEdit, AgentError, AgentStoreSuggestion};
 use encrypted_note_app::core::native::{NativeAction, NativeCredentials, NativeResult};
@@ -581,7 +581,9 @@ mod listener {
     use std::os::unix::net::UnixStream;
     use std::path::{Path, PathBuf};
 
-    use encrypted_note_app::agent_route::{AgentRoute, SOCKET_NAME, check_folder, expected_uid};
+    use encrypted_note_app::agent_route::{
+        self, AgentRoute, SOCKET_NAME, check_folder, expected_uid,
+    };
 
     use super::*;
 
