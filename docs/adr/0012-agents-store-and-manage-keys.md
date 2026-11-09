@@ -63,7 +63,11 @@ The owner settled these details on 2026-11-05 and 2026-11-06, before the build:
 - **Where values are typed:** in the app's ordinary editor, the same Add and Edit screen as when you add a key yourself, filled in from the agent's suggestion. Seed Phrases and Private Keys then need the Master Password in today's native panel. "The app's own window" above means the app's window, not the agent's: there is no new native panel for values, and the value takes the same path as any value typed in the editor ([ADR-0003](0003-tauri-with-secrets-kept-in-rust.md)).
 - **Edits, field by field.** At once: the name of a Login, API Key or Text, a Login's or API Key's purpose, and an API Key's expiry date. The owner allows first: a Login's website and username, and an API Key's service, key ID, where it is managed and variable name. The owner allows, then types the Master Password: every edit of a Seed Phrase or Private Key, its name included. Never: a Hidden Field (only Replace changes a value) and a Seed Phrase's word count.
 - **Delete** needs the owner's confirmation and the Master Password for every Kind.
-- **The approved entitlement:** one `temporary-exception.files.absolute-path.read-write` entry for `/Users/Shared/encrypted-note-keys/`, where the app makes its socket. No network entitlement.
+- **The approved entitlements:**
+  - one `temporary-exception.files.absolute-path.read-write` entry for `/Users/Shared/encrypted-note-keys/`, where the app makes its socket;
+  - approved 2026-11-09, after the [ADR-0013](0013-only-claude-code-and-codex-use-the-agent-routes.md) spike showed that entry alone can't make a socket under the sandbox: one `temporary-exception.sbpl` rule, `(allow network-bind network-inbound (local unix-socket (subpath "/Users/Shared/encrypted-note-keys")))`.
+
+  No new network entitlement, no outbound connections and no IP sockets.
 
 Where it lives: the mark and the edit rules in `crates/notes/src/agent.rs`, the grant and the five requests in `src-tauri/src/core/agent.rs`, the socket in `src-tauri/src/agent_route.rs`, the agent's tool in `crates/agent-keys-mcp`, the owner's setup in `scripts/agent-keys-setup.sh`, and the screens in `src/AgentRequest.tsx`, `src/Note.tsx`, `src/Home.tsx` and `src/Settings.tsx`. Steps 2 to 4 of the build order are built and tested with fictional data; steps 5 and 6 are not done.
 

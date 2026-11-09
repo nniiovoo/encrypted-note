@@ -2,6 +2,6 @@
 # check.sh fails if one differs. Change a line only in the pull request that changes the file,
 # and say why there: the owner reviews it. companion/policy.json is pinned in
 # src-tauri/companion/companion.lock.json instead.
-101968d3c18b423f5aa588d738148b86ef14121a872cdcb054dd2d981a993878  src-tauri/Entitlements.plist
+cd6e849a3dce73da0a3eaf37ed4ab5553c7aaac7ea0266d983d9baccdee2da50  src-tauri/Entitlements.plist
 f5be827d7f59a3c0174e81e2fcaf9a6dde063d6d2b0ab096cd16c112d69403c8  src-tauri/companion/helper.entitlements
 8b0aa42216f7b2be93f8f3d3a0e11f0e93d4b7faa837fe4408af92011de98f24  src-tauri/companion/node.entitlements

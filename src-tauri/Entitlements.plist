@@ -17,5 +17,13 @@
     <array>
         <string>/Users/Shared/encrypted-note-keys/</string>
     </array>
+    <!-- ADR-0012/ADR-0013 spike, 2026-11-09: the file exception above doesn't cover Unix
+         sockets, so bind() there is refused under the sandbox (network.server doesn't help
+         either). This one rule lets the app listen on, and accept, a Unix socket in that
+         folder only. No outbound connections, no IP sockets. -->
+    <key>com.apple.security.temporary-exception.sbpl</key>
+    <array>
+        <string>(allow network-bind network-inbound (local unix-socket (subpath "/Users/Shared/encrypted-note-keys")))</string>
+    </array>
 </dict>
 </plist>

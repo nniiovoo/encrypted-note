@@ -38,7 +38,7 @@ use crate::core::agent::{
 use crate::core::{ApiError, AppCore};
 
 /// The folder the owner's setup script makes, and the only place the app may write a socket
-/// (the one path exception in `Entitlements.plist`).
+/// (the folder exception and the one Unix-socket rule in `Entitlements.plist`).
 pub const SOCKET_DIR: &str = "/Users/Shared/encrypted-note-keys";
 pub const SOCKET_NAME: &str = "agent.sock";
 pub const PROTOCOL_VERSION: u64 = 1;
