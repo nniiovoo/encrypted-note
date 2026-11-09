@@ -6,9 +6,13 @@
 // and ended_by_lock (stopped because the Vault locked).
 // Notices: &missing (no_vault: the Vault's files are gone), &older (an older copy is open),
 // &touchid_changed (Touch ID turned off because the Vault file changed).
+// Agents storing keys (ADR-0012): agent=off, running, ended_by_lock or expired (Settings);
+// agent_request=store, store_wallet, edit, edit_wallet, replace or delete (a request waiting for
+// the owner); &agent_note (the fake API key is marked "added by an agent"; the requests that
+// name a Note mark theirs).
 // It never reaches Rust, so it proves nothing about native panels, locks or the real helper.
 import { mockIPC } from "@tauri-apps/api/mocks";
-import type { AppStatus, CompanionState, CompanionView, Filter, NoteSummary, NoteView, Phase } from "./api";
+import type { AgentPendingView, AgentRouteState, AgentRouteView, AppStatus, CompanionState, CompanionView, Filter, NoteSummary, NoteView, Phase } from "./api";
 
 const query = new URLSearchParams(location.search);
 const now = 1_790_000_000;
@@ -49,6 +53,7 @@ const status: AppStatus = {
 
 // Every value is fake. scripts/check.sh looks for "Fake login" in dist/ to prove this file never
 // ships, so keep that title.
+const agentRequest = query.get("agent_request");
 const views: NoteView[] = [
   {
     id: "n1",
@@ -60,6 +65,7 @@ const views: NoteView[] = [
     created_at: now,
     updated_at: now,
     deleted_at: null,
+    added_by_agent: false,
   },
   {
     id: "n2",
@@ -72,6 +78,7 @@ const views: NoteView[] = [
     created_at: now,
     updated_at: now,
     deleted_at: null,
+    added_by_agent: false,
   },
   {
     id: "n3",
@@ -83,6 +90,7 @@ const views: NoteView[] = [
     created_at: now,
     updated_at: now,
     deleted_at: null,
+    added_by_agent: false,
   },
   {
     id: "n4",
@@ -94,10 +102,16 @@ const views: NoteView[] = [
     created_at: now,
     updated_at: now,
     deleted_at: null,
+    added_by_agent: false,
   },
 ];
 
-const summaries: NoteSummary[] = views.map(({ id, kind, title, favorite, updated_at, deleted_at }) => ({
+// The fake API key is the agent's, and so is the fake wallet when a wallet request names it.
+const agentNote = agentRequest === "edit_wallet" ? "n3" : "n2";
+const marked = query.has("agent_note") || (!!agentRequest && !agentRequest.startsWith("store"));
+for (const view of views) view.added_by_agent = marked && view.id === agentNote;
+
+const summaries: NoteSummary[] = views.map(({ id, kind, title, favorite, updated_at, deleted_at, added_by_agent }) => ({
   id,
   kind,
   title,
@@ -107,6 +121,7 @@ const summaries: NoteSummary[] = views.map(({ id, kind, title, favorite, updated
   deleted_at,
   expires: null,
   has_hidden: true,
+  added_by_agent: !!added_by_agent,
 }));
 
 const companionQuery = query.get("companion") ?? "stopped";
@@ -133,6 +148,47 @@ const companion: CompanionView = {
   },
 };
 
+// Agents storing keys: the Settings view, and one fake request. Every title and detail is fake.
+const agentQuery = query.get("agent") ?? "off";
+const agentRoute: AgentRouteView = {
+  state: agentQuery as AgentRouteState,
+  expires_in_ms: agentQuery === "running" ? 42 * 60_000 : null,
+  account: "fake-agent",
+};
+const noteFor = (id: string) => views.find((note) => note.id === id)!;
+const requestFor = (kind: string): AgentPendingView | null => {
+  const base = { request_id: "fake-request-1", changes: [], expires_in_ms: 240_000 };
+  switch (kind) {
+    case "store":
+      return { ...base, request: "store", kind: "api_key", note_id: null, title: "Fake agent RPC", visible: { service: "rpc.example.test", purpose: "Fake testing" }, needs_password: false };
+    case "store_wallet":
+      return { ...base, request: "store", kind: "private_key", note_id: null, title: "Fake agent EVM key", visible: { chain: "evm", address: "0x00000000000000000000000000000000000000a1" }, needs_password: true };
+    case "edit":
+    case "edit_wallet":
+    case "replace":
+    case "delete": {
+      const note = noteFor(agentNote);
+      const request = kind === "edit_wallet" ? "edit" : kind;
+      const changes =
+        kind === "edit"
+          ? [
+              { field: "service", from: "Example Test Service", to: "Fake Other Service" },
+              { field: "url", from: "", to: "https://manage.example.test" },
+            ]
+          : kind === "edit_wallet"
+            ? [{ field: "address", from: "", to: "0x00000000000000000000000000000000000000b2" }]
+            : [];
+      return { ...base, request, kind: note.kind, note_id: note.id, title: note.title, visible: note.visible, changes, needs_password: kind !== "edit" && kind !== "replace" ? true : note.kind === "seed_phrase" };
+    }
+    default:
+      return null;
+  }
+};
+let pending = agentRequest ? requestFor(agentRequest) : null;
+const mark = (id: string, on: boolean) => {
+  for (const note of [...views, ...summaries]) if (note.id === id) note.added_by_agent = on;
+};
+
 mockIPC(
   (command, args) => {
     switch (command) {
@@ -157,6 +213,33 @@ mockIPC(
         return companion;
       case "set_settings":
         return status.settings;
+      case "agent_pending":
+        return pending;
+      case "agent_complete_store":
+        // Saved as the fake API key, marked.
+        pending = null;
+        mark("n2", true);
+        return "n2";
+      case "agent_confirm_edit":
+      case "agent_complete_replace":
+      case "agent_confirm_delete":
+      case "agent_cancel_request":
+        pending = null;
+        return undefined;
+      case "remove_agent_mark":
+        mark((args as { id: string }).id, false);
+        return undefined;
+      case "agent_route_status":
+      case "set_agent_account":
+        return agentRoute;
+      case "agent_route_start":
+        agentRoute.state = "running";
+        agentRoute.expires_in_ms = 60 * 60_000;
+        return agentRoute;
+      case "agent_route_stop":
+        agentRoute.state = "off";
+        agentRoute.expires_in_ms = null;
+        return agentRoute;
       case "seed_wordlist":
         return [];
       default:

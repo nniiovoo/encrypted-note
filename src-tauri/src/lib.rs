@@ -9,12 +9,16 @@
 //! * `platform`: macOS and Windows adapters (Capture Hiding self-check, running apps, clipboard,
 //!   lock events).
 //! * `wipe_on_free`: the global allocator, which wipes every block as it is freed.
+//! * [`agent_route`]: the agents' local socket (ADR-0012), open only while the owner's grant
+//!   runs and answering only the agent account; it never carries a value.
 //! * This file: startup, the rule that the window may load nothing but the app itself, window
 //!   events, and the background thread that ticks the session every 500 ms and polls running
 //!   apps and the Capture Hiding self-check every 2 s.
 
 #![deny(unsafe_code)]
 
+#[allow(unsafe_code)]
+pub mod agent_route;
 #[allow(unsafe_code)]
 pub mod biometry;
 mod commands;
@@ -90,6 +94,17 @@ pub fn run() {
             commands::empty_trash,
             commands::set_favorite,
             commands::append_text,
+            commands::agent_pending,
+            commands::agent_complete_store,
+            commands::agent_confirm_edit,
+            commands::agent_complete_replace,
+            commands::agent_confirm_delete,
+            commands::agent_cancel_request,
+            commands::remove_agent_mark,
+            commands::agent_route_status,
+            commands::agent_route_start,
+            commands::agent_route_stop,
+            commands::set_agent_account,
             commands::show_field,
             commands::show_wallet_field,
             commands::show_and_copy_wallet_field,
@@ -137,6 +152,8 @@ pub fn run() {
             commands::os_event(app, OsEvent::Quit);
             // The Agent Companion ends with the app (ADR-0009).
             companion::stop_on_exit(app);
+            // So does the agents' local route, socket and all (ADR-0012).
+            agent_route::stop_on_exit(app);
         }
     });
 }
@@ -222,6 +239,8 @@ fn setup(app: &AppHandle) {
     app.manage(quick_runtime::QuickRuntime::new(quick_unlock_path));
     // Supervised beside the core, never inside it: the Vault core holds no helper state.
     app.manage(companion::Companion::new(companion::system_transport()));
+    // The agents' local route (ADR-0012): beside the core too, and apart from the companion.
+    app.manage(agent_route::AgentRoute::default());
 
     let handle = app.clone();
     platform::observe_lock_events(app, move |event| {
@@ -231,6 +250,8 @@ fn setup(app: &AppHandle) {
             OsEvent::Sleep | OsEvent::ScreenLocked | OsEvent::UserSwitched | OsEvent::Quit
         ) {
             companion::stop_for_lifecycle(&handle, true);
+            // The agents' route too; the core ends its grant as it locks.
+            agent_route::stop_for_lifecycle(&handle);
         }
         note_focus(event);
         // Never block the main thread on the core (an unlock may be running Argon2id).
@@ -347,6 +368,12 @@ fn background(app: &AppHandle) {
             let locked = matches!(key.phase, "locked" | "no_vault");
             companion::stop_for_lifecycle(app, locked);
         }
+        // The agents' route listens only while its grant runs: a lock, a phase change or the
+        // hour ending stops it (ADR-0012).
+        agent_route::sync(
+            app,
+            key.phase == "unlocked" && core.agent_grant_status().state == "running",
+        );
         if last.as_ref() != Some(&key) {
             let _ = app.emit(STATUS_EVENT, commands::status(&core));
             last = Some(key);

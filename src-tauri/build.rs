@@ -22,6 +22,20 @@ const COMMANDS: &[&str] = &[
     "empty_trash",
     "set_favorite",
     "append_text",
+    // The owner's side of an agent's request (ADR-0012). The agent's requests never come
+    // through the webview.
+    "agent_pending",
+    "agent_complete_store",
+    "agent_confirm_edit",
+    "agent_complete_replace",
+    "agent_confirm_delete",
+    "agent_cancel_request",
+    "remove_agent_mark",
+    // The owner's Start, Stop and status for the agents' local route, and its account name.
+    "agent_route_status",
+    "agent_route_start",
+    "agent_route_stop",
+    "set_agent_account",
     "show_field",
     "show_wallet_field",
     "show_and_copy_wallet_field",

@@ -16,6 +16,12 @@
 // node:http (the loopback server); no other Node networking module or browser network API may
 // appear. companion/policy.json must match the SHA-256 pinned in companion.lock.json and name
 // exactly the approved destination, which generate.mjs also refuses to load without.
+// A fourth check keeps the agents' local route (ADR-0012) in its two places: Unix domain socket
+// types, std::os::unix::net, getpeereid/peer credentials and libc bind/listen/accept may appear
+// only in src-tauri/src/agent_route.rs (the app's listener) and crates/agent-keys-mcp/src/ (the
+// agent's tool). Those files and src-tauri/src/core/agent.rs must not name `companion::` (the
+// route shares nothing with the Agent Companion), and the tool's Cargo.toml may depend on no
+// Vault crate.
 // Patterns: browser fetch/sendBeacon calls (also fetch?.()), XMLHttpRequest, WebSocket,
 // EventSource, WebTransport and RTCPeerConnection names; Rust std::net/tokio::net, socket types,
 // libc socket/connect/getaddrinfo and NSURLSession/NSURLConnection names.
@@ -41,6 +47,11 @@ import { fileURLToPath } from "node:url";
 const browserApi = /\b(?:fetch|sendBeacon)(?=\s*(?:\?\.\s*)?\()|\b(?:XMLHttpRequest|WebSocket|EventSource|WebTransport|(?:webkit|moz)?RTCPeerConnection)\b/g;
 const rustApi = /\b(?:std|tokio)\s*::\s*net\b|\b(?:TcpStream|TcpListener|UdpSocket)\b|\blibc\s*::\s*(?:socket|connect|getaddrinfo)\b|\blibc\s*::\s*\{[^;]*\b(?:socket|connect|getaddrinfo)\b|\blibc\s*::\s*\*|\bNSURL(?:Session|Connection)\b/g;
 const nativeApi = /\b(?:URLSession|NSURLSession|URLRequest|NSURLConnection|NWConnection|NWListener|getaddrinfo)\b|\b(?:import|include)\s*[<"]?\s*(?:Network|CFNetwork)\b|\bimport\s+\w+\s+(?:Network|CFNetwork)\b|\bsocket\s*\(|\bCF(?:Read|Write)?Stream\w*|\bnw_(?:connection|listener)\w*|\b(?:NS)?URL(?:Components)?(?:\s*\.\s*init)?\s*\(\s*string\s*:|\bURLWithString\s*:|\[\s*NSURL\s+alloc\s*\]\s*initWithString\s*:/g;
+const localSocketApi = /\b(?:UnixListener|UnixStream|UnixDatagram|getpeereid|LOCAL_PEERCRED|SO_PEERCRED|peer_cred)\b|\bstd\s*::\s*os\s*::\s*unix\s*::\s*net\b|\blibc\s*::\s*(?:bind|listen|accept)\b/g;
+const localSocketPlace = /^(?:src-tauri\/src\/agent_route\.rs|crates\/agent-keys-mcp\/src\/.*\.rs)$/;
+const keyRoutePlace = /^(?:src-tauri\/src\/agent_route\.rs|src-tauri\/src\/core\/agent\.rs|crates\/agent-keys-mcp\/src\/.*\.rs)$/;
+const companionPathRef = /\bcompanion\s*::/g;
+const vaultCrates = /^\s*(?:vault-format|notes|session|policy|guard|store|enote-reader|encrypted-note-app)\b/m;
 const rootPage = /^(?:index|fixture)\.html$/;
 const browserSource = /^(?:src|isolation)\/.*\.(?:[cm]?[jt]s|jsx|tsx|html)$/;
 const rustSource = /^(?:src-tauri\/src|crates\/[^/]+\/src)\/.*\.rs$/;
@@ -88,6 +99,29 @@ function policyProblems(policyText, pinnedSha256) {
     if (policy[key] !== value) problems.push(`companion/policy.json: ${key} is not the approved destination`);
   }
   return problems;
+}
+
+// ADR-0012: local sockets only where the agents' route lives.
+function localSockets(path, source) {
+  if (!rustSource.test(path) || localSocketPlace.test(path)) return [];
+  return [...source.matchAll(localSocketApi)].map((match) => {
+    const line = source.slice(0, match.index).split("\n").length;
+    return `${path}:${line}: local socket outside the agents' route (${match[0].replace(/\s+/g, " ")})`;
+  });
+}
+
+// ADR-0012: the agents' route shares nothing with the Agent Companion.
+function keyRouteCompanion(path, source) {
+  if (!keyRoutePlace.test(path)) return [];
+  return [...source.matchAll(companionPathRef)].map((match) => {
+    const line = source.slice(0, match.index).split("\n").length;
+    return `${path}:${line}: the agents' route uses the Agent Companion (${match[0]})`;
+  });
+}
+
+// The agent's tool knows the route's protocol and nothing of the Vault.
+function agentToolManifest(manifest) {
+  return vaultCrates.test(manifest) ? ["crates/agent-keys-mcp/Cargo.toml: the agent's tool depends on a Vault crate"] : [];
 }
 
 function patternFor(path) {
@@ -274,6 +308,49 @@ for (const [path, source] of [
 ]) {
   assert.deepEqual(companionNetwork(path, source), [], `${path}: ${source}`);
 }
+for (const [path, source] of [
+  ["src-tauri/src/agent_route.rs", "use std::os::unix::net::{UnixListener, UnixStream};"],
+  ["src-tauri/src/agent_route.rs", "let rc = unsafe { libc::getpeereid(fake_fd, &mut fake_uid, &mut fake_gid) };"],
+  ["crates/agent-keys-mcp/src/lib.rs", "let stream = UnixStream::connect(fake_path);"],
+  ["crates/agent-keys-mcp/src/peer.rs", "libc::getpeereid(fake_fd, &mut fake_uid, &mut fake_gid)"],
+  ["crates/agent-keys-mcp/tests/fake.rs", "let fake = UnixListener::bind(fake_path);"],
+  ["src-tauri/tests/fake.rs", "let fake = UnixStream::connect(fake_path);"],
+  ["src-tauri/src/fake.rs", "// A Unix socket is not mentioned by name here."],
+]) {
+  assert.deepEqual(localSockets(path, source), [], `${path}: ${source}`);
+}
+for (const [path, source] of [
+  ["src-tauri/src/commands.rs", "let fake = UnixListener::bind(fake_path);"],
+  ["src-tauri/src/core/agent.rs", "let fake = UnixStream::connect(fake_path);"],
+  ["src-tauri/src/fake.rs", "use std :: os :: unix :: net;"],
+  ["crates/notes/src/fake.rs", "libc::getpeereid(fake_fd, &mut fake_uid, &mut fake_gid)"],
+  ["crates/reader/src/fake.rs", "let fake = libc::bind(fake_fd, fake_address, fake_length);"],
+  ["crates/reader/src/fake.rs", "let fake = libc :: accept(fake_fd, fake_address, fake_length);"],
+  ["src-tauri/src/fake.rs", "let fake = fake_stream.peer_cred();"],
+  ["src-tauri/src/fake.rs", "let fake = UnixDatagram::unbound();"],
+  ["crates/agent-keys-mcp-copy/src/lib.rs", "let fake = UnixStream::connect(fake_path);"],
+]) {
+  assert.equal(localSockets(path, source).length, 1, `${path}: ${source}`);
+}
+for (const [path, source] of [
+  ["src-tauri/src/agent_route.rs", "use crate::companion::Companion;"],
+  ["src-tauri/src/agent_route.rs", "crate :: companion :: stop_on_exit(fake_app);"],
+  ["src-tauri/src/core/agent.rs", "use super::super::companion::CompanionView;"],
+  ["crates/agent-keys-mcp/src/lib.rs", "use encrypted_note_app::companion::Companion;"],
+]) {
+  assert.equal(keyRouteCompanion(path, source).length, 1, `${path}: ${source}`);
+}
+for (const [path, source] of [
+  ["src-tauri/src/agent_route.rs", "// It shares nothing with the Agent Companion."],
+  ["src-tauri/src/lib.rs", "companion::stop_on_exit(app);"],
+  ["src-tauri/src/commands.rs", "use crate::companion::{Companion, CompanionView};"],
+]) {
+  assert.deepEqual(keyRouteCompanion(path, source), [], `${path}: ${source}`);
+}
+assert.deepEqual(agentToolManifest('[dependencies]\nserde_json.workspace = true\nlibc = "=0.2.189"\n'), []);
+for (const crate of ["notes", "vault-format", "store", "session", "encrypted-note-app"]) {
+  assert.equal(agentToolManifest(`[dependencies]\nserde_json.workspace = true\n${crate}.workspace = true\n`).length, 1, crate);
+}
 const fakePolicy = JSON.stringify({ model: "fake-model", ...approvedDestination });
 const fakePin = createHash("sha256").update(fakePolicy).digest("hex");
 assert.deepEqual(policyProblems(fakePolicy, fakePin), []);
@@ -307,6 +384,11 @@ for (const directory of ["companion/src", "companion/isolation"]) {
 }
 const violations = paths.sort().flatMap((path) => matches(path, readFileSync(join(root, path), "utf8")));
 const imports = vaultPaths.sort().flatMap((path) => companionImports(path, readFileSync(join(root, path), "utf8")));
+const routeViolations = [
+  ...paths.sort().flatMap((path) => localSockets(path, readFileSync(join(root, path), "utf8"))),
+  ...vaultPaths.sort().flatMap((path) => keyRouteCompanion(path, readFileSync(join(root, path), "utf8"))),
+  ...agentToolManifest(readFileSync(join(root, "crates/agent-keys-mcp/Cargo.toml"), "utf8")),
+];
 const companionViolations = [
   ...companionPaths.sort().flatMap((path) => companionNetwork(path, readFileSync(join(root, path), "utf8"))),
   ...policyProblems(readFileSync(join(root, "companion/policy.json"), "utf8"),
@@ -325,6 +407,13 @@ if (imports.length) {
   process.exitCode = 1;
 } else {
   console.log(`No Vault source imports companion/ (${vaultPaths.length} files; fake pass/fail self-check passed).`);
+}
+if (routeViolations.length) {
+  console.error(routeViolations.join("\n"));
+  console.error("Local sockets belong only to the agents' route (ADR-0012), which shares nothing with the Agent Companion. Do not exempt a file or line.");
+  process.exitCode = 1;
+} else {
+  console.log(`Agents' local route stays in its place (${paths.length} files; fake pass/fail self-check passed).`);
 }
 if (companionViolations.length) {
   console.error(companionViolations.join("\n"));

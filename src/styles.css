@@ -578,6 +578,14 @@ details ol {
 .modal.alert .actions button {
   flex: 1;
 }
+/* An agent's edit, field by field: read down the left edge, like a list. */
+.modal.alert .changes {
+  align-self: stretch;
+  margin: 0;
+  padding-left: 18px;
+  text-align: left;
+  overflow-wrap: anywhere;
+}
 @keyframes fade {
   from {
     opacity: 0;
@@ -852,6 +860,16 @@ button.primary kbd {
 }
 .banner button {
   margin-left: auto;
+}
+/* Two buttons at the end of a banner (an agent's request: Open, Cancel the request). */
+.banner .banner-actions {
+  display: flex;
+  gap: 8px;
+  margin-left: auto;
+  flex: none;
+}
+.banner .banner-actions button {
+  margin-left: 0;
 }
 .columns {
   flex: 1;

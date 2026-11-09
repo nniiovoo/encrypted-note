@@ -22,7 +22,9 @@ use session::OsEvent;
 use tauri::{AppHandle, Emitter, Manager};
 use zeroize::Zeroizing;
 
+use crate::agent_route::{self, AgentRoute, RouteError};
 use crate::companion::{Companion, CompanionView};
+use crate::core::agent::AgentPendingView;
 use crate::core::{
     ApiError, AppCore, AppStatus, BackupWritten, NoteEditInput, NoteInput, PickedFile, SafetyCopy,
     SettingsInput, SettingsView, ShowMode, VaultPreview,
@@ -270,6 +272,201 @@ pub fn set_favorite(app: AppHandle, id: String, favorite: bool) -> Result<(), Ap
 #[tauri::command(async)]
 pub fn append_text(app: AppHandle, id: String, text: Zeroizing<String>) -> Result<(), ApiError> {
     with_core(&app, |core| core.append_text(&id, text))
+}
+
+// ---------- agent requests (ADR-0012) ----------
+//
+// The owner's side only: what the screens show for an agent's pending request, and completing
+// or cancelling it. The agent's own requests reach the core through the local route, never
+// through these commands. Every completion goes through the native coordinator, which asks for
+// the Master Password where the request needs it.
+
+/// Read-only (no status event): the screens call it when an `agent-request` event arrives.
+#[tauri::command(async)]
+pub fn agent_pending(app: AppHandle) -> Option<AgentPendingView> {
+    core(&app).agent_pending()
+}
+
+/// The owner typed the value the agent asked to store and chose Save. Returns the new Note's id.
+#[tauri::command]
+pub async fn agent_complete_store(
+    app: AppHandle,
+    request_id: String,
+    input: NoteInput,
+) -> Result<String, ApiError> {
+    match crate::native_coordinator::run(app, NativeAction::AgentStore { request_id, input })
+        .await?
+    {
+        NativeResult::NoteId(id) => Ok(id),
+        _ => Err(internal()),
+    }
+}
+
+/// The owner allowed the agent's edit in the WebView's confirm.
+#[tauri::command]
+pub async fn agent_confirm_edit(app: AppHandle, request_id: String) -> Result<(), ApiError> {
+    native_unit(app, NativeAction::AgentEdit { request_id }).await
+}
+
+/// The owner typed the new value the agent asked for. Hidden Fields only.
+#[tauri::command]
+pub async fn agent_complete_replace(
+    app: AppHandle,
+    request_id: String,
+    input: NoteEditInput,
+) -> Result<(), ApiError> {
+    native_unit(app, NativeAction::AgentReplace { request_id, input }).await
+}
+
+/// The owner allowed the agent's delete; the Master Password panel follows for every Kind.
+#[tauri::command]
+pub async fn agent_confirm_delete(app: AppHandle, request_id: String) -> Result<(), ApiError> {
+    native_unit(app, NativeAction::AgentTrash { request_id }).await
+}
+
+#[tauri::command(async)]
+pub fn agent_cancel_request(app: AppHandle, request_id: String) {
+    with_core(&app, |core| core.agent_cancel_request(&request_id));
+}
+
+/// Takes a Note out of the agent's reach.
+#[tauri::command(async)]
+pub fn remove_agent_mark(app: AppHandle, id: String) -> Result<(), ApiError> {
+    with_core(&app, |core| core.remove_agent_mark(&id))
+}
+
+// ---------- letting agents in (ADR-0012) ----------
+//
+// The owner's Start, Stop and status for the local route, and the agent account's name. None
+// takes a path, uid, grant or duration: the screens can name an account, and only the native
+// Start confirm, which names that account, lets anyone in.
+
+/// For Settings: `state` is `off`, `running`, `ended_by_lock` or `expired`.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct AgentRouteView {
+    pub state: &'static str,
+    pub expires_in_ms: Option<u64>,
+    /// The Mac account named for the agent, if any.
+    pub account: Option<String>,
+}
+
+fn agent_route_view(app: &AppHandle) -> AgentRouteView {
+    let core = core(app);
+    let status = core.agent_grant_status();
+    // A grant without its listener lets nobody in, so it isn't called running.
+    let listening = app.state::<AgentRoute>().is_active();
+    let running = status.state == "running" && listening;
+    AgentRouteView {
+        state: if status.state == "running" && !running {
+            "off"
+        } else {
+            status.state
+        },
+        expires_in_ms: status.expires_in_ms.filter(|_| running),
+        account: core.agent_account(),
+    }
+}
+
+#[tauri::command(async)]
+pub fn agent_route_status(app: AppHandle) -> AgentRouteView {
+    agent_route_view(&app)
+}
+
+/// Names the agent's Mac account (`None` or `""` clears it). Ends a running grant.
+#[tauri::command(async)]
+pub fn set_agent_account(
+    app: AppHandle,
+    account: Option<String>,
+) -> Result<AgentRouteView, ApiError> {
+    with_core(&app, |core| core.set_agent_account(account))?;
+    app.state::<AgentRoute>().stop();
+    Ok(agent_route_view(&app))
+}
+
+const AGENT_ROUTE_START: &str = "Start";
+
+/// What the owner agrees to in the Start dialog. `who` names the account let in.
+fn agent_route_start_text(who: &str) -> String {
+    format!(
+        "For up to one hour, programs in the Mac user {who} can ask this app to store keys, \
+         list and change the details of the keys they added, and ask to replace or delete one.\n\n\
+         You type every value here, and the agent never sees one. Changing where a key is used, \
+         replacing a value and deleting always ask you first.\n\n\
+         The hour ends sooner if the Vault locks, and Stop ends it at once."
+    )
+}
+
+/// The owner's explicit Start: one grant of at most an hour, only while Unlocked, for the
+/// account named in Settings. The owner confirms in an OS dialog outside the WebView, so a
+/// script in the page can ask but can't answer, and the dialog names who is let in.
+#[tauri::command]
+pub async fn agent_route_start(app: AppHandle) -> Result<AgentRouteView, ApiError> {
+    require_unlocked(&app)?;
+    if DIALOG_OPEN.load(Ordering::SeqCst) || crate::native_coordinator::busy(&app) {
+        return Err(crate::core::not_now());
+    }
+    // Checked before the dialog, so the owner hears what's missing first; checked again by
+    // the listener when it binds.
+    let account = core(&app).agent_account();
+    let uid = agent_route::expected_uid(account.as_deref()).map_err(RouteError::api_error)?;
+    let dir = agent_route::socket_dir();
+    #[cfg(target_os = "macos")]
+    agent_route::check_folder(&dir).map_err(RouteError::api_error)?;
+    let dev_override = cfg!(debug_assertions) && std::env::var_os("ENOTE_DEV_AGENT_UID").is_some();
+    let who = match &account {
+        Some(name) if !dev_override => format!("“{name}”"),
+        _ => format!("with uid {uid} (developer override)"),
+    };
+    let description = agent_route_start_text(&who);
+    let window = app.get_webview_window("main");
+    let answer = with_native_dialog(&app, move || {
+        // A sheet on the app's own window; Cancel first because Return presses the first button.
+        let window = window?;
+        Some(
+            rfd::MessageDialog::new()
+                .set_level(rfd::MessageLevel::Warning)
+                .set_title("Let the agent store keys?")
+                .set_description(description)
+                .set_buttons(rfd::MessageButtons::OkCancelCustom(
+                    "Cancel".to_owned(),
+                    AGENT_ROUTE_START.to_owned(),
+                ))
+                .set_parent(&window)
+                .show(),
+        )
+    })
+    .await
+    .flatten();
+    if !matches!(answer, Some(rfd::MessageDialogResult::Custom(button)) if button == AGENT_ROUTE_START)
+    {
+        return Err(ApiError {
+            code: "cancelled",
+            message: "Agents weren't let in.".to_owned(),
+        });
+    }
+    // The Vault may have locked, or the account changed, while the dialog was open.
+    require_unlocked(&app)?;
+    if core(&app).agent_account() != account {
+        return Err(crate::core::not_now());
+    }
+    let grant = with_core(&app, AppCore::agent_grant_start)?;
+    let host = std::sync::Arc::new(agent_route::TauriHost(app.clone()));
+    let started =
+        app.state::<AgentRoute>()
+            .start(host, grant.id, uid, &dir, agent_route::Limits::PRODUCTION);
+    if let Err(error) = started {
+        with_core(&app, AppCore::agent_grant_stop);
+        return Err(error.api_error());
+    }
+    Ok(agent_route_view(&app))
+}
+
+/// Ends the grant and the listener at once. A request waiting for the owner ends as cancelled.
+#[tauri::command(async)]
+pub fn agent_route_stop(app: AppHandle) -> AgentRouteView {
+    with_core(&app, AppCore::agent_grant_stop);
+    app.state::<AgentRoute>().stop();
+    agent_route_view(&app)
 }
 
 // ---------- showing & copying ----------

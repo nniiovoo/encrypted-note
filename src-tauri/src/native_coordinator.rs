@@ -1067,6 +1067,10 @@ fn entry_title(operation: &NativeOperation, entry: EntryKind) -> String {
         "rotate_keys" => "Change Master Password and Recovery Key".to_owned(),
         "set_settings" => "Let the app lock less often?".to_owned(),
         "enroll_quick_unlock" => "Turn on Touch ID for this Vault".to_owned(),
+        "agent_store" => format!("Save new {kind}"),
+        "agent_edit" => format!("Change the details of this {kind}"),
+        "agent_replace" => format!("Replace the value of this {kind}"),
+        "agent_trash" => format!("Move {kind} to Trash"),
         _ => "Confirm encrypted-note action".to_owned(),
     }
 }
@@ -1110,6 +1114,19 @@ fn entry_detail(operation: &NativeOperation, entry: EntryKind) -> String {
             "This makes the app lock less often. Type your Master Password only if you asked for this."
         }
         "enroll_quick_unlock" => "Type your Master Password. Then you will use Touch ID.",
+        // The agent route (ADR-0012): the app can't tell which agent asked, so it says "an agent".
+        "agent_store" => {
+            "An agent asked to store this key. Seed Phrases and Private Keys need your Master Password every time."
+        }
+        "agent_edit" => {
+            "An agent asked to change the details of this key. Type your Master Password only if you allowed this."
+        }
+        "agent_replace" => {
+            "An agent asked to replace this value. Seed Phrases and Private Keys need your Master Password every time."
+        }
+        "agent_trash" => {
+            "An agent asked to delete this key. Type your Master Password to move it to Trash, where it stays for 30 days."
+        }
         _ => "Type your Master Password to continue.",
     }
     .to_owned();
@@ -1938,6 +1955,19 @@ mod tests {
             title("enroll_quick_unlock", None, None),
             "Turn on Touch ID for this Vault"
         );
+        assert_eq!(title("agent_store", seed, None), "Save new Seed Phrase");
+        assert_eq!(
+            title("agent_edit", Some(Kind::PrivateKey), None),
+            "Change the details of this Private Key"
+        );
+        assert_eq!(
+            title("agent_replace", Some(Kind::ApiKey), None),
+            "Replace the value of this API Key"
+        );
+        assert_eq!(
+            title("agent_trash", Some(Kind::Login), None),
+            "Move Login to Trash"
+        );
         assert_eq!(
             title("fake_action", None, None),
             "Confirm encrypted-note action"
@@ -1986,6 +2016,10 @@ mod tests {
             "rotate_keys",
             "set_settings",
             "enroll_quick_unlock",
+            "agent_store",
+            "agent_edit",
+            "agent_replace",
+            "agent_trash",
             "fake_action",
         ] {
             let operation = fake_operation(action, Some(Kind::SeedPhrase), Some("words"));

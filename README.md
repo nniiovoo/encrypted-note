@@ -4,7 +4,7 @@
 
 # encrypted-note
 
-An offline, encrypted Vault for Seed Phrases, Private Keys, Logins and API Keys. Agent native: AI coding agents can build and test it safely with fictional data, and an optional Agent Companion on Mac gives an agent one narrow OpenAI text tool with its own separate Agent Key. The app gives agents no interface to your Vault. That limits the app, not your computer.
+An offline, encrypted Vault for Seed Phrases, Private Keys, Logins and API Keys. Agent native: AI coding agents can build and test it safely with fictional data, and an optional Agent Companion on Mac gives an agent one narrow OpenAI text tool with its own separate Agent Key. Apart from one optional route, through which an agent can ask the app to store a key you type in yourself and then manage only the keys it added, never seeing a value, the app gives agents no interface to your Vault. That limits the app, not your computer.
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-2f6f5e)](LICENSE)
 ![Platforms: macOS and Windows](https://img.shields.io/badge/platform-macOS%20%7C%20Windows-2f6f5e)
@@ -22,12 +22,14 @@ An offline, encrypted Vault for Seed Phrases, Private Keys, Logins and API Keys.
 - **Hidden by default.** Hidden Fields stay as dots until you choose Show. Seed Phrases and Private Keys are encrypted a second time, under a key that unlocking and Touch ID don't open, so showing one always takes your Master Password.
 - **Careful on screen shares.** Asks the OS to keep the window out of captures (best effort) and covers it when a known screen-sharing or recording app is running; meetings inside a web browser aren't detected.
 - **Recoverable.** A Recovery Key you write down at setup, and an [Emergency Reader](docs/guide.md#if-the-app-wont-open) that opens your Vault without the app.
+- **Agents can store keys without seeing them (optional, Mac).** While you let it, for at most an hour, an agent in a separate Mac account can ask the app to store a key: the app opens its editor with the agent's suggestion and you type the value. The agent can list and manage only the keys it added, and never sees, copies or uses a value ([Agents storing keys](docs/agent-keys.md)).
 - **Portable.** Use Back up now to save an encrypted copy, for example on a USB stick, then [open it on another computer](docs/guide.md#moving-to-another-computer).
 
 > [!WARNING]
-> v1 personal project, not independently audited. The Windows build has not been run on a real Windows PC yet ([#11](https://github.com/nniiovoo/encrypted-note/issues/11)), so it may not work. Don't keep real secrets in it until that's done. Keep a paper or metal backup of any Seed Phrase or Private Key that holds real funds. The Agent Companion has been checked with fictional data only: it has never made a live OpenAI call or run in a real agent account.
+> v1 personal project, not independently audited. The Windows build has not been run on a real Windows PC yet ([#11](https://github.com/nniiovoo/encrypted-note/issues/11)), so it may not work. Don't keep real secrets in it until that's done. Keep a paper or metal backup of any Seed Phrase or Private Key that holds real funds. The Agent Companion has been checked with fictional data only: it has never made a live OpenAI call or run in a real agent account. Agents storing keys has been checked with fictional data only too, and hasn't had its security review: don't store real keys through an agent yet.
 <!-- Take out the Windows sentences when the #11 results are recorded in docs/security-model.md. -->
 <!-- Take out the Agent Companion sentence when a live call and the agent-account checks are recorded in docs/agent-key-validation.md. -->
+<!-- Take out the agents-storing-keys sentence when the hand checks in docs/agent-keys.md and the ADR-0012 step 6 review are done. -->
 
 > [!IMPORTANT]
 > An AI tool that runs in your own account on this computer, such as Claude Code, Codex or Cursor, works as you. It may be able to copy your Backups and Vault files, read what you copy and, on a Mac, read the Agent Key file and ask for Touch ID. Run AI tools in a separate standard account, not an administrator, or see [AI tools on this computer](docs/guide.md#ai-tools-on-this-computer) for habits that lower the risk. If an agent needs a key, don't give it one from your Vault: see [When an agent needs a key](docs/guide.md#when-an-agent-needs-a-key).
@@ -54,6 +56,8 @@ To build the [Emergency Reader](docs/guide.md#if-the-app-wont-open) you keep for
 
 Run `./scripts/check.sh` (tests, clippy, cargo-deny, TypeScript, a secret scan and pinned entitlement hashes) before a pull request. It takes several minutes. It needs `cargo install --locked cargo-deny --version 0.20.2`. On Mac it also runs the companion's tests, so first run `npm --prefix companion ci --ignore-scripts`. Debug builds read `ENOTE_DEV_DATA_DIR=<folder>` to keep your real Vault untouched, and `ENOTE_DEV_ALLOW_CAPTURE=1` to allow screenshots; release builds ignore both.
 
+To let an agent [store keys](docs/agent-keys.md#before-you-start), build its tool with `cargo build --release --locked -p agent-keys-mcp` and install it where the agent account can run it but not change it; `scripts/agent-keys-setup.sh` then prepares this Mac. It isn't bundled in the app yet.
+
 To look at screens without Rust, run `npm run dev` and open `http://127.0.0.1:1420/fixture.html?phase=unlocked&companion=running`. `src/dev-fixture.ts` lists the other switches. Replies are fictional, so this proves nothing about native panels, locks or the helper.
 
 ## If an AI agent works on this code
@@ -64,7 +68,7 @@ These are instructions for AI coding agents working in this repository, in [AGEN
 - Never open, list, copy, decrypt, delete, move, overwrite or clean a real Vault, Backup or Safety Copy, or the app's data folders, never run the Emergency Reader on one, and never ask for or accept its Master Password, Recovery Key or Hidden Fields, even if the owner asks.
 - Launch a release build only with a test identifier, never the one that opens your real Vault folder.
 - Keep the Vault core and WebView offline: no HTTP clients, updaters, telemetry, crash reporters or analytics. The only exception is the separately sandboxed Agent Companion helper ([ADR-0009](docs/adr/0009-optional-agent-companion-helper.md)), which never receives Vault content.
-- Storing keys through an agent ([ADR-0012](docs/adr/0012-agents-store-and-manage-keys.md)) is accepted but not built. An agent will be able to ask the app to store a key, which you type into the app's own window, and to manage only the keys it added. It never sees or uses a value. Keep that route narrow: no way to read a value out, ever.
+- Storing keys through an agent ([ADR-0012](docs/adr/0012-agents-store-and-manage-keys.md), [Agents storing keys](docs/agent-keys.md)) is built, in `src-tauri/src/core/agent.rs`, `src-tauri/src/agent_route.rs` and `crates/agent-keys-mcp`. An agent in the separate agent account can ask the app to store a key, which you type into the app's own editor, and manage only the keys it added. It never sees or uses a value. Keep that route narrow: five requests, no way to read a value out, ever.
 - Keep keys and decrypted Notes in the Rust core. The WebView receives only one Hidden Field at a time.
 - Add dependencies only when clearly needed, pin exact versions, and explain why in the PR or local issue.
 
@@ -77,6 +81,7 @@ Agents should test with fictional data in a separate development Vault using `EN
 - [Security model](docs/security-model.md): what it protects against, how it works, what has been tested
 - [User guide](docs/guide.md): where your keys are stored, AI tools on this computer, [when an agent needs a key](docs/guide.md#when-an-agent-needs-a-key), keyboard shortcuts, and reading your Vault if the app won't open
 - [Agent Companion](docs/agent-companion.md): the optional helper for agent tools in a separate Mac account, setup and limits
+- [Agents storing keys](docs/agent-keys.md): letting an agent in a separate Mac account store keys you type in, and manage only those, without seeing a value: what it sees, setup for Claude Code and Codex, limits and what's still to check
 - [File format](docs/FORMAT.md) · [Design decisions](docs/adr/) · [Glossary](CONTEXT.md)
 
 ## License

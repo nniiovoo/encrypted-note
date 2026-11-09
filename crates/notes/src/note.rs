@@ -7,8 +7,8 @@ use zeroize::Zeroizing;
 
 use crate::keys::Chain;
 use crate::{
-    BASE_SCHEMA_VERSION, Kind, NoteId, NoteSummary, NoteView, NotesError, SCHEMA_VERSION,
-    Timestamp, WalletCipher, field, rules,
+    AGENT_MARK_SCHEMA_VERSION, BASE_SCHEMA_VERSION, Kind, NOTE_FIELDS_SCHEMA_VERSION, NoteId,
+    NoteSummary, NoteView, NotesError, Timestamp, WalletCipher, field, rules,
 };
 
 /// Visible fields that may be used as a list row's subtitle, in preference order.
@@ -50,14 +50,14 @@ pub(crate) struct WrittenBody<'a> {
 }
 
 impl Body {
-    /// The oldest schema that can hold these Notes, which is the one written: 2 if any Note
-    /// has a value in a field schema 2 added, otherwise 1.
+    /// The oldest schema that can hold these Notes, which is the one written: the newest
+    /// schema any one Note needs ([`StoredNote::schema_needed`]), or 1 for no Notes.
     pub fn schema_version(&self) -> u32 {
-        if self.notes.iter().any(StoredNote::uses_schema_2) {
-            SCHEMA_VERSION
-        } else {
-            BASE_SCHEMA_VERSION
-        }
+        self.notes
+            .iter()
+            .map(StoredNote::schema_needed)
+            .max()
+            .unwrap_or(BASE_SCHEMA_VERSION)
     }
 
     pub fn as_written(&self) -> WrittenBody<'_> {
@@ -90,6 +90,10 @@ pub(crate) struct StoredNote {
     pub updated_at: Timestamp,
     #[serde(default)]
     pub deleted_at: Option<Timestamp>,
+    /// Created through the agent route (ADR-0012). Added by document schema 3, and written
+    /// only when true, last, so a Note without the mark keeps its schema 1 and 2 shape.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub added_by_agent: bool,
 }
 
 pub(crate) enum HiddenChange {
@@ -111,6 +115,7 @@ impl StoredNote {
             created_at: now,
             updated_at: now,
             deleted_at: None,
+            added_by_agent: false,
         }
     }
 
@@ -122,6 +127,18 @@ impl StoredNote {
     pub fn expired(&self, now: Timestamp) -> bool {
         self.deleted_at
             .is_some_and(|d| d.saturating_add(crate::TRASH_RETENTION_SECS) <= now)
+    }
+
+    /// The oldest schema that can hold this Note: 3 if it carries the agent mark, otherwise 2
+    /// if it has a value in a field schema 2 added, otherwise 1.
+    pub fn schema_needed(&self) -> u32 {
+        if self.added_by_agent {
+            AGENT_MARK_SCHEMA_VERSION
+        } else if self.uses_schema_2() {
+            NOTE_FIELDS_SCHEMA_VERSION
+        } else {
+            BASE_SCHEMA_VERSION
+        }
     }
 
     /// True if this Note has a value in a field that document schema 2 added.
@@ -256,6 +273,7 @@ impl StoredNote {
                 .hidden_fields()
                 .first()
                 .is_some_and(|name| self.has_value(name)),
+            added_by_agent: self.added_by_agent,
         }
     }
 
@@ -275,6 +293,7 @@ impl StoredNote {
             created_at: self.created_at,
             updated_at: self.updated_at,
             deleted_at: self.deleted_at,
+            added_by_agent: self.added_by_agent,
         }
     }
 

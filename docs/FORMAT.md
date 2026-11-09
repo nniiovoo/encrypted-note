@@ -234,21 +234,22 @@ The wallet AAD binds the value to this Vault, this Note and this field:
 A value of `v` bytes becomes `24 + v + 16` bytes, which is `2 × (40 + v)` hex characters. A
 sealed value copied to another field, Note or Vault fails to decrypt.
 
-## 8. The Vault document (body JSON, schema versions 1 and 2)
+## 8. The Vault document (body JSON, schema versions 1, 2 and 3)
 
 The decrypted document is one JSON object. The app writes it compactly (no whitespace) with
 object keys in the order below; maps (`visible`, `hidden`, `sealed`) have their keys sorted.
 The app's reader accepts any key order and whitespace.
 
-There are two schema versions. Schema 2 is schema 1 plus a few optional fields, marked
-"schema 2" below; nothing else differs. Which of the two a file holds follows from its Notes:
-see [Schema versions](#schema-versions).
+There are three schema versions. Schema 2 is schema 1 plus a few optional fields, marked
+"schema 2" below. Schema 3 is schema 2 plus one optional key on a Note, `added_by_agent`
+(see [The mark schema 3 added](#the-mark-schema-3-added)); nothing else differs. Which of the
+three a file holds follows from its Notes: see [Schema versions](#schema-versions).
 
 ### Top level
 
 | Key | JSON type | Meaning |
 |---|---|---|
-| `schema_version` | integer | `1` or `2` (see [Schema versions](#schema-versions)) |
+| `schema_version` | integer | `1`, `2` or `3` (see [Schema versions](#schema-versions)) |
 | `changed_at` | integer | Unix time in seconds of the last change to the document |
 | `change_counter` | integer (u64) | goes up by one on every change; with `changed_at` it tells which of two copies is older. At most 2^53: a larger value is rejected |
 | `notes` | array | every Note, Trash included |
@@ -267,12 +268,14 @@ see [Schema versions](#schema-versions).
 | `created_at` | integer | Unix time in seconds |
 | `updated_at` | integer | Unix time in seconds |
 | `deleted_at` | integer or `null` | non-null means the Note is in **Trash** since that time; the app removes it for good 30 days (2,592,000 s) later (optional; defaults to `null`) |
+| `added_by_agent` | boolean | schema 3: the Note was added through the agent route (optional; defaults to `false`). Written only as `true`, and then as the Note's last key |
 
 An edit that changes nothing is not a change. Saving a Note with the title and the visible
 values it already has, and with no new value for a Hidden Field, leaves that Note's
 `updated_at` and the document's `changed_at` and `change_counter` exactly as they were. The
 same goes for moving a Note to Trash when it is already there, restoring one that isn't in
-Trash, and setting Favorite to what it already is. A new value for a Hidden Field always counts
+Trash, setting Favorite to what it already is, and removing the "added by an agent" mark from
+a Note that doesn't have it. A new value for a Hidden Field always counts
 as a change, even when it equals the stored one: telling would mean opening the stored one.
 
 ### Fields by Kind
@@ -363,19 +366,57 @@ An API Key Note that uses them (fake values), from a document whose `schema_vers
 }
 ```
 
+### The mark schema 3 added
+
+`added_by_agent: true` on a Note means it was added through the agent route of ADR-0012: an
+agent asked the app to store a key, and the owner typed the value into the app and saved it.
+
+* The app sets the mark only when it creates a Note that way, in the same save. Nothing adds
+  it to an existing Note, so a Note the owner added never gets it.
+* An agent may see and manage only the Notes that carry the mark and are not in Trash, and
+  never their Hidden Fields. The app shows the mark, and the owner can remove it at any time,
+  which takes the Note out of the agent's reach. Removing it is a change to the document
+  (`changed_at` and `change_counter` move), not to the Note: its `updated_at` stays.
+* Editing, moving to Trash and restoring keep the mark.
+* It is not a Hidden Field and not part of the wallet AAD of section 7. Like everything in
+  the body, it is encrypted and authenticated with the rest of the document.
+* A Note without the mark has no `added_by_agent` key. A key with the value `false` is read as
+  no mark, and is not written back.
+
+A Login added by an agent (fake values), from a document whose `schema_version` is 3:
+
+```json
+{
+  "id": "3b9d2e7f1a0c4d58b6e2f9a1c7d3e5b4",
+  "kind": "login",
+  "title": "Test agent login",
+  "visible": { "website": "https://login.example.test" },
+  "hidden": { "password": "fake-login-password-456" },
+  "sealed": {},
+  "favorite": false,
+  "created_at": 1790000000,
+  "updated_at": 1790000000,
+  "deleted_at": null,
+  "added_by_agent": true
+}
+```
+
 ### Schema versions
 
-* **Reading.** This version of the app and of the Emergency Reader reads schema 1 and
-  schema 2. Any other `schema_version` is refused as "made by a newer version", not as damage.
-  A body that says `1` but has a schema 2 field is rejected as damaged, because no version of
-  the app writes one. A body that says `2` and uses none of those fields is read, and saved
-  again as `1`.
+* **Reading.** This version of the app and of the Emergency Reader reads schema 1, 2 and 3.
+  Any other `schema_version` is refused as "made by a newer version", not as damage. A body
+  that says an older schema than it needs is rejected as damaged, because no version of the
+  app writes one: `1` with a schema 2 field, or `1` or `2` with a Note carrying the mark. A
+  body that says `3` and has no mark is read, and saved again as `2` or `1`; one that says `2`
+  and uses no schema 2 field is saved again as `1`.
 * **Writing.** The app keeps no version in memory. On every save it writes the oldest schema
-  that can hold the Notes: `2` if at least one Note, Trash included, has a value in a schema 2
-  field, and `1` otherwise. So a Vault that never uses the new fields is written exactly as an
-  older build would write it, and stays readable by older builds and older Emergency Readers.
-  Clearing the last schema 2 field, or removing the last Note that had one ("Delete forever",
-  emptying Trash, or the removal after 30 days in Trash), makes the next save schema 1 again.
+  that can hold the Notes: `3` if at least one Note, Trash included, carries the mark; else `2`
+  if at least one has a value in a schema 2 field; and `1` otherwise. So a Vault that never
+  uses what a newer schema added is written exactly as an older build would write it, and
+  stays readable by older builds and older Emergency Readers. Clearing the last schema 2
+  field, or removing the last Note that had one ("Delete forever", emptying Trash, or the
+  removal after 30 days in Trash), makes the next save schema 1 again; removing the last mark
+  the same way, or by the owner taking it off, makes it schema 2 or 1.
 * **Older builds.** A build of the app or of the Emergency Reader from before schema 2 knows
   schema 1 only. Given a schema 2 body it refuses the whole Vault and changes nothing; it does
   not open the Vault and skip the fields it doesn't know. Builds from before 12 October 2026
@@ -384,17 +425,22 @@ An API Key Note that uses them (fake values), from a document whose `schema_vers
   computer, and replace every Emergency Reader you saved (next to a Backup on a USB stick, for
   example) with the current one. The Vault keeps opening on the computer that wrote it, and
   Backups and Safety Copies made before the new fields were used are still schema 1.
+* **Builds that know schema 2 but not 3** refuse a schema 3 body the same way, as made by a
+  newer version, and change nothing. So before a Vault with a Note added by an agent is carried
+  to another computer, update the app there and every saved Emergency Reader too.
 
 ### What the app rejects
 
 Unknown keys (at the top level or in a Note); an unknown `kind`; a Note id that isn't 32
 lowercase hex characters, or one used twice; a blank title; a visible or Hidden Field name
 that doesn't belong to the Note's Kind; an empty value; a value that breaks the rule for its
-field (schema 2 fields only); a schema 2 field in a body whose `schema_version` is 1; a
+field (schema 2 fields only); a schema 2 field in a body whose `schema_version` is 1; an
+`added_by_agent` that isn't a boolean; a Note with `added_by_agent: true` in a body whose
+`schema_version` is 1 or 2; a
 `hidden` entry on a Seed Phrase or Private Key, or a `sealed` entry on another Kind; a `sealed`
 value that isn't non-empty lowercase hex; a Seed Phrase without `words` or with a `word_count`
 other than `"12"` or `"24"`. All of these are reported as a damaged Vault. A `schema_version`
-other than 1 or 2 is refused too, but as a Vault made by a newer version.
+other than 1, 2 or 3 is refused too, but as a Vault made by a newer version.
 
 ### Example
 
@@ -509,6 +555,8 @@ key to a file.
 A complete, independent implementation of the steps above (about 130 lines). It needs Python 3
 with `argon2-cffi` and `PyNaCl`. It asks for the credential without echo, prints the document
 as JSON with the Wallet Kind fields opened (added under `hidden`), and writes nothing to disk.
+It reads every schema of section 8 the same way: a Note added by an agent simply shows
+`"added_by_agent": true`.
 Read it before running it, and don't redirect its output into a file.
 
 ```text
@@ -702,10 +750,11 @@ enote-reader <vault-or-backup-file> [--recovery-key] [--note <number>] [--reveal
   at most 4,096 content bytes, with an optional LF or CRLF ending. An empty stream is an error;
   an empty first line is an empty credential. A terminal is refused; omit the flag to use the
   no-echo terminal prompt.
-* It always uses the limits of section 4, and reads document schema 1 and 2 (section 8). A
+* It always uses the limits of section 4, and reads document schema 1, 2 and 3 (section 8). A
   newer schema is reported as such, with exit code 2.
 * On its own it lists every Note with a number, Trash included and marked: Kind, title,
-  visible fields. Hidden Fields are shown as `••••••`. The numbers start at 1 and follow the
+  visible fields. A Note added by an agent (schema 3, `added_by_agent`) has
+  `(added by an agent)` after its title. Hidden Fields are shown as `••••••`. The numbers start at 1 and follow the
   order printed: Notes not in Trash first (Favorites, then most recently changed), then Trash
   (most recently deleted first). The same file always gives the same numbers; a file saved
   again after a change may not.

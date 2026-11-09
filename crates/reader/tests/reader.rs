@@ -1134,15 +1134,85 @@ fn a_schema_2_vault_is_read_and_its_new_fields_are_printed_under_their_names() {
     assert!(!revealed.stdout.contains(LOGIN_PASSWORD));
 }
 
+/// A schema 3 Vault: a Private Key added by an agent, sealed into the wallet Vault's keys, and
+/// a Login the owner added.
+#[test]
+fn a_schema_3_vault_is_read_and_a_note_added_by_an_agent_is_marked() {
+    const AGENT_TITLE: &str = "Test agent-added key";
+    let vault = wallet_vault();
+    let cipher = TestWalletCipher {
+        key: &vault.wallet_key,
+        vault_id: vault.unlocked.vault_id(),
+    };
+    let mut doc = Document::new(NOW);
+    doc.create_by_agent(
+        new_note(
+            Kind::PrivateKey,
+            AGENT_TITLE,
+            &[(field::CHAIN, CHAIN), (field::ADDRESS, ADDRESS)],
+            &[(field::KEY, PRIVATE_KEY)],
+        ),
+        Some(&cipher),
+        NOW,
+    )
+    .unwrap();
+    doc.create(
+        new_note(
+            Kind::Login,
+            LOGIN_TITLE,
+            &[(field::WEBSITE, WEBSITE)],
+            &[(field::PASSWORD, LOGIN_PASSWORD)],
+        ),
+        None,
+        NOW,
+    )
+    .unwrap();
+    assert_eq!(doc.schema_version(), 3);
+    let bytes = vault_format::seal(&vault.unlocked, &doc.to_json()).unwrap();
+
+    let masked = run("schema-3-masked", &bytes, &[], PASSWORD);
+    assert_exit(&masked, 0);
+    assert!(
+        masked
+            .line_with(AGENT_TITLE)
+            .ends_with(&format!("Private Key: {AGENT_TITLE} (added by an agent)")),
+        "{}",
+        masked.stdout
+    );
+    assert!(
+        masked
+            .line_with(LOGIN_TITLE)
+            .ends_with(&format!("Login: {LOGIN_TITLE}"))
+    );
+    assert_eq!(masked.stdout.matches("(added by an agent)").count(), 1);
+    assert!(!masked.stdout.contains(PRIVATE_KEY));
+
+    let heading = masked.line_with(AGENT_TITLE);
+    let number = heading.split('.').next().unwrap().to_string();
+    let revealed = run(
+        "schema-3-reveal",
+        &bytes,
+        &["--note", &number, "--reveal", PIPED],
+        PASSWORD,
+    );
+    assert_exit(&revealed, 0);
+    assert_eq!(
+        revealed.field_line("Key").trim(),
+        format!("Key: {PRIVATE_KEY}")
+    );
+    assert!(revealed.stdout.contains("(added by an agent)"));
+    assert!(!revealed.stdout.contains(LOGIN_PASSWORD));
+}
+
 #[test]
 fn a_vault_from_a_newer_document_schema_is_called_newer_not_damaged() {
-    let body = br#"{"schema_version":3,"changed_at":1790000000,"change_counter":0,"notes":[]}"#;
+    let body = br#"{"schema_version":4,"changed_at":1790000000,"change_counter":0,"notes":[]}"#;
     let bytes = vault_format::seal(&wallet_vault().unlocked, body).unwrap();
-    for (test, flags) in [("schema-3", &[][..]), ("schema-3-note", &["--note", "1"])] {
+    for (test, flags) in [("schema-4", &[][..]), ("schema-4-note", &["--note", "1"])] {
         let run = run(test, &bytes, flags, PASSWORD);
         assert_exit(&run, 2);
         assert!(run.stdout.is_empty(), "{test}");
-        assert!(run.stderr.contains("schema 3"), "{test}: {}", run.stderr);
+        assert!(run.stderr.contains("schema 4"), "{test}: {}", run.stderr);
         assert!(run.stderr.contains("newer"), "{test}: {}", run.stderr);
         assert!(!run.stderr.contains("damaged"), "{test}: {}", run.stderr);
     }

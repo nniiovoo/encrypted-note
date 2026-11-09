@@ -8,6 +8,7 @@ members = [
     "crates/guard",
     "crates/store",
     "crates/reader",
+    "crates/agent-keys-mcp",
     "src-tauri",
 ]
 

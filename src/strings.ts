@@ -24,6 +24,10 @@ const ROTATE_CHOICE = "Someone may know it, or I lost my paper";
 const HELPER_KEEPS_KEY =
   "helper keeps the Agent Key in a plain-text file that other non-admin Mac users can't open: credential.env, in the helper's own folder. Software running in your own account may be able to read it. That is not encrypted Vault storage. While the helper is on, the key is also in Node.js memory, which can't be reliably erased. Stop doesn't delete the file or cancel the key. Use a key with a spending cap and a short expiry, and revoke it at OpenAI if in doubt.";
 type CompanionPart = "runtime" | "plan" | "credential" | "handoff" | "agent" | "code";
+// Who asked, in every line about an agent's request (ADR-0012). The app can't tell which agent
+// it was (Claude Code, Codex, the Claude app or any other program in the agent's Mac user), so
+// it never names one. To name one, change it here only.
+const AGENT = "An agent";
 const HELPER_STOPPED_UNEXPECTEDLY =
   "The helper was stopped because something unexpected happened. It won't restart by itself. You can press Start once more. If it happens again, don't keep trying: install the app again from a copy you trust, and revoke the Agent Key at OpenAI.";
 
@@ -217,6 +221,11 @@ export const strings = {
   // Under that button. The guide section's title, as it is in docs/guide.md.
   copyAsEnvNotForAgents: "This is your own key. For an AI agent, make a separate key at the service instead: see When an agent needs a key in docs/guide.md.",
   edit: "Edit",
+  // The mark on a Note an agent asked to store (ADR-0012): a word, never color alone.
+  addedByAgent: "Added by an agent",
+  stopAgentManaging: "Stop agent managing this",
+  stopAgentManagingText:
+    "The agent will no longer see this key in its list, or be able to change, replace or delete it. The key itself stays here as it is. There is no way to give it back to the agent.",
   duplicate: "Duplicate",
   duplicateTitle: (title: string) => `${title} copy`,
   moveToTrash: "Move to Trash",
@@ -316,6 +325,7 @@ export const strings = {
     editing ? `Fill all ${n} words, or leave them all blank to keep the current words.` : `Fill all ${n} words to save.`,
   discardTitle: "Discard unsaved changes?",
   discardText: "What you typed in this Note hasn't been saved yet.",
+  discardAgentText: "What you typed hasn't been saved, and the agent's request will be cancelled.",
   discard: "Discard",
   savePasswordText: "Seed Phrases and Private Keys need your Master Password to save.",
   explainerTitle: "A quick word about Seed Phrases",
@@ -620,7 +630,7 @@ export const strings = {
       "1. Your Recovery Key on paper: keep it somewhere safe. 2. A Backup: choose Back up now and keep the file on a USB stick. Make a new one after you change something. That is all. With a Backup and the Master Password or Recovery Key it was saved with, you can open your Vault on another computer. You don't need to copy anything else from the Vault folder.",
     leavesTitle: "What leaves this computer",
     leavesText:
-      "The Vault's own code has no network code, so the app has no built-in way to send your Notes, Master Password or Recovery Key anywhere. Files leave only when they are copied: a Backup you save elsewhere, or a full-computer backup such as Time Machine on a Mac. In those copies your Vault stays encrypted, but settings.json and the Agent Key file are not encrypted. Malware on this computer is a separate risk: see What this app can't protect you from. The optional Agent Companion is separate. When you start it, it uses your Agent Key to send the text an agent gives it to OpenAI. It can't open your Vault.",
+      "The Vault's own code has no network code, so the app has no built-in way to send your Notes, Master Password or Recovery Key anywhere. Files leave only when they are copied: a Backup you save elsewhere, or a full-computer backup such as Time Machine on a Mac. In those copies your Vault stays encrypted, but settings.json and the Agent Key file are not encrypted. Malware on this computer is a separate risk: see What this app can't protect you from. The optional Agent Companion is separate. When you start it, it uses your Agent Key to send the text an agent gives it to OpenAI. It can't open your Vault. If you let an agent store keys, the names and visible details of the keys it adds reach that agent's AI company as part of the chat. Their values never do.",
     firstNoteWhere: "Your Notes are saved, encrypted, in:",
   },
 
@@ -723,4 +733,63 @@ export const strings = {
     invalid_reply: "The app didn't understand the helper's reply. Quit the app and open it again. If this happens again, install the app again from a copy you trust.",
     internal: "Something went wrong in the helper. Quit the app and open it again.",
   } satisfies Record<string, string>,
+
+  // ---------- An agent's request (ADR-0012) ----------
+  // Titles and details here were written by the agent: they are shown as plain text, in quotes.
+  agentAskedStore: `${AGENT} asked to store this key. Type the value and choose Save.`,
+  agentAskedReplace: `${AGENT} asked to replace this value. Type the new value and choose Save.`,
+  // Under that line: what the agent will and won't get.
+  // Store: the name and details the owner types here are what the agent's list_keys returns.
+  agentNeverSeesValue: "The agent never sees the value you type. It does see the name and details saved here, and they reach its AI company. It hears only that the key was saved, or that you cancelled.",
+  // Replace: only the value is shown, so all of it stays out of the agent's reach.
+  agentNeverSees: "The agent never sees what you type. It hears only that the key was saved, or that you cancelled.",
+  agentReplaceTitle: (title: string) => `Replace a value of “${title}”`,
+  agentTypeValue: "Type the new value to save.",
+  agentRequestEnded: "The agent's request has ended, so this can't be saved for it any more. Nothing was changed.",
+  agentWaiting: {
+    store: (title: string, kind: string) => `${AGENT} is asking to store “${title}” (${kind}).`,
+    edit: (title: string) => `${AGENT} is asking to change “${title}”.`,
+    replace: (title: string) => `${AGENT} is asking to replace a value of “${title}”.`,
+    delete: (title: string) => `${AGENT} is asking to delete “${title}”.`,
+  },
+  agentOpen: "Open",
+  agentDecline: "Cancel the request",
+  agentEditTitle: "Allow this change?",
+  agentEditIntro: (title: string) => `${AGENT} asked to change “${title}”:`,
+  // One line per field. Empty values are added or cleared, not changed.
+  agentChange: (field: string, from: string, to: string) =>
+    !from ? `${field}: add “${to}”` : !to ? `${field}: clear “${from}”` : `${field}: from “${from}” to “${to}”`,
+  agentEditWhy: "Check each one. A wrong website, username, address or chain could send you, or your money, somewhere else.",
+  agentEditPassword: "Seed Phrases and Private Keys need your Master Password for this, next.",
+  agentAllow: "Allow",
+  agentEditPasswordText: "Enter your Master Password to make the change the agent asked for.",
+  agentDeleteTitle: (title: string) => `Delete “${title}”?`,
+  agentDeleteText: (title: string) => `${AGENT} asked to delete “${title}”. It will go to Trash for 30 days. Your Master Password is needed next.`,
+  agentDeletePasswordText: "Enter your Master Password to move this key to Trash, as the agent asked. It stays there for 30 days.",
+  agentRequestGone: "The agent's request ended before you answered, so nothing was changed.",
+
+  // ---------- Agents storing keys (ADR-0012) ----------
+  agentKeysTitle: "Agents storing keys",
+  agentKeysSummary: (state: string) => `Agents storing keys (optional) · ${state}`,
+  agentKeysChecking: "Checking…",
+  agentKeysIntro:
+    "Optional, and off unless you start it. While it is on, an agent in a separate Mac user can ask this app to store a key, list and change the details of the keys it added, and ask you to replace or delete one. You type every value here, and the agent never sees or uses one. It can't see your own Notes. This is separate from the Agent Companion.",
+  agentKeysLeaves: "The names and visible details of the keys an agent adds reach that agent's AI company as part of the chat. Name them with that in mind.",
+  agentKeysStates: {
+    off: "Off",
+    running: "On",
+    ended_by_lock: "Off: ended because the Vault locked",
+    expired: "Off: the one hour ended",
+  } satisfies Record<string, string>,
+  agentKeysTimeLeft: (minutes: number) =>
+    `${plural(minutes, "minute", "minutes")} left at most. It stops sooner if the Vault locks, the computer sleeps or the app quits.`,
+  agentAccount: "The agent's Mac user",
+  agentAccountHint: "Its Account name from System Settings → Users & Groups, such as enote-agent. A Standard user, never yours or an admin. Changing it stops the agent's access.",
+  agentAccountSave: "Save",
+  agentAccountSaved: "Saved.",
+  agentKeysSetup:
+    "Before you start: make that Standard user, run scripts/agent-keys-setup.sh with its name from your own Mac user, and add the tool it prints to the agent there.",
+  agentKeysStart: "Start for up to one hour",
+  agentKeysStartLocks: "Start asks you again in its own window. The hour ends early if the Vault locks.",
+  agentKeysStop: "Stop",
 };

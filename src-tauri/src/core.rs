@@ -30,6 +30,7 @@ use store::{CloudProvider, SafetyKind, StoreError, VaultDir};
 use vault_format::{Credential, KdfParams, Limits, RecoveryKey, UnlockedVault, WalletKey};
 use zeroize::Zeroizing;
 
+pub mod agent;
 pub mod native;
 mod quick_unlock;
 pub(crate) use quick_unlock::MSG_TOUCH_ID_TURNED_OFF;
@@ -338,6 +339,9 @@ struct StoredSettings {
     quick_unlock_binding: Option<[u8; 32]>,
     /// The newest version of a Vault this app has saved or opened here (see [`SeenVault`]).
     newest_seen: Option<SeenVault>,
+    /// The Mac account the owner named for agents storing keys (ADR-0012). Only a name: who may
+    /// connect is decided again from it at every Start (`agent_route::expected_uid`).
+    agent_account: Option<String>,
 }
 
 /// A Vault's id (also in its file's plaintext header) and its document's `change_counter`. Kept
@@ -363,6 +367,7 @@ impl Default for StoredSettings {
             count_activity_anywhere: false,
             quick_unlock_binding: None,
             newest_seen: None,
+            agent_account: None,
         }
     }
 }
@@ -496,6 +501,8 @@ pub struct AppCore {
     quick_cleanup_needed: bool,
     quick_cleanup_failed: bool,
     quick_unlock_file_changed: bool,
+    /// The agent route (ADR-0012): its grant and its one pending request.
+    agent: agent::AgentState,
 }
 
 impl AppCore {
@@ -564,6 +571,7 @@ impl AppCore {
             quick_cleanup_needed: false,
             quick_cleanup_failed: false,
             quick_unlock_file_changed: false,
+            agent: agent::AgentState::default(),
         };
         core.load_quick_unlock_registration();
         Ok(core)
@@ -674,6 +682,7 @@ impl AppCore {
     pub fn tick(&mut self) {
         let now = self.clock.now_ms();
         self.native_tick(now);
+        self.agent_tick(now);
         let quick_authorized = self.quick_unlock.tick(self.clock.continuous_ms());
         if !quick_authorized && self.quick_pending.is_some() {
             self.invalidate_native();
@@ -1623,6 +1632,7 @@ impl AppCore {
     /// Drop every decrypted Vault (keys and document) and forget a Sharing Guard dismissal.
     fn forget_open_vaults(&mut self) {
         self.invalidate_native();
+        self.agent_end(Some("ended_by_lock"));
         self.clipboard_source = None;
         self.older_copy_opened = false;
         self.phase = match std::mem::replace(&mut self.phase, Phase::Locked) {
@@ -1642,6 +1652,7 @@ impl AppCore {
     /// warning) described what it would have replaced before the change.
     fn set_phase(&mut self, phase: Phase) {
         self.invalidate_native();
+        self.agent_end(Some("ended_by_lock"));
         self.clipboard_source = None;
         self.phase = phase;
         self.inspected = None;
