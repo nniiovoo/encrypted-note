@@ -170,7 +170,11 @@ The code: `src-tauri/src/core/agent.rs` (the grant, the five requests and their 
 **Still to do by hand, on a real Mac, with fake keys:**
 
 - [ ] `scripts/agent-keys-setup.sh` without `--dry-run`, for a real Standard account: the folder, its mode and its one ACL entry, and that the agent account can reach the socket but not list the folder.
-- [ ] The built, sandboxed app can make its socket in `/Users/Shared/encrypted-note-keys` with its one new entitlement, and Start's account check works inside the sandbox (if macOS can't answer the group check there, Start refuses).
+- [ ] The built, sandboxed app can make its socket in `/Users/Shared/encrypted-note-keys` with its two entitlements, and Start's account check works inside the sandbox (if macOS can't answer the group check there, Start refuses).
+  - **Partly answered by a spike on 2026-11-09.** It used a stand-in signed ad-hoc, with hardened runtime and this app's exact entitlements.
+  - **The folder entry alone isn't enough:** the sandbox refuses to make the socket, and adding `network.server` doesn't help.
+  - **The added `temporary-exception.sbpl` rule makes it work**, and the stand-in identified each caller.
+  - **Still to confirm** in a Developer ID-signed, notarized build.
 - [ ] From Claude Code, Codex and the Claude app in the agent account: every request, including a Seed Phrase and a Private Key stored, edited, replaced and deleted through the Master Password panel, and the app coming to the front.
 - [ ] A connection from your own account, and from a third account, gets no reply.
 - [ ] Stop, a lock, sleep, screen lock, user switching, quitting and the end of the hour each end the grant and remove the socket, and a waiting request is cancelled.
