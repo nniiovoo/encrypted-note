@@ -4,6 +4,8 @@ Status: Accepted by the owner, 2026-11-05. **Built 2026-11-06 with fictional dat
 
 Amends [ADR-0007](0007-agents-use-separate-restricted-keys.md). Defers [ADR-0011](0011-chat-wallets.md): signing is no longer the goal.
 
+> **Amended 2026-11-09 (proposed; not built):** signing is the goal again. [ADR-0011](0011-chat-wallets.md) is reinstated, and its five Chat Wallet requests join this route, on the same socket, tool and grant. [ADR-0013](0013-only-claude-code-and-codex-use-the-agent-routes.md) adds a check that the tool was started by Claude Code or Codex. Everything below about storing and managing keys stands.
+
 > **Contradicts [ADR-0007](0007-agents-use-separate-restricted-keys.md)** ("The app offers no agent interface… no Note enumeration or metadata export"). **Worth reopening because** the owner wants Claude, ChatGPT or Codex to help store and organise keys. This route lets an agent put keys **in**, and look after their names and details, but never take a value **out** or use one. So the worst a tricked agent can do is make a mess of the keys it added, not leak or spend them.
 
 ## The owner's goal, in their words

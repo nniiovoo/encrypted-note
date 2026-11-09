@@ -4,6 +4,8 @@
 
 > **Amended by [ADR-0010](0010-companion-source-lives-in-this-repository.md) (2026-11-01):** the private repository named below was merged into this one as `companion/`, and its code is now public.
 
+> **Amended by [ADR-0014](0014-agent-key-operations-through-the-companion.md) (proposed 2026-11-09; not built):** the companion may carry more fixed operations, one owner-approved operation at a time, each with its own Agent Key and its own record. The operation below stays the first.
+
 Status: Service and operation selected by the owner, 2026-10-21; companion source published privately and development/preparation behavior verified with 30 fictional tests. Actual OS isolation, protected execution, provider controls, a real-key pilot and optional ChatGPT cloud connection remain pending. Refs [issue #28](https://github.com/nniiovoo/encrypted-note/issues/28).
 
 The owner selected **OpenAI API text generation using one fixed model**, with a new separate restricted **Agent Key** and no owner-Vault access ([ADR-0007](0007-agents-use-separate-restricted-keys.md)). This replaces the earlier read-only-operation proposal. The selected implementation is a separate local companion whose primary interface is MCP over stdio.
