@@ -2,7 +2,7 @@
 
 > **Don't put real keys in through an agent yet.**
 >
-> **Status:** built 2026-11-06 and checked with fictional data only, in automated tests and in the screens' fixture. The check that only Claude Code and Codex are answered ([ADR-0013](adr/0013-only-claude-code-and-codex-use-the-agent-routes.md)) was added 2026-11-09, also checked with fictional data and stand-in programs only. Nobody has yet run it on a real Mac with a real separate agent account, used it from Claude Code, Codex or the Claude app, or seen its native panels and its window coming to the front. The fake-key drill and the security review that [ADR-0012](adr/0012-agents-store-and-manage-keys.md#build-order) asks for before real keys (steps 5 and 6) are still to do. Mac only. Each step marked **Owner** is yours to do; nothing in the app does it for you.
+> **Status:** built 2026-11-06 and checked with fictional data only, in automated tests and in the screens' fixture. The check that only Claude Code and Codex are answered ([ADR-0013](adr/0013-only-claude-code-and-codex-use-the-agent-routes.md)) was added 2026-11-09, also checked with fictional data and stand-in programs only. Nobody has yet run it on a real Mac with a real separate agent account, used it from Claude Code (in Terminal or the Claude app's Code tab) or Codex, or seen its native panels and its window coming to the front. The fake-key drill and the security review that [ADR-0012](adr/0012-agents-store-and-manage-keys.md#build-order) asks for before real keys (steps 5 and 6) are still to do. Mac only. Each step marked **Owner** is yours to do; nothing in the app does it for you.
 
 While you let it, an AI agent running in **one separate standard Mac account** can ask encrypted-note to store a key. The app comes to the front with its editor filled in from what the agent suggested (Kind, name, visible details). You type or paste the value there and choose Save. The agent gets back only "saved" and the key's id, or "cancelled". It never sees the value, and it can't use the key.
 
@@ -160,7 +160,7 @@ The agent then has five tools: `store_key`, `list_keys`, `edit_key_details`, `as
 ## Stop and clean up
 
 - **Stop** in Settings ends the grant at once and cancels any request still waiting. Stop, a lock and quitting all remove the socket.
-- To remove the setup: choose **Stop**, then in the agent account remove the tool (`claude mcp remove --scope user enote-keys`, or delete its lines from the Codex or Claude app config). In your own account, delete the folder with `rm -r /Users/Shared/encrypted-note-keys` and the tool with `sudo rm /usr/local/bin/enote-agent-keys`, and clear the agent's Mac user in Settings. The keys an agent added stay in your Vault, still marked; choose **Stop agent managing this** on each if you like.
+- To remove the setup: choose **Stop**, then in the agent account remove the tool (`claude mcp remove --scope user enote-keys`, or delete the `[mcp_servers.enote-keys]` lines from `~/.codex/config.toml`). In your own account, delete the folder with `rm -r /Users/Shared/encrypted-note-keys` and the tool with `sudo rm /usr/local/bin/enote-agent-keys`, and clear the agent's Mac user in Settings. The keys an agent added stay in your Vault, still marked; choose **Stop agent managing this** on each if you like.
 
 ## For developers: trying it with a fictional Vault
 

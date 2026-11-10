@@ -17,7 +17,7 @@
 //! `notifications/initialized`, `ping`, `tools/list` and `tools/call`.
 //!
 //! A request that waits for the owner can take up to 5 minutes, longer than some clients wait
-//! for a tool (Codex and the Claude app give up after 60 s by default). So the binary answers
+//! for a tool (Codex gives up after 60 s by default). So the binary answers
 //! each `tools/call` on its own thread, and other calls (`ping`, `list_keys`) are answered
 //! while one waits; and while one waits it sends `notifications/progress` every
 //! [`PROGRESS_EVERY`] when the client gave a `progressToken`, for clients that wait longer on
