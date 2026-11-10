@@ -342,6 +342,9 @@ struct StoredSettings {
     /// The Mac account the owner named for agents storing keys (ADR-0012). Only a name: who may
     /// connect is decided again from it at every Start (`agent_route::expected_uid`).
     agent_account: Option<String>,
+    /// The code hash of the agent's tool the owner approved (ADR-0013), 40 lowercase hex
+    /// digits. Only programs can be told apart by it; it opens nothing.
+    agent_tool_hash: Option<String>,
 }
 
 /// A Vault's id (also in its file's plaintext header) and its document's `change_counter`. Kept
@@ -368,6 +371,7 @@ impl Default for StoredSettings {
             quick_unlock_binding: None,
             newest_seen: None,
             agent_account: None,
+            agent_tool_hash: None,
         }
     }
 }

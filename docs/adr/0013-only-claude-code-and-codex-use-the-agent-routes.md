@@ -1,6 +1,6 @@
 # Only Claude Code and Codex may use the agent routes
 
-Status: Accepted by the owner 2026-11-09 (merged in PR #111). **Spike done 2026-11-09** (see [Spike result](#spike-result-2026-11-09)); the owner then decided the two questions it raised. **The check itself is not built.**
+Status: Accepted by the owner 2026-11-09 (merged in PR #111). **Spike done 2026-11-09** (see [Spike result](#spike-result-2026-11-09)); the owner then decided the two questions it raised. **Step 3 built 2026-11-09** on the ADR-0012 route, checked with fictional data and stand-in programs only (see [As built](#as-built-2026-11-09)). Steps 4 and 5 are still to do.
 
 Amends [ADR-0012](0012-agents-store-and-manage-keys.md) ("It accepts connections only from the agent account"). Applies equally to the Chat Wallet requests ([ADR-0011](0011-chat-wallets.md)) and to the Agent Companion's agent entry ([ADR-0014](0014-agent-key-operations-through-the-companion.md)).
 
@@ -76,6 +76,30 @@ A throwaway Swift program, signed ad-hoc with this app's exact `Entitlements.pli
 - **Refused:** `bind()` there, even with `network.server` added; and connecting out to a listener there.
 - **Works:** adding one `temporary-exception.sbpl` rule allowing `network-bind` and `network-inbound` on Unix sockets in that folder only. The owner approved that rule on 2026-11-09 ([ADR-0012](0012-agents-store-and-manage-keys.md), As built).
 - **Still to confirm:** the rule in a Developer ID-signed, notarized build.
+
+## As built (2026-11-09)
+
+- **Where it lives.** In `src-tauri/src/agent_route.rs`:
+  - `judge_programs` decides from what the kernel said, on every platform;
+  - on a Mac, `check_program` gathers it for each connection, after the account check.
+- **What it reads.**
+  - **The tool:** read through the connection's audit token (`csops_audittoken`): code hash, signature status, identity, team, validation category and entitlements.
+  - **Its starter:** found by process number from `sysctl` (`kinfo_proc`, whose size and fields are checked), and read by `csops`.
+  - **Afterwards:** the tool must still answer through its token, with the same starter, or it is refused.
+- **What must match.**
+  - **The tool's code hash:** the one approved in Settings.
+  - **The starter:** Claude Code or Codex, by identity, team and validation category "Developer ID".
+  - **Both programs:** hardened runtime, not debuggable or debugged, and neither `allow-dyld-environment-variables` nor `get-task-allow` named in their entitlements.
+- **The tool's code hash.** The owner pastes it into Settings (**The agent tool's code hash**), and it is kept in `settings.json`.
+  - **Where it comes from:** `scripts/agent-keys-setup.sh` prints it, and refuses a tool not signed with hardened runtime.
+  - **Without it, Start refuses** ("not_set_up").
+  - **Changing it** ends a running grant.
+- **The Start dialog** now says that Claude Code or Codex in that Mac user can ask.
+- **Developers only:** `ENOTE_DEV_AGENT_ANY_PROGRAM` turns the check off in debug builds, beside the existing `ENOTE_DEV_AGENT_UID`. Release builds have no way to turn it off.
+- **Tests** (`src-tauri/tests/agent_route.rs`):
+  - every branch of the decision;
+  - the kernel readers against a running `/bin/sleep`;
+  - on a real socket, Apple's `nc` as the tool and `bash` as its starter: answered when both are on the list; closed without a reply for the real list, a wrong tool hash, and a program connecting by itself.
 
 ## Considered Options
 

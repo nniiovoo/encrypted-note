@@ -348,6 +348,8 @@ pub struct AgentRouteView {
     pub expires_in_ms: Option<u64>,
     /// The Mac account named for the agent, if any.
     pub account: Option<String>,
+    /// The code hash of the agent's tool the owner approved (ADR-0013), if any.
+    pub tool_hash: Option<String>,
 }
 
 fn agent_route_view(app: &AppHandle) -> AgentRouteView {
@@ -364,6 +366,7 @@ fn agent_route_view(app: &AppHandle) -> AgentRouteView {
         },
         expires_in_ms: status.expires_in_ms.filter(|_| running),
         account: core.agent_account(),
+        tool_hash: core.agent_tool_hash(),
     }
 }
 
@@ -383,12 +386,24 @@ pub fn set_agent_account(
     Ok(agent_route_view(&app))
 }
 
+/// Approves the agent tool's code hash (`None` or `""` clears it). Ends a running grant.
+#[tauri::command(async)]
+pub fn set_agent_tool_hash(
+    app: AppHandle,
+    hash: Option<String>,
+) -> Result<AgentRouteView, ApiError> {
+    with_core(&app, |core| core.set_agent_tool_hash(hash))?;
+    app.state::<AgentRoute>().stop();
+    Ok(agent_route_view(&app))
+}
+
 const AGENT_ROUTE_START: &str = "Start";
 
-/// What the owner agrees to in the Start dialog. `who` names the account let in.
-fn agent_route_start_text(who: &str) -> String {
+/// What the owner agrees to in the Start dialog. `who` names the account let in, and `which`
+/// the programs in it that may ask.
+fn agent_route_start_text(which: &str, who: &str) -> String {
     format!(
-        "For up to one hour, programs in the Mac user {who} can ask this app to store keys, \
+        "For up to one hour, {which} in the Mac user {who} can ask this app to store keys, \
          list and change the details of the keys they added, and ask to replace or delete one.\n\n\
          You type every value here, and the agent never sees one. Changing where a key is used, \
          replacing a value and deleting always ask you first.\n\n\
@@ -408,7 +423,10 @@ pub async fn agent_route_start(app: AppHandle) -> Result<AgentRouteView, ApiErro
     // Checked before the dialog, so the owner hears what's missing first; checked again by
     // the listener when it binds.
     let account = core(&app).agent_account();
+    let tool_hash = core(&app).agent_tool_hash();
     let uid = agent_route::expected_uid(account.as_deref()).map_err(RouteError::api_error)?;
+    let programs =
+        agent_route::program_check(tool_hash.as_deref()).map_err(RouteError::api_error)?;
     let dir = agent_route::socket_dir();
     #[cfg(target_os = "macos")]
     agent_route::check_folder(&dir).map_err(RouteError::api_error)?;
@@ -417,7 +435,12 @@ pub async fn agent_route_start(app: AppHandle) -> Result<AgentRouteView, ApiErro
         Some(name) if !dev_override => format!("“{name}”"),
         _ => format!("with uid {uid} (developer override)"),
     };
-    let description = agent_route_start_text(&who);
+    let which = match &programs {
+        agent_route::ProgramCheck::Required(_) => "Claude Code or Codex",
+        #[cfg(debug_assertions)]
+        agent_route::ProgramCheck::Off => "any program (developer override)",
+    };
+    let description = agent_route_start_text(which, &who);
     let window = app.get_webview_window("main");
     let answer = with_native_dialog(&app, move || {
         // A sheet on the app's own window; Cancel first because Return presses the first button.
@@ -444,16 +467,21 @@ pub async fn agent_route_start(app: AppHandle) -> Result<AgentRouteView, ApiErro
             message: "Agents weren't let in.".to_owned(),
         });
     }
-    // The Vault may have locked, or the account changed, while the dialog was open.
+    // The Vault may have locked, or the account or tool changed, while the dialog was open.
     require_unlocked(&app)?;
-    if core(&app).agent_account() != account {
+    if core(&app).agent_account() != account || core(&app).agent_tool_hash() != tool_hash {
         return Err(crate::core::not_now());
     }
     let grant = with_core(&app, AppCore::agent_grant_start)?;
     let host = std::sync::Arc::new(agent_route::TauriHost(app.clone()));
-    let started =
-        app.state::<AgentRoute>()
-            .start(host, grant.id, uid, &dir, agent_route::Limits::PRODUCTION);
+    let started = app.state::<AgentRoute>().start(
+        host,
+        grant.id,
+        uid,
+        programs,
+        &dir,
+        agent_route::Limits::PRODUCTION,
+    );
     if let Err(error) = started {
         with_core(&app, AppCore::agent_grant_stop);
         return Err(error.api_error());

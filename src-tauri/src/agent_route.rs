@@ -13,6 +13,12 @@
 //!   (`getpeereid`). Anything but the expected uid is closed without a reply, including the
 //!   owner's own programs. The expected uid is the account the owner named, refused if it is
 //!   the owner's own, below 501, or in the admin, wheel or operator group.
+//! * **Only the approved tool, started by Claude Code or Codex (ADR-0013).** The connecting
+//!   program must be `enote-agent-keys` with the code hash the owner approved in Settings, and
+//!   the program that started it must be Claude Code or Codex, validated by macOS as their
+//!   makers' Developer ID. Both come from the kernel's record of the running programs
+//!   (`csops_audittoken`, `sysctl`), never from their files or from what they say, and both must
+//!   have hardened runtime and allow no outside code in. Anything else is closed without a reply.
 //! * **Bounded.** One request per connection: one UTF-8 JSON line of at most 16 KiB, read within
 //!   10 s; at most 4 connections at once. Requests the owner completes wait at most 5 minutes.
 //! * **Only while the grant runs.** The listener starts with the grant and stops with it, and
@@ -20,8 +26,9 @@
 //!   the file there is still the one it made.
 //!
 //! Developers only, debug builds only: `ENOTE_DEV_AGENT_UID` names the uid to accept (so the
-//! route can be tried with a fictional Vault in one account) and `ENOTE_DEV_AGENT_SOCKET_DIR`
-//! moves the folder. Release builds ignore both, as they ignore `ENOTE_DEV_DATA_DIR`.
+//! route can be tried with a fictional Vault in one account), `ENOTE_DEV_AGENT_SOCKET_DIR`
+//! moves the folder, and `ENOTE_DEV_AGENT_ANY_PROGRAM` answers any program in that account.
+//! Release builds ignore all three, as they ignore `ENOTE_DEV_DATA_DIR`.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -85,6 +92,8 @@ pub enum RouteError {
     AccountIsOwner,
     /// The named account is a system account or can administer the Mac.
     AccountNotStandard,
+    /// No code hash for the agent's tool is approved in Settings (ADR-0013).
+    NoToolHash,
     /// This platform has no route yet.
     Unavailable,
     /// Anything else (a bind or a thread that failed).
@@ -113,6 +122,10 @@ impl RouteError {
             RouteError::AccountNotStandard => (
                 "not_allowed",
                 "That account is an administrator or a system account. The agent must run in a Standard account.",
+            ),
+            RouteError::NoToolHash => (
+                "not_set_up",
+                "Paste the agent tool's code hash first: scripts/agent-keys-setup.sh prints it on its CDHash line. Then choose Start.",
             ),
             RouteError::Unavailable => (
                 "unavailable",
@@ -144,6 +157,156 @@ pub fn check_account(uid: u32, owner_uid: u32, groups: &[u32]) -> Result<(), Rou
         return Err(RouteError::AccountNotStandard);
     }
     Ok(())
+}
+
+// ---------- which programs may connect (ADR-0013) ----------
+
+/// Code-signing status bits the check reads (xnu `cs_blobs.h`).
+pub const CS_VALID: u32 = 0x0000_0001;
+pub const CS_GET_TASK_ALLOW: u32 = 0x0000_0004;
+pub const CS_RUNTIME: u32 = 0x0001_0000;
+pub const CS_DEBUGGED: u32 = 0x1000_0000;
+
+/// How macOS validated a running program's signature (`CS_OPS_VALIDATION_CATEGORY`).
+pub const CATEGORY_PLATFORM: u32 = 1;
+pub const CATEGORY_DEVELOPER_ID: u32 = 6;
+
+/// Entitlements that let outside code into a program. A program with either is refused.
+pub const INJECTION_ENTITLEMENTS: [&str; 2] = [
+    "com.apple.security.cs.allow-dyld-environment-variables",
+    "com.apple.security.get-task-allow",
+];
+
+/// Claude Code and Codex, as their makers sign them: (identity, Developer ID team). Fixed here,
+/// never in anything the agent account can write. The Claude app's Code tab runs its own copy of
+/// Claude Code, with the same identity and team.
+pub const ALLOWED_STARTERS: [(&str, &str); 2] = [
+    ("com.anthropic.claude-code", "Q6L2SF6YDW"),
+    ("codex", "2DC432GLL2"),
+];
+
+/// What the kernel recorded about a running program when it validated it: read from the kernel,
+/// never from the program's file and never from anything the program says.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ProgramIdentity {
+    /// The signing identifier, such as `com.anthropic.claude-code`. Anyone can claim one.
+    pub identity: Option<String>,
+    /// The Developer ID team; ad-hoc and Apple's own programs have none.
+    pub team: Option<String>,
+    /// How macOS validated the signature, such as [`CATEGORY_DEVELOPER_ID`].
+    pub category: Option<u32>,
+    /// The code-signing status bits, such as [`CS_VALID`] and [`CS_RUNTIME`].
+    pub status: u32,
+    /// The code directory hash, as `codesign` prints it on its `CDHash=` line.
+    pub cdhash: Option<[u8; 20]>,
+    /// The entitlements as the kernel holds them (XML), if the program has any.
+    pub entitlements: Option<Vec<u8>>,
+}
+
+/// A program allowed to start the agent's tool.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Starter {
+    pub identity: String,
+    pub team: Option<String>,
+    pub category: u32,
+}
+
+/// Which tool may connect, and which programs may have started it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProgramPolicy {
+    /// The code hash of the installed `enote-agent-keys` the owner approved in Settings.
+    pub tool_cdhash: [u8; 20],
+    pub starters: Vec<Starter>,
+}
+
+impl ProgramPolicy {
+    /// The owner's approved tool, started by Claude Code or Codex signed by their makers.
+    pub fn production(tool_cdhash: [u8; 20]) -> Self {
+        ProgramPolicy {
+            tool_cdhash,
+            starters: ALLOWED_STARTERS
+                .iter()
+                .map(|(identity, team)| Starter {
+                    identity: (*identity).to_owned(),
+                    team: Some((*team).to_owned()),
+                    category: CATEGORY_DEVELOPER_ID,
+                })
+                .collect(),
+        }
+    }
+}
+
+/// Who the route answers, beyond the account.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ProgramCheck {
+    Required(ProgramPolicy),
+    /// Developers and tests only: any program in the account. Absent from release builds.
+    #[cfg(debug_assertions)]
+    Off,
+}
+
+/// Why a program was turned away. Never sent to it: the connection just closes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProgramRefusal {
+    /// The kernel couldn't say who it is, or it changed while the route looked.
+    Unknown,
+    /// Not the approved tool: another code hash, or no valid signature.
+    NotTheTool,
+    /// The tool wasn't started by Claude Code or Codex.
+    NotAnAllowedStarter,
+    /// The tool or its starter could have outside code loaded into it.
+    Injectable,
+}
+
+/// The check, on what the kernel said: the approved tool, started by an allowed program, neither
+/// open to outside code.
+pub fn judge_programs(
+    policy: &ProgramPolicy,
+    tool: &ProgramIdentity,
+    starter: &ProgramIdentity,
+) -> Result<(), ProgramRefusal> {
+    if tool.status & CS_VALID == 0 || tool.cdhash != Some(policy.tool_cdhash) {
+        return Err(ProgramRefusal::NotTheTool);
+    }
+    let allowed = policy.starters.iter().any(|allowed| {
+        starter.identity.as_deref() == Some(allowed.identity.as_str())
+            && starter.team.as_deref() == allowed.team.as_deref()
+            && starter.category == Some(allowed.category)
+    });
+    if starter.status & CS_VALID == 0 || !allowed {
+        return Err(ProgramRefusal::NotAnAllowedStarter);
+    }
+    if !closed_to_outside_code(tool) || !closed_to_outside_code(starter) {
+        return Err(ProgramRefusal::Injectable);
+    }
+    Ok(())
+}
+
+/// Hardened runtime, not debuggable, not being debugged, and no entitlement that lets code in.
+/// An entitlement named at all counts, whatever its value.
+fn closed_to_outside_code(program: &ProgramIdentity) -> bool {
+    let named = |name: &str| {
+        program
+            .entitlements
+            .as_deref()
+            .is_some_and(|xml| xml.windows(name.len()).any(|w| w == name.as_bytes()))
+    };
+    program.status & CS_RUNTIME != 0
+        && program.status & (CS_GET_TASK_ALLOW | CS_DEBUGGED) == 0
+        && !INJECTION_ENTITLEMENTS.iter().any(|name| named(name))
+}
+
+/// The check Start sets up from Settings: the approved tool hash, or [`RouteError::NoToolHash`].
+/// Debug builds answer any program when `ENOTE_DEV_AGENT_ANY_PROGRAM` is set.
+pub fn program_check(tool_hash: Option<&str>) -> Result<ProgramCheck, RouteError> {
+    #[cfg(debug_assertions)]
+    if std::env::var_os("ENOTE_DEV_AGENT_ANY_PROGRAM").is_some() {
+        return Ok(ProgramCheck::Off);
+    }
+    let hash = tool_hash
+        .and_then(crate::core::agent::parse_tool_hash)
+        .ok_or(RouteError::NoToolHash)?;
+    Ok(ProgramCheck::Required(ProgramPolicy::production(hash)))
 }
 
 /// Where the socket goes. Debug builds may move it with `ENOTE_DEV_AGENT_SOCKET_DIR`.
@@ -345,7 +508,10 @@ fn wait_for_owner<H: Host>(
 // ---------- the listener (macOS) ----------
 
 #[cfg(target_os = "macos")]
-pub use mac::{AgentRoute, check_folder, expected_uid, lookup_account, peer_uid};
+pub use mac::{
+    AgentRoute, check_folder, check_program, expected_uid, lookup_account, parent_pid, peer_uid,
+    program_identity,
+};
 
 #[cfg(target_os = "macos")]
 mod mac {
@@ -476,6 +642,222 @@ mod mac {
         !ok || member != 0
     }
 
+    // ----- the kernel's record of a running program (ADR-0013) -----
+
+    /// `audit_token_t`: names one process for as long as it lives, unlike its number.
+    #[repr(C)]
+    #[derive(Clone, Copy, Default)]
+    pub struct AuditToken {
+        val: [u32; 8],
+    }
+
+    // The kernel's code-signing calls (`<sys/codesign.h>`). Declared here because the libc crate
+    // doesn't have them. Both read the kernel's record; neither opens the program's file, which
+    // is why they work inside the App Sandbox when the Security framework's checks don't.
+    unsafe extern "C" {
+        fn csops(
+            pid: libc::pid_t,
+            ops: u32,
+            useraddr: *mut libc::c_void,
+            usersize: libc::size_t,
+        ) -> c_int;
+        fn csops_audittoken(
+            pid: libc::pid_t,
+            ops: u32,
+            useraddr: *mut libc::c_void,
+            usersize: libc::size_t,
+            token: *mut AuditToken,
+        ) -> c_int;
+    }
+
+    const CS_OPS_STATUS: u32 = 0;
+    const CS_OPS_CDHASH: u32 = 5;
+    const CS_OPS_ENTITLEMENTS_BLOB: u32 = 7;
+    const CS_OPS_IDENTITY: u32 = 11;
+    const CS_OPS_TEAMID: u32 = 14;
+    const CS_OPS_VALIDATION_CATEGORY: u32 = 17;
+    /// The largest blob read: entitlements are a few kilobytes at most.
+    const MAX_BLOB: usize = 1 << 20;
+
+    /// One `csops` call into `buffer`, through the audit token when there is one, so that only
+    /// the very process it names can answer. `Err` carries the errno.
+    fn cs_call(
+        pid: i32,
+        token: Option<&AuditToken>,
+        op: u32,
+        buffer: &mut [u8],
+    ) -> Result<(), i32> {
+        let rc = match token {
+            Some(token) => {
+                let mut token = *token;
+                // SAFETY: `buffer` is valid for writes of its length, and `token` is a whole
+                // audit_token_t the call only reads.
+                unsafe {
+                    csops_audittoken(
+                        pid,
+                        op,
+                        buffer.as_mut_ptr().cast(),
+                        buffer.len(),
+                        &mut token,
+                    )
+                }
+            }
+            // SAFETY: `buffer` is valid for writes of its length.
+            None => unsafe { csops(pid, op, buffer.as_mut_ptr().cast(), buffer.len()) },
+        };
+        if rc == 0 {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error().raw_os_error().unwrap_or(0))
+        }
+    }
+
+    fn cs_u32(pid: i32, token: Option<&AuditToken>, op: u32) -> Option<u32> {
+        let mut bytes = [0u8; 4];
+        cs_call(pid, token, op, &mut bytes).ok()?;
+        Some(u32::from_ne_bytes(bytes))
+    }
+
+    /// A blob the kernel keeps for the program: an 8-byte header (magic, then total length,
+    /// both big-endian), then the data. `Ok(None)`: the program has none.
+    fn cs_blob(pid: i32, token: Option<&AuditToken>, op: u32) -> Result<Option<Vec<u8>>, ()> {
+        let mut size = 4096;
+        loop {
+            let mut buffer = vec![0u8; size];
+            match cs_call(pid, token, op, &mut buffer) {
+                Ok(()) => {}
+                Err(libc::ENOENT) => return Ok(None),
+                Err(libc::ERANGE) if size < MAX_BLOB => {
+                    let needed = u32::from_be_bytes([buffer[4], buffer[5], buffer[6], buffer[7]]);
+                    size =
+                        usize::try_from(needed).map_or(MAX_BLOB, |n| n.max(size * 2).min(MAX_BLOB));
+                    continue;
+                }
+                Err(_) => return Err(()),
+            }
+            let length = u32::from_be_bytes([buffer[4], buffer[5], buffer[6], buffer[7]]);
+            let length = usize::try_from(length).map_err(|_| ())?;
+            if length < 8 || length > buffer.len() {
+                return if length == 0 { Ok(None) } else { Err(()) };
+            }
+            return Ok(Some(buffer[8..length].to_vec()));
+        }
+    }
+
+    fn cs_string(pid: i32, token: Option<&AuditToken>, op: u32) -> Result<Option<String>, ()> {
+        Ok(cs_blob(pid, token, op)?.and_then(|data| {
+            let text = data.split(|&b| b == 0).next().unwrap_or_default();
+            (!text.is_empty()).then(|| String::from_utf8_lossy(text).into_owned())
+        }))
+    }
+
+    fn read_identity(pid: i32, token: Option<&AuditToken>) -> Option<ProgramIdentity> {
+        let status = cs_u32(pid, token, CS_OPS_STATUS)?;
+        let mut cdhash = [0u8; 20];
+        let cdhash = cs_call(pid, token, CS_OPS_CDHASH, &mut cdhash)
+            .ok()
+            .map(|()| cdhash);
+        Some(ProgramIdentity {
+            identity: cs_string(pid, token, CS_OPS_IDENTITY).ok()?,
+            team: cs_string(pid, token, CS_OPS_TEAMID).ok()?,
+            category: cs_u32(pid, token, CS_OPS_VALIDATION_CATEGORY),
+            status,
+            cdhash,
+            entitlements: cs_blob(pid, token, CS_OPS_ENTITLEMENTS_BLOB).ok()?,
+        })
+    }
+
+    /// What the kernel recorded about the running process `pid`, or `None` if it can't say.
+    pub fn program_identity(pid: i32) -> Option<ProgramIdentity> {
+        read_identity(pid, None)
+    }
+
+    /// `struct kinfo_proc` from `sysctl(KERN_PROC_PID)`: its size and where the process and
+    /// parent numbers sit, the same on Apple silicon and Intel (checked with the system
+    /// headers, 2026-11-09). Anything else is refused rather than guessed.
+    const KINFO_PROC_SIZE: usize = 648;
+    const KINFO_P_PID: usize = 40;
+    const KINFO_E_PPID: usize = 560;
+
+    /// The number of the process that started `pid`, from the kernel's process table. Works
+    /// for another account's process, where `proc_pidinfo` is refused.
+    pub fn parent_pid(pid: i32) -> Option<i32> {
+        let mut mib = [libc::CTL_KERN, libc::KERN_PROC, libc::KERN_PROC_PID, pid];
+        let mut record = [0u8; KINFO_PROC_SIZE];
+        let mut size: libc::size_t = KINFO_PROC_SIZE;
+        // SAFETY: `mib` holds the 4 names passed, `record` is valid for writes of `size`
+        // bytes, and nothing is written back to the kernel.
+        let rc = unsafe {
+            libc::sysctl(
+                mib.as_mut_ptr(),
+                4,
+                record.as_mut_ptr().cast(),
+                &mut size,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        let field = |at: usize| {
+            i32::from_ne_bytes([record[at], record[at + 1], record[at + 2], record[at + 3]])
+        };
+        (rc == 0 && size == KINFO_PROC_SIZE && field(KINFO_P_PID) == pid)
+            .then(|| field(KINFO_E_PPID))
+    }
+
+    /// The process at the other end of `stream`: its number and audit token, from the kernel.
+    fn peer_process(stream: &UnixStream) -> Option<(i32, AuditToken)> {
+        let fd = stream.as_raw_fd();
+        let mut pid: libc::pid_t = 0;
+        let mut pid_len = std::mem::size_of::<libc::pid_t>() as libc::socklen_t;
+        let mut token = AuditToken::default();
+        let mut token_len = std::mem::size_of::<AuditToken>() as libc::socklen_t;
+        // SAFETY: both out pointers are valid for writes of the lengths given, and the
+        // descriptor is open while `stream` is borrowed.
+        let ok = unsafe {
+            libc::getsockopt(
+                fd,
+                libc::SOL_LOCAL,
+                libc::LOCAL_PEERPID,
+                (&mut pid as *mut libc::pid_t).cast(),
+                &mut pid_len,
+            ) == 0
+                && libc::getsockopt(
+                    fd,
+                    libc::SOL_LOCAL,
+                    libc::LOCAL_PEERTOKEN,
+                    (&mut token as *mut AuditToken).cast(),
+                    &mut token_len,
+                ) == 0
+        };
+        (ok && pid > 1 && token_len as usize == std::mem::size_of::<AuditToken>())
+            .then_some((pid, token))
+    }
+
+    /// ADR-0013's check for one connection: the approved tool, started by Claude Code or Codex.
+    pub fn check_program(
+        stream: &UnixStream,
+        policy: &ProgramPolicy,
+    ) -> Result<(), ProgramRefusal> {
+        let (pid, token) = peer_process(stream).ok_or(ProgramRefusal::Unknown)?;
+        let tool = read_identity(pid, Some(&token)).ok_or(ProgramRefusal::Unknown)?;
+        let starter_pid = parent_pid(pid).ok_or(ProgramRefusal::Unknown)?;
+        if starter_pid <= 1 {
+            return Err(ProgramRefusal::NotAnAllowedStarter);
+        }
+        let starter = program_identity(starter_pid).ok_or(ProgramRefusal::Unknown)?;
+        judge_programs(policy, &tool, &starter)?;
+        // Still the same tool with the same starter: had the starter exited while the route
+        // looked, the tool's parent would now be launchd (1), so its number can't have been
+        // reused by another program in between. The token answers only for the same tool.
+        let same = cs_u32(pid, Some(&token), CS_OPS_STATUS).is_some()
+            && parent_pid(pid) == Some(starter_pid);
+        if same {
+            Ok(())
+        } else {
+            Err(ProgramRefusal::Unknown)
+        }
+    }
+
     /// The uid the route will accept, from the account the owner named. Debug builds take
     /// `ENOTE_DEV_AGENT_UID` instead, with no checks, so one account can try it end to end.
     pub fn expected_uid(account: Option<&str>) -> Result<u32, RouteError> {
@@ -557,13 +939,14 @@ mod mac {
     }
 
     impl AgentRoute {
-        /// Listens in `dir` for `grant`, answering only `expected_uid`. Replaces a listener
-        /// already running.
+        /// Listens in `dir` for `grant`, answering only `expected_uid`, and among its programs
+        /// only those `programs` lets in. Replaces a listener already running.
         pub fn start<H: Host>(
             &self,
             host: Arc<H>,
             grant: u64,
             expected_uid: u32,
+            programs: ProgramCheck,
             dir: &Path,
             limits: Limits,
         ) -> Result<(), RouteError> {
@@ -578,7 +961,9 @@ mod mac {
                 let stop = stop.clone();
                 std::thread::Builder::new()
                     .name("agent-route".to_owned())
-                    .spawn(move || accept_loop(listener, host, grant, expected_uid, limits, stop))
+                    .spawn(move || {
+                        accept_loop(listener, host, grant, expected_uid, programs, limits, stop)
+                    })
             };
             let thread = match thread {
                 Ok(thread) => thread,
@@ -638,6 +1023,7 @@ mod mac {
         host: Arc<H>,
         grant: u64,
         expected_uid: u32,
+        programs: ProgramCheck,
         limits: Limits,
         stop: Arc<AtomicBool>,
     ) {
@@ -656,6 +1042,12 @@ mod mac {
             };
             // Anyone else, the owner's own programs included, is closed without a word.
             if peer_uid(&stream) != Some(expected_uid) || stream.set_nonblocking(false).is_err() {
+                continue;
+            }
+            // And in that account, only the approved tool started by Claude Code or Codex.
+            if let ProgramCheck::Required(policy) = &programs
+                && check_program(&stream, policy).is_err()
+            {
                 continue;
             }
             let _ = stream.set_write_timeout(Some(limits.read_timeout));
@@ -756,6 +1148,7 @@ mod other {
             _host: Arc<H>,
             _grant: u64,
             _expected_uid: u32,
+            _programs: ProgramCheck,
             _dir: &Path,
             _limits: Limits,
         ) -> Result<(), RouteError> {

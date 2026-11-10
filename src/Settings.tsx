@@ -26,6 +26,7 @@ import {
   restoreSafetyCopy,
   revealVaultFolder,
   setAgentAccount,
+  setAgentToolHash,
   setSettings,
   vaultLocation,
   writeBackup,
@@ -567,14 +568,18 @@ function AgentCompanion({ companion }: { companion: ReturnType<typeof useCompani
   );
 }
 
-/** Agents storing keys (ADR-0012): the agent's Mac user, Start for at most an hour, Stop, and
- *  what is true now. Fixed fields from Rust only: a state, the time left and the account name.
- *  None of the Agent Companion's code or state. */
+/** Agents storing keys (ADR-0012): the agent's Mac user, the approved tool's code hash
+ *  (ADR-0013), Start for at most an hour, Stop, and what is true now. Fixed fields from Rust
+ *  only: a state, the time left, the account name and the hash. None of the Agent Companion's
+ *  code or state. */
 function AgentKeys() {
   const [view, setView] = useState<AgentRouteView | null>(null);
   // What the account box holds, once the owner has typed in it; null: as saved.
   const [typed, setTyped] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
+  // The same for the tool's code hash.
+  const [typedHash, setTypedHash] = useState<string | null>(null);
+  const [savedHash, setSavedHash] = useState(false);
   const [open, setOpen] = useState(false);
   const acting = useRef(false);
   const { busy, error, run } = useAction();
@@ -593,6 +598,7 @@ function AgentKeys() {
   }, []);
   const act = (call: () => Promise<AgentRouteView>) => {
     setSaved(false);
+    setSavedHash(false);
     acting.current = true;
     return run(async () => setView(await call())).finally(() => (acting.current = false));
   };
@@ -603,6 +609,14 @@ function AgentKeys() {
       if (!ok) return;
       setTyped(null);
       setSaved(true);
+    });
+  const hash = typedHash ?? view?.tool_hash ?? "";
+  const changedHash = (hash.trim() || null) !== (view?.tool_hash ?? null);
+  const saveHash = () =>
+    act(() => setAgentToolHash(hash.trim() || null)).then((ok) => {
+      if (!ok) return;
+      setTypedHash(null);
+      setSavedHash(true);
     });
   const on = view?.state === "running";
   // On, and anything that went wrong, is never folded away.
@@ -648,6 +662,30 @@ function AgentKeys() {
           <button disabled={busy || !view || !changedAccount}>{s.agentAccountSave}</button>
         </div>
       </form>
+      <form
+        className="setting"
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (changedHash && !busy) saveHash();
+        }}
+      >
+        <Field label={s.agentToolHash} hint={s.agentToolHashHint} check={savedHash && !changedHash && <span className="ok" role="status">{s.agentAccountSaved}</span>}>
+          <input
+            value={hash}
+            maxLength={60}
+            placeholder="CDHash=…"
+            disabled={!view}
+            onChange={(e) => {
+              setSavedHash(false);
+              setTypedHash(e.target.value);
+            }}
+            {...noAssist}
+          />
+        </Field>
+        <div className="actions">
+          <button disabled={busy || !view || !changedHash}>{s.agentAccountSave}</button>
+        </div>
+      </form>
       <p className="hint">{s.agentKeysSetup}</p>
       {!on && <p className="hint">{s.agentKeysStartLocks}</p>}
       <div className="actions">
@@ -656,7 +694,7 @@ function AgentKeys() {
             {s.agentKeysStop}
           </button>
         ) : (
-          <button className="primary" disabled={busy || !view || changedAccount} onClick={() => act(agentRouteStart)}>
+          <button className="primary" disabled={busy || !view || changedAccount || changedHash} onClick={() => act(agentRouteStart)}>
             {s.agentKeysStart}
           </button>
         )}

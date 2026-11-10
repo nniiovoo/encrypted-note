@@ -105,6 +105,7 @@ pub fn run() {
             commands::agent_route_start,
             commands::agent_route_stop,
             commands::set_agent_account,
+            commands::set_agent_tool_hash,
             commands::show_field,
             commands::show_wallet_field,
             commands::show_and_copy_wallet_field,

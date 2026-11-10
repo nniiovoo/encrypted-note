@@ -9,9 +9,14 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use encrypted_note_app::agent_route::{
-    Host, Limits, Request, RouteError, check_account, error_reply, handle, parse_request,
+    ALLOWED_STARTERS, CATEGORY_DEVELOPER_ID, CATEGORY_PLATFORM, CS_DEBUGGED, CS_GET_TASK_ALLOW,
+    CS_RUNTIME, CS_VALID, Host, Limits, ProgramCheck, ProgramIdentity, ProgramPolicy,
+    ProgramRefusal, Request, RouteError, Starter, check_account, error_reply, handle,
+    judge_programs, parse_request, program_check,
 };
-use encrypted_note_app::core::agent::{AgentEdit, AgentError, AgentStoreSuggestion};
+use encrypted_note_app::core::agent::{
+    AgentEdit, AgentError, AgentStoreSuggestion, parse_tool_hash, tool_hash_text,
+};
 use encrypted_note_app::core::native::{NativeAction, NativeCredentials, NativeResult};
 use encrypted_note_app::core::{ApiError, AppCore, Clipboard, Clock, Config, NoteInput};
 use serde_json::{Value, json};
@@ -572,6 +577,315 @@ fn the_agent_account_is_saved_checked_and_ends_the_grant() {
     });
 }
 
+// ---------- only Claude Code and Codex (ADR-0013) ----------
+
+/// An obviously fake code hash for the agent's tool.
+const FAKE_TOOL_HASH: &str = "fa4efa4efa4efa4efa4efa4efa4efa4efa4efa4e";
+
+#[test]
+fn the_tool_hash_is_read_as_codesign_prints_it() {
+    let hash = parse_tool_hash(FAKE_TOOL_HASH).unwrap();
+    assert_eq!(tool_hash_text(&hash), FAKE_TOOL_HASH);
+    // The whole CDHash line, upper case and surrounding space are fine.
+    let line = format!("  CDHash={}\n", FAKE_TOOL_HASH.to_uppercase());
+    assert_eq!(parse_tool_hash(&line), Some(hash));
+    for bad in [
+        "",
+        "fa4e",
+        &FAKE_TOOL_HASH[..39],
+        &format!("{FAKE_TOOL_HASH}0"),
+        &format!("{}g", &FAKE_TOOL_HASH[..39]),
+        "sha256=fa4efa4efa4efa4efa4efa4efa4efa4efa4efa4e",
+    ] {
+        assert_eq!(parse_tool_hash(bad), None, "{bad:?}");
+    }
+}
+
+#[test]
+fn the_tool_hash_is_saved_checked_and_ends_the_grant() {
+    let (host, _grant, _agent_id, _arrived) = unlocked();
+    host.with_core(|core| {
+        assert_eq!(core.agent_tool_hash(), None);
+        for bad in ["fake", &FAKE_TOOL_HASH[..39], "zz"] {
+            assert_eq!(
+                core.set_agent_tool_hash(Some(bad.to_owned()))
+                    .map_err(|e| e.code),
+                Err("invalid_input"),
+                "{bad}"
+            );
+        }
+        assert_eq!(core.agent_grant_status().state, "running");
+        core.set_agent_tool_hash(Some(format!("CDHash={}", FAKE_TOOL_HASH.to_uppercase())))
+            .unwrap();
+        // Kept one way only: 40 lowercase hex digits.
+        assert_eq!(core.agent_tool_hash().as_deref(), Some(FAKE_TOOL_HASH));
+        assert_eq!(core.agent_grant_status().state, "off");
+        core.set_agent_tool_hash(Some(" ".to_owned())).unwrap();
+        assert_eq!(core.agent_tool_hash(), None);
+        core.lock();
+        assert_eq!(
+            core.set_agent_tool_hash(Some(FAKE_TOOL_HASH.to_owned()))
+                .map_err(|e| e.code),
+            Err("locked")
+        );
+    });
+}
+
+#[test]
+fn start_needs_an_approved_tool_hash() {
+    if std::env::var_os("ENOTE_DEV_AGENT_ANY_PROGRAM").is_some() {
+        return;
+    }
+    assert_eq!(program_check(None), Err(RouteError::NoToolHash));
+    assert_eq!(
+        program_check(Some("not a hash")),
+        Err(RouteError::NoToolHash)
+    );
+    assert_eq!(RouteError::NoToolHash.api_error().code, "not_set_up");
+    let hash = parse_tool_hash(FAKE_TOOL_HASH).unwrap();
+    assert_eq!(
+        program_check(Some(FAKE_TOOL_HASH)),
+        Ok(ProgramCheck::Required(ProgramPolicy::production(hash)))
+    );
+}
+
+#[test]
+fn the_allowed_programs_are_claude_code_and_codex_by_their_makers() {
+    let policy = ProgramPolicy::production(parse_tool_hash(FAKE_TOOL_HASH).unwrap());
+    assert_eq!(
+        ALLOWED_STARTERS,
+        [
+            ("com.anthropic.claude-code", "Q6L2SF6YDW"),
+            ("codex", "2DC432GLL2")
+        ]
+    );
+    assert_eq!(policy.starters.len(), 2);
+    assert!(
+        policy
+            .starters
+            .iter()
+            .all(|s| s.category == CATEGORY_DEVELOPER_ID && s.team.is_some())
+    );
+}
+
+/// The installed tool as the kernel describes it: ad-hoc signed with hardened runtime.
+fn fake_tool() -> ProgramIdentity {
+    ProgramIdentity {
+        identity: Some("enote-agent-keys".to_owned()),
+        team: None,
+        category: Some(10),
+        status: CS_VALID | CS_RUNTIME,
+        cdhash: parse_tool_hash(FAKE_TOOL_HASH),
+        entitlements: None,
+    }
+}
+
+/// Claude Code as seen on the owner's Mac (2026-11-09): Developer ID, hardened runtime, and
+/// entitlements that disable library validation (accepted by the owner).
+fn claude_code() -> ProgramIdentity {
+    ProgramIdentity {
+        identity: Some("com.anthropic.claude-code".to_owned()),
+        team: Some("Q6L2SF6YDW".to_owned()),
+        category: Some(CATEGORY_DEVELOPER_ID),
+        status: 0x2201_0301,
+        cdhash: Some([0x11; 20]),
+        entitlements: Some(
+            b"<plist><dict><key>com.apple.security.cs.allow-jit</key><true/>\
+              <key>com.apple.security.cs.disable-library-validation</key><true/></dict></plist>"
+                .to_vec(),
+        ),
+    }
+}
+
+fn codex() -> ProgramIdentity {
+    ProgramIdentity {
+        identity: Some("codex".to_owned()),
+        team: Some("2DC432GLL2".to_owned()),
+        category: Some(CATEGORY_DEVELOPER_ID),
+        status: 0x2201_1311,
+        cdhash: Some([0x22; 20]),
+        entitlements: None,
+    }
+}
+
+#[test]
+fn the_approved_tool_started_by_claude_code_or_codex_is_let_in() {
+    let policy = ProgramPolicy::production(parse_tool_hash(FAKE_TOOL_HASH).unwrap());
+    assert_eq!(
+        judge_programs(&policy, &fake_tool(), &claude_code()),
+        Ok(())
+    );
+    assert_eq!(judge_programs(&policy, &fake_tool(), &codex()), Ok(()));
+}
+
+#[test]
+fn another_tool_or_starter_is_turned_away() {
+    let policy = ProgramPolicy::production(parse_tool_hash(FAKE_TOOL_HASH).unwrap());
+    let tool = fake_tool();
+    let starter = claude_code();
+    let refused = |tool: &ProgramIdentity, starter: &ProgramIdentity| {
+        judge_programs(&policy, tool, starter).unwrap_err()
+    };
+
+    // Not the approved tool: another hash, none, or no valid signature.
+    let other = ProgramIdentity {
+        cdhash: Some([0x33; 20]),
+        ..tool.clone()
+    };
+    assert_eq!(refused(&other, &starter), ProgramRefusal::NotTheTool);
+    let none = ProgramIdentity {
+        cdhash: None,
+        ..tool.clone()
+    };
+    assert_eq!(refused(&none, &starter), ProgramRefusal::NotTheTool);
+    let invalid = ProgramIdentity {
+        status: CS_RUNTIME,
+        ..tool.clone()
+    };
+    assert_eq!(refused(&invalid, &starter), ProgramRefusal::NotTheTool);
+
+    // The spike's fake: Claude Code's identity, signed ad-hoc (no team, category "none").
+    let fake_claude = ProgramIdentity {
+        team: None,
+        category: Some(10),
+        ..claude_code()
+    };
+    assert_eq!(
+        refused(&tool, &fake_claude),
+        ProgramRefusal::NotAnAllowedStarter
+    );
+    // The right identity with another company's team, or not validated as Developer ID.
+    let other_team = ProgramIdentity {
+        team: Some("2DC432GLL2".to_owned()),
+        ..claude_code()
+    };
+    assert_eq!(
+        refused(&tool, &other_team),
+        ProgramRefusal::NotAnAllowedStarter
+    );
+    let development = ProgramIdentity {
+        category: Some(3),
+        ..claude_code()
+    };
+    assert_eq!(
+        refused(&tool, &development),
+        ProgramRefusal::NotAnAllowedStarter
+    );
+    let unsigned = ProgramIdentity {
+        status: CS_RUNTIME,
+        ..claude_code()
+    };
+    assert_eq!(
+        refused(&tool, &unsigned),
+        ProgramRefusal::NotAnAllowedStarter
+    );
+    // A shell or any other program, Apple's own included.
+    let shell = ProgramIdentity {
+        identity: Some("com.apple.zsh".to_owned()),
+        team: None,
+        category: Some(CATEGORY_PLATFORM),
+        status: CS_VALID | CS_RUNTIME,
+        cdhash: Some([0x44; 20]),
+        entitlements: None,
+    };
+    assert_eq!(refused(&tool, &shell), ProgramRefusal::NotAnAllowedStarter);
+    assert_eq!(
+        refused(&tool, &ProgramIdentity::default()),
+        ProgramRefusal::NotAnAllowedStarter
+    );
+}
+
+#[test]
+fn a_tool_or_starter_open_to_outside_code_is_turned_away() {
+    let policy = ProgramPolicy::production(parse_tool_hash(FAKE_TOOL_HASH).unwrap());
+    let tool = fake_tool();
+    let starter = codex();
+    let refused = |tool: &ProgramIdentity, starter: &ProgramIdentity| {
+        judge_programs(&policy, tool, starter).unwrap_err()
+    };
+    // No hardened runtime (DYLD_INSERT_LIBRARIES would work), debuggable, or being debugged.
+    for status in [
+        CS_VALID,
+        CS_VALID | CS_RUNTIME | CS_GET_TASK_ALLOW,
+        CS_VALID | CS_RUNTIME | CS_DEBUGGED,
+    ] {
+        let tool_open = ProgramIdentity {
+            status,
+            ..tool.clone()
+        };
+        assert_eq!(
+            refused(&tool_open, &starter),
+            ProgramRefusal::Injectable,
+            "{status:#x}"
+        );
+        let starter_open = ProgramIdentity {
+            status,
+            ..starter.clone()
+        };
+        assert_eq!(
+            refused(&tool, &starter_open),
+            ProgramRefusal::Injectable,
+            "{status:#x}"
+        );
+    }
+    // An entitlement that lets code in, whatever its value.
+    for entitlement in [
+        "com.apple.security.cs.allow-dyld-environment-variables",
+        "com.apple.security.get-task-allow",
+    ] {
+        let xml = format!("<plist><dict><key>{entitlement}</key><false/></dict></plist>");
+        let starter_open = ProgramIdentity {
+            entitlements: Some(xml.clone().into_bytes()),
+            ..starter.clone()
+        };
+        assert_eq!(
+            refused(&tool, &starter_open),
+            ProgramRefusal::Injectable,
+            "{entitlement}"
+        );
+        let tool_open = ProgramIdentity {
+            entitlements: Some(xml.into_bytes()),
+            ..tool.clone()
+        };
+        assert_eq!(
+            refused(&tool_open, &starter),
+            ProgramRefusal::Injectable,
+            "{entitlement}"
+        );
+    }
+    // Disabled library validation alone is accepted for Claude Code (owner, 2026-11-09).
+    assert_eq!(judge_programs(&policy, &tool, &claude_code()), Ok(()));
+}
+
+#[test]
+fn a_starter_list_can_name_apples_own_programs_for_tests() {
+    let policy = ProgramPolicy {
+        tool_cdhash: [0x55; 20],
+        starters: vec![Starter {
+            identity: "com.apple.bash".to_owned(),
+            team: None,
+            category: CATEGORY_PLATFORM,
+        }],
+    };
+    let tool = ProgramIdentity {
+        cdhash: Some([0x55; 20]),
+        ..fake_tool()
+    };
+    let bash = ProgramIdentity {
+        identity: Some("com.apple.bash".to_owned()),
+        team: None,
+        category: Some(CATEGORY_PLATFORM),
+        status: CS_VALID | CS_RUNTIME,
+        cdhash: Some([0x66; 20]),
+        entitlements: None,
+    };
+    assert_eq!(judge_programs(&policy, &tool, &bash), Ok(()));
+    assert_eq!(
+        judge_programs(&policy, &tool, &claude_code()),
+        Err(ProgramRefusal::NotAnAllowedStarter)
+    );
+}
+
 // ---------- the listener (macOS) ----------
 
 #[cfg(target_os = "macos")]
@@ -582,7 +896,7 @@ mod listener {
     use std::path::{Path, PathBuf};
 
     use encrypted_note_app::agent_route::{
-        self, AgentRoute, SOCKET_NAME, check_folder, expected_uid,
+        self, AgentRoute, SOCKET_NAME, check_folder, expected_uid, parent_pid, program_identity,
     };
 
     use super::*;
@@ -688,7 +1002,14 @@ mod listener {
         let (host, grant, agent_id, _arrived) = unlocked();
         let route = AgentRoute::default();
         route
-            .start(host.clone(), grant, own_uid(), &dir, fast())
+            .start(
+                host.clone(),
+                grant,
+                own_uid(),
+                ProgramCheck::Off,
+                &dir,
+                fast(),
+            )
             .unwrap();
         assert!(route.is_active());
         let socket = dir.join(SOCKET_NAME);
@@ -719,7 +1040,7 @@ mod listener {
         // As if the agent account were someone else: this test's own uid is then a stranger,
         // exactly as the owner's own programs are to the real route.
         route
-            .start(host, grant, own_uid() + 1, &dir, fast())
+            .start(host, grant, own_uid() + 1, ProgramCheck::Off, &dir, fast())
             .unwrap();
         let mut stream = UnixStream::connect(dir.join(SOCKET_NAME)).unwrap();
         stream
@@ -741,7 +1062,9 @@ mod listener {
             read_timeout: Duration::from_millis(300),
             ..fast()
         };
-        route.start(host, grant, own_uid(), &dir, limits).unwrap();
+        route
+            .start(host, grant, own_uid(), ProgramCheck::Off, &dir, limits)
+            .unwrap();
         let long = format!(
             r#"{{"v":1,"op":"list","pad":"{}"}}"#,
             "x".repeat(16 * 1024 + 1)
@@ -767,7 +1090,9 @@ mod listener {
             max_connections: 1,
             ..fast()
         };
-        route.start(host, grant, own_uid(), &dir, limits).unwrap();
+        route
+            .start(host, grant, own_uid(), ProgramCheck::Off, &dir, limits)
+            .unwrap();
         // Holds the one slot by never sending its line.
         let _first = UnixStream::connect(dir.join(SOCKET_NAME)).unwrap();
         std::thread::sleep(Duration::from_millis(300));
@@ -787,13 +1112,27 @@ mod listener {
         drop(std::os::unix::net::UnixListener::bind(&socket).unwrap());
         let route = AgentRoute::default();
         route
-            .start(host.clone(), grant, own_uid(), &dir, fast())
+            .start(
+                host.clone(),
+                grant,
+                own_uid(),
+                ProgramCheck::Off,
+                &dir,
+                fast(),
+            )
             .unwrap();
         route.stop();
         // A file that isn't a socket where the socket goes: refused, and left alone.
         std::fs::write(&socket, "fake-not-a-socket").unwrap();
         assert_eq!(
-            route.start(host.clone(), grant, own_uid(), &dir, fast()),
+            route.start(
+                host.clone(),
+                grant,
+                own_uid(),
+                ProgramCheck::Off,
+                &dir,
+                fast()
+            ),
             Err(RouteError::NotSetUp)
         );
         assert_eq!(
@@ -802,7 +1141,9 @@ mod listener {
         );
         std::fs::remove_file(&socket).unwrap();
         // The socket replaced by something else while running: stop leaves that alone.
-        route.start(host, grant, own_uid(), &dir, fast()).unwrap();
+        route
+            .start(host, grant, own_uid(), ProgramCheck::Off, &dir, fast())
+            .unwrap();
         std::fs::remove_file(&socket).unwrap();
         std::fs::write(&socket, "fake-replacement").unwrap();
         route.stop();
@@ -819,7 +1160,7 @@ mod listener {
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
         let route = AgentRoute::default();
         assert_eq!(
-            route.start(host, grant, own_uid(), &dir, fast()),
+            route.start(host, grant, own_uid(), ProgramCheck::Off, &dir, fast()),
             Err(RouteError::NotSetUp)
         );
         assert!(!route.is_active());
@@ -843,7 +1184,14 @@ mod listener {
         let (host, grant, agent_id, _arrived) = unlocked();
         let route = AgentRoute::default();
         route
-            .start(host.clone(), grant, own_uid(), &dir, fast())
+            .start(
+                host.clone(),
+                grant,
+                own_uid(),
+                ProgramCheck::Off,
+                &dir,
+                fast(),
+            )
             .unwrap();
         let mut child = Command::new(tool)
             .args(["--owner-uid", &own_uid().to_string(), "--socket"])
@@ -900,7 +1248,14 @@ mod listener {
         let (host, grant, _agent_id, arrived) = unlocked();
         let route = AgentRoute::default();
         route
-            .start(host.clone(), grant, own_uid(), &dir, fast())
+            .start(
+                host.clone(),
+                grant,
+                own_uid(),
+                ProgramCheck::Off,
+                &dir,
+                fast(),
+            )
             .unwrap();
         let asking = {
             let dir = dir.clone();
@@ -921,5 +1276,154 @@ mod listener {
             json!({"v":1,"error":"cancelled"})
         );
         route.stop();
+    }
+
+    // ----- ADR-0013 against real programs: the kernel's record, a real socket -----
+
+    /// Apple's own `/usr/bin/nc`, in place of the agent's tool, and `/bin/bash` in place of
+    /// Claude Code or Codex: both are signed with hardened runtime, and any Mac has them.
+    const STAND_IN_TOOL: &str = "/usr/bin/nc";
+
+    /// The stand-in tool's code hash as `codesign` prints it, the way the owner gets the real
+    /// tool's from the setup script.
+    fn stand_in_tool_hash() -> [u8; 20] {
+        let out = std::process::Command::new("/usr/bin/codesign")
+            .args(["-dv", "--verbose=4", STAND_IN_TOOL])
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&out.stderr).into_owned();
+        let line = text
+            .lines()
+            .find(|line| line.starts_with("CDHash="))
+            .unwrap();
+        parse_tool_hash(line).unwrap()
+    }
+
+    fn bash_starts_the_tool(tool_hash: [u8; 20]) -> ProgramPolicy {
+        ProgramPolicy {
+            tool_cdhash: tool_hash,
+            starters: vec![Starter {
+                identity: "com.apple.bash".to_owned(),
+                team: None,
+                category: CATEGORY_PLATFORM,
+            }],
+        }
+    }
+
+    /// `/bin/bash` runs the stand-in tool, which sends one request and prints the reply. An
+    /// empty answer is a connection closed without a word.
+    fn ask_through_bash(dir: &Path, line: &str) -> String {
+        let socket = dir.join(SOCKET_NAME);
+        let out = std::process::Command::new("/bin/bash")
+            .arg("-c")
+            .arg(r#"printf '%s\n' "$1" | /usr/bin/nc -U "$2"; true"#)
+            .arg("bash")
+            .arg(line)
+            .arg(&socket)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    #[test]
+    fn the_kernel_says_who_a_running_program_is_and_who_started_it() {
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let pid = i32::try_from(child.id()).unwrap();
+        let seen = program_identity(pid);
+        let parent = parent_pid(pid);
+        child.kill().unwrap();
+        child.wait().unwrap();
+        let seen = seen.unwrap();
+        assert_eq!(seen.identity.as_deref(), Some("com.apple.sleep"));
+        assert_eq!(seen.team, None);
+        assert_eq!(seen.category, Some(CATEGORY_PLATFORM));
+        assert_eq!(seen.status & (CS_VALID | CS_RUNTIME), CS_VALID | CS_RUNTIME);
+        assert!(seen.cdhash.is_some());
+        assert_eq!(parent, Some(i32::try_from(std::process::id()).unwrap()));
+        // A process that has gone has nothing to say.
+        assert_eq!(program_identity(pid), None);
+        assert_eq!(parent_pid(pid), None);
+    }
+
+    #[test]
+    fn the_approved_tool_started_by_an_allowed_program_is_answered() {
+        let (_temp, dir) = folder();
+        let (host, grant, agent_id, _arrived) = unlocked();
+        let route = AgentRoute::default();
+        let policy = bash_starts_the_tool(stand_in_tool_hash());
+        route
+            .start(
+                host,
+                grant,
+                own_uid(),
+                ProgramCheck::Required(policy),
+                &dir,
+                fast(),
+            )
+            .unwrap();
+        let answer = ask_through_bash(&dir, r#"{"v":1,"op":"list"}"#);
+        route.stop();
+        assert_clean(&answer);
+        assert_eq!(reply(&answer)["keys"][0]["id"], json!(agent_id));
+    }
+
+    #[test]
+    fn the_wrong_starter_or_tool_is_closed_without_a_reply() {
+        let tool = stand_in_tool_hash();
+        let policies = [
+            // The real list: bash is neither Claude Code nor Codex.
+            ProgramPolicy::production(tool),
+            // Bash may start it, but this isn't the approved tool.
+            bash_starts_the_tool(parse_tool_hash(FAKE_TOOL_HASH).unwrap()),
+        ];
+        for policy in policies {
+            let (_temp, dir) = folder();
+            let (host, grant, _agent_id, _arrived) = unlocked();
+            let route = AgentRoute::default();
+            route
+                .start(
+                    host,
+                    grant,
+                    own_uid(),
+                    ProgramCheck::Required(policy.clone()),
+                    &dir,
+                    fast(),
+                )
+                .unwrap();
+            let answer = ask_through_bash(&dir, r#"{"v":1,"op":"list"}"#);
+            route.stop();
+            assert_eq!(answer, "", "{policy:?}");
+        }
+    }
+
+    #[test]
+    fn a_program_connecting_by_itself_is_closed_without_a_reply() {
+        let (_temp, dir) = folder();
+        let (host, grant, _agent_id, _arrived) = unlocked();
+        let route = AgentRoute::default();
+        let policy = ProgramPolicy::production(stand_in_tool_hash());
+        route
+            .start(
+                host,
+                grant,
+                own_uid(),
+                ProgramCheck::Required(policy),
+                &dir,
+                fast(),
+            )
+            .unwrap();
+        // This test program itself, not the approved tool and not started by an allowed one.
+        let mut stream = UnixStream::connect(dir.join(SOCKET_NAME)).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        let _ = stream.write_all(b"{\"v\":1,\"op\":\"list\"}\n");
+        let mut answer = Vec::new();
+        let _ = stream.read_to_end(&mut answer);
+        route.stop();
+        assert!(answer.is_empty(), "{}", String::from_utf8_lossy(&answer));
     }
 }

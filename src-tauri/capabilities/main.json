@@ -38,6 +38,7 @@
     "allow-agent-route-start",
     "allow-agent-route-stop",
     "allow-set-agent-account",
+    "allow-set-agent-tool-hash",
     "allow-show-field",
     "allow-show-wallet-field",
     "allow-show-and-copy-wallet-field",

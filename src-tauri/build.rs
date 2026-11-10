@@ -36,6 +36,7 @@ const COMMANDS: &[&str] = &[
     "agent_route_start",
     "agent_route_stop",
     "set_agent_account",
+    "set_agent_tool_hash",
     "show_field",
     "show_wallet_field",
     "show_and_copy_wallet_field",
