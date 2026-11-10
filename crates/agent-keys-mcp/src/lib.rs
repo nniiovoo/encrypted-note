@@ -1,4 +1,4 @@
-//! `enote-agent-keys`: the MCP tool an agent (Claude Code, the Claude app, Codex) runs in its own
+//! `enote-agent-keys`: the MCP tool an agent (Claude Code or Codex, ADR-0013) runs in its own
 //! Mac account to ask the encrypted-note app to store and look after keys (ADR-0012).
 //!
 //! What it guarantees:

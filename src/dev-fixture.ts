@@ -154,6 +154,7 @@ const agentRoute: AgentRouteView = {
   state: agentQuery as AgentRouteState,
   expires_in_ms: agentQuery === "running" ? 42 * 60_000 : null,
   account: "fake-agent",
+  tool_hash: "fa4efa4efa4efa4efa4efa4efa4efa4efa4efa4e",
 };
 const noteFor = (id: string) => views.find((note) => note.id === id)!;
 const requestFor = (kind: string): AgentPendingView | null => {
@@ -231,6 +232,9 @@ mockIPC(
         return undefined;
       case "agent_route_status":
       case "set_agent_account":
+        return agentRoute;
+      case "set_agent_tool_hash":
+        agentRoute.tool_hash = ((args as { hash: string | null }).hash ?? "").replace(/^cdhash=/i, "").trim().toLowerCase() || null;
         return agentRoute;
       case "agent_route_start":
         agentRoute.state = "running";

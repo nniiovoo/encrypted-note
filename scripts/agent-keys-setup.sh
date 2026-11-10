@@ -9,9 +9,11 @@
 #   --binary PATH  The agent's tool, enote-agent-keys (default: inside /Applications/encrypted-note.app).
 #
 # It creates /Users/Shared/encrypted-note-keys, owned by you, mode 700, with one ACL entry that
-# lets the agent account reach the app's socket inside it, and prints the lines that add the tool
-# to Claude Code, Codex or the Claude app in the agent account. It handles no key, copies nothing,
-# writes nothing in the agent's account and needs no administrator rights.
+# lets the agent account reach the app's socket inside it, prints the tool's code hash for you to
+# paste into the app's Settings (ADR-0013: only that build of the tool, started by Claude Code or
+# Codex, is answered), and prints the lines that add the tool to Claude Code or Codex in the agent
+# account. It handles no key, copies nothing, writes nothing in the agent's account and needs no
+# administrator rights.
 set -euo pipefail
 
 [[ $(uname -s) == Darwin ]] || { echo "Agents storing keys is set up on macOS only." >&2; exit 1; }
@@ -82,7 +84,7 @@ echo "==> the agent's tool ($BINARY)"
 # folder above it must be root's or yours, and writable by nobody else.
 binary_ok=1
 if [[ ! -f "$BINARY" || -L "$BINARY" ]]; then
-  echo "Not found (or a link): $BINARY. Build it with 'cargo build --release --locked -p agent-keys-mcp', put it where the agent account can run it but not change it, and pass --binary."
+  echo "Not found (or a link): $BINARY. Build it with 'cargo build --release --locked -p agent-keys-mcp', sign it with 'codesign --force --sign - --options runtime target/release/enote-agent-keys', put it where the agent account can run it but not change it, and pass --binary."
   binary_ok=0
 else
   path="$BINARY"
@@ -105,6 +107,25 @@ else
   done
 fi
 
+# ADR-0013: the app answers only the build of the tool whose code hash you paste into Settings,
+# and only if it has hardened runtime, so no other code can be loaded into it.
+TOOL_HASH=""
+if [[ $binary_ok == 1 ]]; then
+  signature=$(codesign -dv --verbose=4 "$BINARY" 2>&1) || signature=""
+  TOOL_HASH=$(sed -n 's/^CDHash=//p' <<<"$signature" | head -n 1)
+  if [[ ! $TOOL_HASH =~ ^[0-9a-f]{40}$ ]]; then
+    echo "Couldn't read the tool's code hash. Sign it with 'codesign --force --sign - --options runtime' before installing it, then run this again."
+    TOOL_HASH=""
+    binary_ok=0
+  elif ! grep -Eq '^CodeDirectory .*flags=0x[0-9a-f]+\([a-z,-]*runtime' <<<"$signature"; then
+    echo "The tool isn't signed with hardened runtime, so other code could be loaded into it, and the app won't answer it. Sign it with 'codesign --force --sign - --options runtime target/release/enote-agent-keys' before installing it, then run this again."
+    TOOL_HASH=""
+    binary_ok=0
+  else
+    echo "Code hash: CDHash=$TOOL_HASH"
+  fi
+fi
+
 QUOTED_BINARY=$(printf '%q' "$BINARY")
 cat <<EOF
 
@@ -122,10 +143,9 @@ a tool after 60 seconds unless told otherwise):
   args = ["--owner-uid", "$OWNER_UID"]
   tool_timeout_sec = 330
 
-The Claude app, in ~/Library/Application Support/Claude/claude_desktop_config.json:
-  { "mcpServers": { "enote-keys": { "command": "$BINARY", "args": ["--owner-uid", "$OWNER_UID"] } } }
-The Claude app may give up on a tool after about a minute, and that can't be changed here. If it
-does, the request stays open in the app: answer it there, and the agent checks with list_keys.
+Only Claude Code and Codex are answered (ADR-0013): the app checks that the tool was started by
+one of them, signed by Anthropic or OpenAI. Keep other programs out of $AGENT: any program there
+could start Claude Code or Codex itself.
 EOF
 
 if [[ $DRY_RUN == 1 ]]; then
@@ -133,7 +153,11 @@ if [[ $DRY_RUN == 1 ]]; then
   echo "Dry run: nothing was changed."
 else
   echo
-  echo "Done. Next, in the app: Settings → Agents storing keys, type $AGENT, then choose Start."
+  if [[ -n $TOOL_HASH ]]; then
+    echo "Done. Next, in the app: Settings → Agents storing keys, type $AGENT, paste CDHash=$TOOL_HASH as the tool's code hash, then choose Start."
+  else
+    echo "Done. Next, in the app: Settings → Agents storing keys, type $AGENT, paste the tool's code hash once the tool is fixed (see above), then choose Start."
+  fi
 fi
 if [[ $binary_ok == 0 ]]; then
   echo "Fix the tool's place before the agent uses it (see above)." >&2

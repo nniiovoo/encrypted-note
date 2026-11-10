@@ -773,7 +773,7 @@ export const strings = {
   agentKeysSummary: (state: string) => `Agents storing keys (optional) · ${state}`,
   agentKeysChecking: "Checking…",
   agentKeysIntro:
-    "Optional, and off unless you start it. While it is on, an agent in a separate Mac user can ask this app to store a key, list and change the details of the keys it added, and ask you to replace or delete one. You type every value here, and the agent never sees or uses one. It can't see your own Notes. This is separate from the Agent Companion.",
+    "Optional, and off unless you start it. While it is on, Claude Code or Codex in a separate Mac user can ask this app to store a key, list and change the details of the keys it added, and ask you to replace or delete one. You type every value here, and the agent never sees or uses one. It can't see your own Notes. This is separate from the Agent Companion.",
   agentKeysLeaves: "The names and visible details of the keys an agent adds reach that agent's AI company as part of the chat. Name them with that in mind.",
   agentKeysStates: {
     off: "Off",
@@ -787,8 +787,11 @@ export const strings = {
   agentAccountHint: "Its Account name from System Settings → Users & Groups, such as enote-agent. A Standard user, never yours or an admin. Changing it stops the agent's access.",
   agentAccountSave: "Save",
   agentAccountSaved: "Saved.",
+  agentToolHash: "The agent tool's code hash",
+  agentToolHashHint:
+    "Paste the CDHash line scripts/agent-keys-setup.sh prints. Only that build of the tool, started by Claude Code or Codex, is answered. Paste the new one after you install the tool again; changing it stops the agent's access.",
   agentKeysSetup:
-    "Before you start: make that Standard user, run scripts/agent-keys-setup.sh with its name from your own Mac user, and add the tool it prints to the agent there.",
+    "Before you start: make that Standard user, run scripts/agent-keys-setup.sh with its name from your own Mac user, paste the code hash it prints above, and add the tool it prints to Claude Code or Codex there.",
   agentKeysStart: "Start for up to one hour",
   agentKeysStartLocks: "Start asks you again in its own window. The hour ends early if the Vault locks.",
   agentKeysStop: "Stop",

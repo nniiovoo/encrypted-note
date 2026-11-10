@@ -50,6 +50,7 @@ const MSG_AGENT_VALUE_ONLY: &str =
     "Only the value can be changed here. Change the name or details in the Editor yourself.";
 const MSG_AGENT_NO_VALUE: &str = "Type the new value first, then choose Save.";
 const MSG_AGENT_ACCOUNT_NAME: &str = "That isn't a Mac account name. Use the Account name from System Settings → Users & Groups, such as enote-agent.";
+const MSG_AGENT_TOOL_HASH: &str = "That isn't a code hash. Paste the CDHash line that scripts/agent-keys-setup.sh prints: 40 letters and digits, 0-9 and a-f.";
 
 // ---------- shapes ----------
 
@@ -340,6 +341,41 @@ impl AppCore {
         self.settings.agent_account = name;
         if let Err(error) = self.write_settings() {
             self.settings.agent_account = before;
+            return Err(error);
+        }
+        self.agent_end(None);
+        Ok(())
+    }
+
+    /// The code hash of the agent's tool the owner approved (ADR-0013), as 40 lowercase hex
+    /// digits. Not a secret: it identifies a program, it doesn't unlock anything.
+    pub fn agent_tool_hash(&self) -> Option<String> {
+        self.settings.agent_tool_hash.clone()
+    }
+
+    /// The owner approves the agent tool's code hash (or clears it with `None` or `""`). Only
+    /// while Unlocked. Like a new account name, a new hash ends a running grant, so it takes
+    /// effect only through a new Start.
+    pub fn set_agent_tool_hash(&mut self, hash: Option<String>) -> Result<(), ApiError> {
+        self.tick();
+        self.open()?;
+        let hash = match hash
+            .as_deref()
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+        {
+            None => None,
+            Some(text) => Some(tool_hash_text(
+                &parse_tool_hash(text).ok_or_else(|| err("invalid_input", MSG_AGENT_TOOL_HASH))?,
+            )),
+        };
+        if hash == self.settings.agent_tool_hash {
+            return Ok(());
+        }
+        let before = self.settings.agent_tool_hash.clone();
+        self.settings.agent_tool_hash = hash;
+        if let Err(error) = self.write_settings() {
+            self.settings.agent_tool_hash = before;
             return Err(error);
         }
         self.agent_end(None);
@@ -948,6 +984,29 @@ pub fn is_account_name(name: &str) -> bool {
     bytes.next().is_some_and(|b| b.is_ascii_lowercase())
         && name.len() <= 31
         && bytes.all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
+}
+
+/// The agent tool's code hash as the owner pastes it (ADR-0013): the 20-byte hash `codesign`
+/// prints on its `CDHash=` line, as 40 hex digits, with or without that prefix.
+pub fn parse_tool_hash(text: &str) -> Option<[u8; 20]> {
+    let text = text.trim();
+    let hex = text
+        .strip_prefix("CDHash=")
+        .or_else(|| text.strip_prefix("cdhash="))
+        .unwrap_or(text);
+    if hex.len() != 40 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let mut hash = [0u8; 20];
+    for (i, byte) in hash.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).ok()?;
+    }
+    Some(hash)
+}
+
+/// The same hash written the one way it is kept: 40 lowercase hex digits.
+pub fn tool_hash_text(hash: &[u8; 20]) -> String {
+    hash.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// A suggestion names only visible fields an agent may describe, with a title.

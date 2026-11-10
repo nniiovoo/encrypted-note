@@ -535,6 +535,8 @@ export interface AgentRouteView {
   expires_in_ms: number | null;
   /** The Mac account named for the agent, if any. Not a secret. */
   account: string | null;
+  /** The approved code hash of the agent's tool (ADR-0013), 40 hex digits, if any. Not a secret. */
+  tool_hash: string | null;
 }
 
 export const agentRouteStatus = () => invoke<AgentRouteView>("agent_route_status");
@@ -544,3 +546,6 @@ export const agentRouteStart = () => invoke<AgentRouteView>("agent_route_start")
 export const agentRouteStop = () => invoke<AgentRouteView>("agent_route_stop");
 /** null or "" clears it. A running grant ends: a new name needs a new Start. */
 export const setAgentAccount = (account: string | null) => invoke<AgentRouteView>("set_agent_account", { account });
+/** The CDHash line the setup script prints, or just its 40 hex digits; null or "" clears it.
+ *  A running grant ends: a new tool needs a new Start. */
+export const setAgentToolHash = (hash: string | null) => invoke<AgentRouteView>("set_agent_tool_hash", { hash });
